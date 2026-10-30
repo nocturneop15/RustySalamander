@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use sal_core::location;
 use sal_plugin_api::abi::{self, Descriptor, HostApi, Str, StrOut};
 use sal_plugin_api::host::{self, Info};
-pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Reply, Values};
+pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Reply, Results, Values};
 
 /// An open connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,16 +36,49 @@ pub struct Connection {
     /// The folder it opened in (the user's home on a server); the drive
     /// selector goes there.
     pub start: PathBuf,
+    /// Results a plugin filled (a search): closed, not disconnected.
+    pub results: bool,
+    /// What the drive selector and the Plugins menu call it (results have
+    /// a name of their own); empty for its path.
+    pub name: String,
+    /// The plugin command that fills results again (`Results::refresh`).
+    pub refresh: String,
 }
 
 /// Open connections, in the order they were opened.
 static MOUNTS: Mutex<Vec<Connection>> = Mutex::new(Vec::new());
 
-/// Remember a connection the plugin `id` opened at `start`.
-pub fn add_mount(root: &Path, id: &str, start: &Path) {
+/// Remember a connection the plugin `id` opened at `start`; `results` are
+/// the name and the refresh command of results it fills (a search).
+pub fn add_mount(root: &Path, id: &str, start: &Path, results: Option<(&str, &str)>) {
     let mut m = MOUNTS.lock().unwrap();
     m.retain(|c| c.root != root);
-    m.push(Connection { root: root.to_path_buf(), plugin: id.to_owned(), start: start.to_path_buf() });
+    let (name, refresh) = results.unwrap_or_default();
+    m.push(Connection {
+        root: root.to_path_buf(),
+        plugin: id.to_owned(),
+        start: start.to_path_buf(),
+        results: results.is_some(),
+        name: name.to_owned(),
+        refresh: refresh.to_owned(),
+    });
+}
+
+/// Forget the connections of these plugins (turned off: stopping a plugin
+/// ended them).
+pub fn forget_mounts_of(stopped: &[String]) {
+    MOUNTS.lock().unwrap().retain(|c| !stopped.contains(&c.plugin));
+}
+
+/// The name of the results at `root` (a search), if it has one: the path
+/// bar, the drive button and the banner show it instead of the address.
+pub fn results_name(root: &Path) -> Option<String> {
+    MOUNTS.lock().unwrap().iter().find(|c| c.root == root && c.results && !c.name.is_empty()).map(|c| c.name.clone())
+}
+
+/// Whether `root` holds results a plugin filled (closed, not disconnected).
+pub fn is_results(root: &Path) -> bool {
+    MOUNTS.lock().unwrap().iter().any(|c| c.root == root && c.results)
 }
 
 /// Forget a connection (after the plugin closed it).

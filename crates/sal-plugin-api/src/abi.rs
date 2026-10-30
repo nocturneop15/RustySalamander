@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
 /// changes; the program skips plugins built for another version.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The name of the function every plugin exports:
 /// `extern "C" fn rustysalamander_plugin() -> *const Descriptor`.
@@ -137,6 +137,34 @@ impl StrOut {
     /// `self` must come from the other side and be valid for this call.
     pub unsafe fn send(&self, s: &str) {
         (self.put)(self.ctx, Str::new(s));
+    }
+}
+
+/// Receives a path from the other side, which `put` copies.
+#[repr(C)]
+pub struct PathOut {
+    /// The receiver's data, passed back to `put`.
+    pub ctx: *mut c_void,
+    /// Takes the path; it is valid only during this call.
+    pub put: unsafe extern "C" fn(ctx: *mut c_void, p: Wide),
+}
+
+unsafe extern "C" fn put_path(ctx: *mut c_void, p: Wide) {
+    *(ctx as *mut Option<PathBuf>) = Some(p.path());
+}
+
+impl PathOut {
+    /// A receiver that writes into `p`.
+    pub fn new(p: &mut Option<PathBuf>) -> PathOut {
+        PathOut { ctx: p as *mut Option<PathBuf> as *mut c_void, put: put_path }
+    }
+    /// Sends `p` to the receiver.
+    ///
+    /// # Safety
+    /// `self` must come from the other side and be valid for this call.
+    pub unsafe fn send(&self, p: &Path) {
+        let units = Wide::encode(p);
+        (self.put)(self.ctx, Wide::of(&units));
     }
 }
 
@@ -260,6 +288,14 @@ pub struct VTable {
     pub run: unsafe extern "C" fn(this: *mut c_void, command: Str, values: Str, out: *const StrOut, error: *const StrOut) -> i32,
     /// [`crate::FolderPlugin::close`].
     pub close: unsafe extern "C" fn(this: *mut c_void, root: Wide),
+    /// [`crate::FolderPlugin::activity`]: returns [`crate::Activity::running`],
+    /// the text goes to `out`.
+    pub activity: unsafe extern "C" fn(this: *mut c_void, root: Wide, out: *const StrOut) -> bool,
+    /// [`crate::FolderPlugin::stop`].
+    pub stop: unsafe extern "C" fn(this: *mut c_void, root: Wide),
+    /// [`crate::FolderPlugin::real_path`]: the path goes to `out`, which isn't
+    /// called for `None`.
+    pub real_path: unsafe extern "C" fn(this: *mut c_void, file: Wide, inner: Str, out: *const PathOut),
 }
 
 // Only pointers to static data and functions, or to data the program keeps

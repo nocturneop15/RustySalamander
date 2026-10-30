@@ -13,6 +13,7 @@
 //! - `dialogwin`: dialogs in their own native windows
 //! - `i18n`: translations
 //! - `update`: new releases on GitHub, and installing them
+//! - `results`: the results window of a plugin's connection (search results)
 //! - the rest: icons, fonts, context menus, shortcuts, folder sizes
 
 // a release build has no console window; debug builds keep one for logs
@@ -31,6 +32,7 @@ mod icons;
 mod keymap;
 mod panel;
 mod plugins;
+mod results;
 mod shellmenu;
 mod shortcut;
 #[cfg(test)]

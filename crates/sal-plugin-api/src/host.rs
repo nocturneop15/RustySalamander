@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::abi::*;
-use crate::{Command, FolderPlugin, Index, Item, Progress, Reply, Values};
+use crate::{Activity, Command, FolderPlugin, Index, Item, Progress, Reply, Values};
 
 /// Who a plugin is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +172,25 @@ impl FolderPlugin for Remote {
         let root = Wide::encode(root);
         unsafe { (self.vt.close)(self.this, Wide::of(&root)) }
     }
+
+    fn activity(&self, root: &Path) -> Activity {
+        let root = Wide::encode(root);
+        let mut text = String::new();
+        let running = unsafe { (self.vt.activity)(self.this, Wide::of(&root), &StrOut::new(&mut text)) };
+        Activity { running, text }
+    }
+
+    fn stop(&self, root: &Path) {
+        let root = Wide::encode(root);
+        unsafe { (self.vt.stop)(self.this, Wide::of(&root)) }
+    }
+
+    fn real_path(&self, file: &Path, inner: &str) -> Option<PathBuf> {
+        let file = Wide::encode(file);
+        let mut out = None;
+        unsafe { (self.vt.real_path)(self.this, Wide::of(&file), Str::new(inner), &PathOut::new(&mut out)) };
+        out
+    }
 }
 
 #[cfg(test)]
@@ -256,6 +275,16 @@ mod tests {
         fn close(&self, root: &Path) {
             self.closed.lock().unwrap().push(root.to_path_buf());
         }
+        fn activity(&self, root: &Path) -> Activity {
+            let stopped = self.closed.lock().unwrap().iter().any(|r| r == root);
+            Activity { running: !stopped, text: format!("hledám v {} 🦎", root.display()) }
+        }
+        fn stop(&self, root: &Path) {
+            self.closed.lock().unwrap().push(root.to_path_buf());
+        }
+        fn real_path(&self, _: &Path, inner: &str) -> Option<PathBuf> {
+            (!inner.is_empty()).then(|| PathBuf::from(r"D:\data").join(inner))
+        }
     }
 
     impl Plugin for Mem {
@@ -332,6 +361,13 @@ mod tests {
         let Reply::Mount(m) = p.run(&form.command, &input).unwrap() else { panic!("no mount") };
         assert_eq!(m.root(), crate::mount_root("mem", "ram 🦎"));
         assert_eq!(p.run("nothing", &Values::new()).unwrap_err().to_string(), "no");
+        // a job filling a connection, stopped; items standing for files on disk
+        let root = m.root();
+        assert_eq!(p.activity(&root), Activity { running: true, text: format!("hledám v {} 🦎", root.display()) });
+        p.stop(&root);
+        assert!(!p.activity(&root).running);
+        assert_eq!(p.real_path(&root, "složka\\日本.txt"), Some(PathBuf::from(r"D:\data\složka\日本.txt")));
+        assert_eq!(p.real_path(&root, ""), None);
         p.close(&m.root());
         drop(p);
         std::fs::remove_dir_all(&t).unwrap();

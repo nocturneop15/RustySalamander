@@ -9,6 +9,7 @@
 //!   gcc). Without a working toolchain the program is built anyway, without
 //!   it.
 //! - The SCP plugin (`plugins/scp`) goes to `plugins\scp\scp.spl`.
+//! - The search plugin (`plugins/search`) goes to `plugins\search\search.spl`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,6 +39,9 @@ fn main() {
     }
     if let Err(e) = install_plugin(manifest, profile_dir, "sal-plugin-scp", "scp", "scp") {
         println!("cargo:warning=the SCP plugin was not built: {e}");
+    }
+    if let Err(e) = install_plugin(manifest, profile_dir, "sal-plugin-search", "search", "search") {
+        println!("cargo:warning=the search plugin was not built: {e}");
     }
 }
 

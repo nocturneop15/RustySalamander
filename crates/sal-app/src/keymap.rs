@@ -49,6 +49,7 @@ pub enum Action {
     SortExt,
     SortTime,
     SortSize,
+    Find,
 }
 
 pub struct ActionInfo {
@@ -101,14 +102,14 @@ impl Action {
         use Action::*;
         match self {
             View | Edit | Copy | Move | Rename | MkDir | Delete | DeletePermanent | CopyPaths | SelectAll | UnselectAll | SelectCalcSize | CalcSelectionSize | ContextMenu
-            | Properties => Section::Files,
+            | Properties | Find => Section::Files,
             ChangeDir | Parent | EnterDir | Root | HistoryBack | HistoryForward | DriveMenuLeft | DriveMenuRight | ToggleQuickSearchMode => Section::Navigation,
             SortName | SortExt | SortTime | SortSize | Refresh | ToggleHidden | ToggleSystem | ToggleTheme | SwapPanels | Terminal | Settings | Help | Exit => Section::System,
         }
     }
 
     /// Grouped by section (files, navigation, system).
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 38] = [
         Action::View,
         Action::Edit,
         Action::Copy,
@@ -124,6 +125,7 @@ impl Action {
         Action::CalcSelectionSize,
         Action::ContextMenu,
         Action::Properties,
+        Action::Find,
         Action::ChangeDir,
         Action::Parent,
         Action::EnterDir,
@@ -174,6 +176,7 @@ impl Action {
             Properties => info("properties", n_("Properties"), &["Alt+Enter"], &[]),
             CalcSelectionSize => info("calc_size", n_("Calculate selection size"), &["Alt+F10"], &["Ctrl+Q"]),
             SelectCalcSize => info("select_size", n_("Select + calculate folder size"), &["Shift+Space"], &["Space", "Ctrl+Space"]),
+            Find => info("find", n_("Find files"), &["Alt+F7"], &["Ctrl+F"]),
             CopyPaths => info("copy_paths", n_("Copy full paths"), &["Ctrl+Shift+C"], &[]),
             SortName => info("sort_name", n_("Sort by name"), &["Ctrl+F3"], &[]),
             SortExt => info("sort_ext", n_("Sort by extension"), &["Ctrl+F4"], &[]),

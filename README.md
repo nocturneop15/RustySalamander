@@ -160,6 +160,24 @@ Archives open as folders in the panel. **Enter** on `archive.zip` shows what is 
 - **Disconnecting:** **Plugins → Disconnect from …** lists every open session, one per row (the menu widens to fit), or use the drive selector's Disconnect button; panels go back to the folder they showed before. Quitting the program disconnects too.
 - **Limits:** no SFTP, no saved sites yet, and a lost connection needs a disconnect and a new connection. Panels of a server are refreshed with Ctrl+R, not automatically.
 
+## Finding files (the search plugin)
+
+**Plugins → Find files…** (Alt+F7) opens the search form:
+
+- **Names:** wildcard masks such as `*.txt;*.md`, with masks to leave out after `|` (`*.log|old*`), as in Salamander, or a regular expression (found anywhere in the name; `^…$` for whole names).
+- **Look in:** the folder to search (the active panel's folder to start with), with or without its subfolders. Hidden and system items can be left out; symbolic links and junctions are listed but not entered.
+- **Containing text:** optional. Plain text is found in UTF-8, ANSI and UTF-16 files, in any case unless **Match case** is on; or the text is a regular expression (`^` and `$` match at line starts and ends).
+- **Find folders too:** folders whose names match are results as well (not when looking for text).
+
+The search runs in the background. The results window shows the results as they are found, with what is being searched and the counts; columns sort with a click. **Open** (Enter or a double-click) opens a found file with its program, or a found folder in the active panel; F3 views and F4 edits the selected file. **Go to file** shows a result in its folder in the active panel. **Stop** ends a search early, **New search…** opens the form again with the last values, and **Refresh** runs the same search again into the same results (panels showing them follow).
+
+The results can also be browsed in a panel, in two ways:
+
+- **Show filtered folders** (`search://1`): the searched folder as a filter over the file system. Its folders are all there to browse, but they hold only what was found, so a match deep down is reached through the folders above it.
+- **Show all in one list** (`search://1-list`): everything found, files and folders, in one list without the folders leading to them. Items with the same name are numbered (`zpráva (2).txt`); Go to file and the results window show where each one is. A found folder opens to what it really contains.
+
+The path bar names them by what was searched for (`🔍 *.txt "hello" · Documents (filtered folders) › docs`); `search://1/docs` is their address, shown in tooltips and accepted when typed. In both, Enter, F3 and F4 open, view and edit the real files, F5 copies the results out (in the filtered folders, with the folders between), F8 moves them to the Recycle Bin and F2 renames them. Closing the window ends the results unless a panel shows them; then they stay in the drive selector under **Searches**, by name (`🔍 *.txt "hello" · Documents (all in one list)`), with **Refresh** (the same search again) and **Close** (or Delete), until closed there or in the Plugins menu, or until the Search plugin is turned off. A new search keeps the earlier ones; a session keeps the last 10, closing the oldest.
+
 ## Plugins
 
 Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each lives in its own folder under `plugins` next to `rustysalamander.exe`, with whatever it needs (`plugins\7zip\7zip.spl` and `7z.dll`). When the program starts, it looks at `plugins\*.spl` and `plugins\<folder>\*.spl`, so a plugin is installed by copying its folder there and removed by deleting it. Files that aren't usable plugins (not a DLL, made for another version of the interface, an id already taken) are listed in Settings with the reason. `RUSTYSALAMANDER_PLUGINS` names another plugins folder.

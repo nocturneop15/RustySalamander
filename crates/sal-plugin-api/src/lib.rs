@@ -36,7 +36,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::SystemTime;
 
 pub use export::{n_, tr, trf};
-pub use ui::{Command, Field, FieldKind, Form, Mount, Reply, Values};
+pub use ui::{Command, Field, FieldKind, Form, Mount, Reply, Results, Values};
 
 /// The attribute bit of folders (`FILE_ATTRIBUTE_DIRECTORY`).
 pub const ATTR_DIRECTORY: u32 = 0x10;
@@ -102,6 +102,38 @@ pub trait FolderPlugin: Send + Sync {
     fn close(&self, root: &Path) {
         let _ = root;
     }
+
+    /// What the plugin is doing for the connection `root` on its own, such
+    /// as a search filling it with results; the program shows it in the
+    /// connection's results window ([`Reply::Results`]) and asks again while
+    /// [`Activity::running`]. The default is nothing.
+    fn activity(&self, root: &Path) -> Activity {
+        let _ = root;
+        Activity::default()
+    }
+    /// Stop what [`FolderPlugin::activity`] reports as running; what was done
+    /// so far stays.
+    fn stop(&self, root: &Path) {
+        let _ = root;
+    }
+    /// The file or folder on disk the item `inner` stands for, when it is
+    /// one (search results, a list of files). The program then opens, views
+    /// and edits that file itself instead of a temporary copy, and can show
+    /// it in its folder. The default is `None`: items exist only inside.
+    fn real_path(&self, file: &Path, inner: &str) -> Option<PathBuf> {
+        let _ = (file, inner);
+        None
+    }
+}
+
+/// What a plugin is doing for one of its connections
+/// ([`FolderPlugin::activity`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// Still working: the program asks again in a moment, and offers Stop.
+    pub running: bool,
+    /// One line about it, translated ("Searching C:\Users… 12 found").
+    pub text: String,
 }
 
 /// What a plugin DLL says about itself and how it starts.

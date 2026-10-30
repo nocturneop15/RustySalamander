@@ -335,6 +335,35 @@ mod imp {
         Some(PathBuf::from(std::ffi::OsString::from_wide(&file[..n])))
     }
 
+    /// The standard folder picker (a plugin form's Browse… for a folder),
+    /// starting in `current` when it exists. Never in tests.
+    pub fn pick_folder(owner: Option<isize>, title: &str, current: Option<&Path>) -> Option<PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_INPROC_SERVER};
+        use windows::Win32::UI::Shell::{FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH};
+        if cfg!(test) {
+            return None;
+        }
+        unsafe {
+            let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            let options = dialog.GetOptions().ok()?;
+            dialog.SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+            let title = wide(title);
+            let _ = dialog.SetTitle(PCWSTR(title.as_ptr()));
+            if let Some(dir) = current.filter(|d| d.is_dir()) {
+                let dir = wide(&dir.to_string_lossy());
+                if let Ok(item) = SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(dir.as_ptr()), None) {
+                    let _ = dialog.SetFolder(&item);
+                }
+            }
+            dialog.Show(owner.map(hwnd).unwrap_or_default()).ok()?;
+            let name = dialog.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path = PathBuf::from(std::ffi::OsString::from_wide(name.as_wide()));
+            CoTaskMemFree(Some(name.0 as *const _));
+            Some(path)
+        }
+    }
+
     /// Diagnostics (SAL_DIAG_MENU set): log to stderr.
     pub fn diag(msg: &str) {
         if std::env::var_os("SAL_DIAG_MENU").is_some() {
@@ -404,7 +433,7 @@ mod imp {
 #[cfg(all(windows, test))]
 use imp::verbs;
 #[cfg(windows)]
-pub use imp::{arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_program, screen_point, set_menu_theme, show_classic, show_native};
+pub use imp::{arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_native};
 
 #[cfg(not(windows))]
 mod fallback {
@@ -428,13 +457,16 @@ mod fallback {
     pub fn pick_file(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
         None
     }
+    pub fn pick_folder(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
+        None
+    }
     pub fn pick_program(_: Option<isize>, _: &str) -> Option<String> {
         None
     }
 }
 
 #[cfg(not(windows))]
-pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_program, screen_point, set_menu_theme, show_classic, show_native};
+pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_native};
 
 #[cfg(all(test, windows))]
 mod tests {

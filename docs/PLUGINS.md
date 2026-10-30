@@ -7,6 +7,7 @@ Three plugins in this repository serve as references:
 - **`plugins/example-filelist`**: a small, complete example (about 200 lines with its test). It shows `*.filelist` text files (one path per line) as folders. Read it next to this guide.
 - **`plugins/sevenzip`**: the 7-Zip archive plugin, a real-world plugin that drives a third-party library (`7z.dll`).
 - **`plugins/scp`**: the SCP plugin. It adds a command to the Plugins menu, asks for the server and password in a form, and shows the server's files in a panel as a *connection*.
+- **`plugins/search`**: the search plugin. Its form starts a search in the background; the program shows the results in a results window while they come in (`Reply::Results`), and they are a connection too, browsed in a panel as a virtual folder of real files (`real_path`).
 
 The API reference is the rustdoc of `crates/sal-plugin-api`. To open it, run `cargo doc -p sal-plugin-api --open`.
 
@@ -204,6 +205,7 @@ A plugin can add commands to the **Plugins** menu (`commands()`), each with an i
 | `Message(text)` | Shows the text in a message box titled with the plugin's name. |
 | `Form(form)` | Shows the form as a dialog. OK runs `form.command` with the values entered. |
 | `Mount(mount)` | Opens the connection in the active panel, at `mount.folder`. |
+| `Results(results)` | Opens a results window for the connection `results.mount`, titled `results.title`, which the plugin may still be filling (see [Results windows](#results-windows)). |
 
 An error from `run` is shown as a message, except `Interrupted`.
 
@@ -214,6 +216,7 @@ An error from `run` is shown as a message, except `Interrupted`.
 | `Text` | a text box | the text |
 | `Password` | a text box showing dots | the text; the program never saves it |
 | `File` | a text box with a Browse… button (the Windows "Open" dialog) | the path |
+| `Folder` | a text box with a Browse… button that picks a folder | the path |
 | `Choice(options)` | radio buttons, one per `(value, label)` | the chosen value |
 | `Check` | a check box | `"1"` or `""` |
 | `Note` | text to read (`label`), no input | — |
@@ -233,6 +236,20 @@ An error from `run` is shown as a message, except `Interrupted`.
 - `folder` is the inner path to start in (`home\me`).
 
 The program remembers the connection and shows it in the active panel. The file operations then reach the plugin with `Mount::root()` as `file`. The menu offers **Disconnect** for a panel showing a connection. Disconnecting, turning the plugin off or quitting calls `close(root)`, and panels showing the connection go back to the folder they showed before. A plugin keeps its connections itself, typically in a `Mutex<HashMap<authority, Connection>>`.
+
+### Results windows
+
+`Reply::Results(Results { title, name, mount, flat, again })` is for work that fills a connection while the user watches, such as a search. The program registers the connection like `Reply::Mount` does, but instead of opening it in a panel it opens a results window: a list of every item `list(root, "")` returns (name, folder, size, date; sortable), refreshed while the plugin works, and the buttons **Go to file**, **Show filtered folders** (the connection in the active panel), **Show all in one list** (the connection `flat`, if not empty), **Stop**, **New search…** (runs `again`, if not empty), **Refresh** (runs `refresh`, if not empty, with `results` set to the root of `mount`; it must fill the same connections again) and **Close**. A session keeps the last 10 results; older ones are closed.
+
+`flat` is the authority of a second connection of the same scheme with the same results in one list (the search plugin uses `<n>-list`). The program registers both, and closing the window closes each one no panel shows. Each is closed once (`close(root)`), so a plugin keeping one job behind both counts them. Results connections are listed under **Searches** in the drive selector and the Plugins menu, by `name` (a short name such as `*.txt "hello" · Documents`; the title when empty), and offered for **Close** instead of Disconnect. In the window, Open (Enter, double-click), F3 and F4 open, view and edit the item's `real_path`.
+
+Three methods of `FolderPlugin` serve it; each has a default, so other plugins ignore them:
+
+- `activity(root) -> Activity { running, text }`: what the plugin is doing for the connection. The window shows `text` as its status line and asks again every 0.4 s while `running`, then every 3 s.
+- `stop(root)`: the window's Stop button. Keep what was done so far.
+- `real_path(file, inner) -> Option<PathBuf>`: the file on disk an item stands for. Go to file shows it in its folder, and Enter, F3 and F4 open, view and edit that file itself instead of a temporary copy (in any connection or archive whose items have one).
+
+A search runs on a thread of the plugin's own, started by `run`, which returns at once. The search plugin keeps its searches in a `Mutex<HashMap<authority, Arc<Job>>>`, with atomic counters and a `Mutex<Vec<Found>>` the search thread fills and `list` and `activity` read.
 
 **Security.** Passwords reach the plugin only in `values`; don't log them, put them in error messages, or save them (the SCP plugin saves the last server, port, user and key path, never a password). Check what a server proves about itself (the SCP plugin verifies host keys against `known_hosts` and asks before trusting a new one), and treat every name a server sends as untrusted (see [Rules and pitfalls](#rules-and-pitfalls)).
 
@@ -344,7 +361,7 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 
 Commands, replies, forms and values cross the interface as text: lists of strings, each encoded as `<length>:<bytes>,` (`sal_plugin_api::ui::encode`). This way forms can gain new kinds of fields without changing the function table.
 
-**Versioning.** `abi::VERSION` (now 3) changes with every incompatible change to the interface. The program skips plugins built for another version and says so in Settings, so rebuild plugins against the matching `sal-plugin-api`. The interface is young (this is an alpha), so expect it to change between releases.
+**Versioning.** `abi::VERSION` (now 4: `activity`, `stop`, `real_path`, `Reply::Results` and `FieldKind::Folder` are new) changes with every incompatible change to the interface. The program skips plugins built for another version and says so in Settings, so rebuild plugins against the matching `sal-plugin-api`. The interface is young (this is an alpha), so expect it to change between releases.
 
 ## Checklist
 

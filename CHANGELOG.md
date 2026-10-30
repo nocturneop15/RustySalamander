@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0-alpha (2026-10-30)
+
+### Search plugin (new)
+
+- **Find files** (Plugins → Find files…, Alt+F7): by name, with wildcard masks (`*.txt;*.md|old*`) or a regular expression; in a folder, with or without subfolders; folders too if wanted; hidden and system items optionally left out. Symbolic links and junctions are never entered, so a search can't loop.
+- **Text inside files:** plain text, found in UTF-8, ANSI and UTF-16 files (any case unless Match case is on), or a regular expression. Large files are read in pieces, and a search stops at once when asked.
+- **Results window:** the results appear while the search runs, with the folder being searched and the counts; sort by name, folder, size or date; Open (Enter, double-click) opens a found file with its program or a found folder in the panel, F3 views and F4 edits; Go to file shows a result in its folder in the active panel; Stop; New search… with the last values; Refresh searches again with the same settings into the same results.
+- **Results in a panel, two ways:** Show filtered folders opens them as `search://1`, the searched folder as a filter (its folders, holding only what was found); Show all in one list opens `search://1-list`, everything found, files and folders, in one list (repeated names numbered; a found folder opens to its real contents). Enter, F3 and F4 open the real files; F5 copies the results out, F8 moves them to the Recycle Bin, F2 renames them.
+- **Named in the path bar:** a panel showing search results says what they are, `🔍 *.txt "hello" · Documents (filtered folders) › docs`, instead of `search://1/docs`, and so do its drive button and banner; the address is in the tooltips and is what a typed path uses.
+- **Searches, not connections:** the drive selector and the Plugins menu list search results under **Searches**, by a name saying what was looked for and where (`*.txt "hello" · Documents (filtered folders)`), with **Refresh** (the same search again) and **Close** instead of Disconnect. A new search keeps the earlier ones; a session keeps the last 10.
+
+### Plugins
+
+- **Plugin interface version 4:** results windows (`Reply::Results`, with `activity`, `stop` and `real_path`) and folder fields in forms (`FieldKind::Folder`, with a folder picker). Plugins built for 0.3 must be rebuilt. `docs/PLUGINS.md` has a new section on results windows.
+- **Drive selector shows every row:** it is as tall as its drives, connections, searches and recent paths, and moves up over the window when the room below the path bar isnt enough; it scrolls only when the list is taller than the whole window, also with display scaling and after rows were added (it used to keep the height it had when first shown, at most 400 points).
+- **Update window:** the download progress bar has square corners, like the other progress bars.
+- **Turning a plugin off** ends its connections and searches at once: they leave the drive selector and the Plugins menu.
+- **Real files behind plugin items:** where a plugin says which file on disk an item is, Enter, F3 and F4 open that file itself instead of a temporary copy.
+
 ## 0.3.1-alpha (2026-10-30)
 
 - **No changes:** a release to try the update from 0.3.0 (Help → Check for updates… → Update now).

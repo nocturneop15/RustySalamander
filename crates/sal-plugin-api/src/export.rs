@@ -69,6 +69,9 @@ pub const fn vtable<T: Plugin>() -> VTable {
         commands: commands::<T>,
         run: run_command::<T>,
         close: close::<T>,
+        activity: activity::<T>,
+        stop: stop::<T>,
+        real_path: real_path::<T>,
     }
 }
 
@@ -207,4 +210,20 @@ unsafe extern "C" fn run_command<T: Plugin>(this: *mut c_void, command: Str, val
 
 unsafe extern "C" fn close<T: Plugin>(this: *mut c_void, root: Wide) {
     let _ = catch_unwind(|| me::<T>(this).close(&root.path()));
+}
+
+unsafe extern "C" fn activity<T: Plugin>(this: *mut c_void, root: Wide, out: *const StrOut) -> bool {
+    let a = catch_unwind(|| me::<T>(this).activity(&root.path())).unwrap_or_else(|p| crate::Activity { running: false, text: panic_text(&*p) });
+    (*out).send(&a.text);
+    a.running
+}
+
+unsafe extern "C" fn stop<T: Plugin>(this: *mut c_void, root: Wide) {
+    let _ = catch_unwind(|| me::<T>(this).stop(&root.path()));
+}
+
+unsafe extern "C" fn real_path<T: Plugin>(this: *mut c_void, file: Wide, inner: Str, out: *const PathOut) {
+    if let Ok(Some(p)) = catch_unwind(|| me::<T>(this).real_path(&file.path(), inner.get())) {
+        (*out).send(&p);
+    }
 }

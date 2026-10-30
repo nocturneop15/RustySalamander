@@ -38,6 +38,38 @@ pub enum Reply {
     Form(Form),
     /// Open this connection in the active panel.
     Mount(Mount),
+    /// Show a window with the items of this connection, which the plugin may
+    /// still be filling ([`crate::FolderPlugin::activity`]), such as search
+    /// results. From the window the user goes to an item's file
+    /// ([`crate::FolderPlugin::real_path`]) or opens the connection in a
+    /// panel.
+    Results(Results),
+}
+
+/// A results window ([`Reply::Results`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Results {
+    /// The window title (translated), e.g. what was searched for.
+    pub title: String,
+    /// A short name for the results in the drive selector and the Plugins
+    /// menu (`*.txt "hello" · Documents`); empty for the title.
+    pub name: String,
+    /// The connection holding the results. Shown in a panel ("Show filtered
+    /// folders"), it is usually a filter over the searched folder: its
+    /// folders, holding only what was found.
+    pub mount: Mount,
+    /// The authority of a second connection (same scheme) with all results
+    /// in one list, without the folders leading to them ("Show all in one
+    /// list"); empty for none. The
+    /// program registers and closes it together with `mount`.
+    pub flat: String,
+    /// The command the window's "New search…" button runs again (usually
+    /// the one that showed the form); empty for no such button.
+    pub again: String,
+    /// The command the window's "Refresh" button runs, with `results` (the
+    /// root of `mount`) in its values: it fills the same connections again
+    /// as they were first filled (the same search). Empty for no such button.
+    pub refresh: String,
 }
 
 /// A dialog the program shows for the plugin.
@@ -79,6 +111,8 @@ pub enum FieldKind {
     Password,
     /// A path, with a Browse… button.
     File,
+    /// A folder, with a Browse… button that picks folders.
+    Folder,
     /// One of these `(value, label)` options, shown as radio buttons.
     Choice(Vec<(String, String)>),
     /// A check box.
@@ -160,6 +194,7 @@ fn encode_field(f: &Field) -> String {
         FieldKind::Text => ("text", String::new()),
         FieldKind::Password => ("password", String::new()),
         FieldKind::File => ("file", String::new()),
+        FieldKind::Folder => ("folder", String::new()),
         FieldKind::Choice(options) => ("choice", encode(&options.iter().flat_map(|(v, l)| [v.as_str(), l.as_str()]).collect::<Vec<_>>())),
         FieldKind::Check => ("check", String::new()),
         FieldKind::Note => ("note", String::new()),
@@ -176,6 +211,7 @@ fn decode_field(s: &str) -> Option<Field> {
         "text" => FieldKind::Text,
         "password" => FieldKind::Password,
         "file" => FieldKind::File,
+        "folder" => FieldKind::Folder,
         "choice" => FieldKind::Choice(decode(&choices)?.as_chunks::<2>().0.iter().map(|c| (c[0].clone(), c[1].clone())).collect()),
         "check" => FieldKind::Check,
         "note" => FieldKind::Note,
@@ -191,6 +227,7 @@ pub(crate) fn encode_reply(r: &Reply) -> String {
         Reply::Done => encode(&["done"]),
         Reply::Message(text) => encode(&["message", text]),
         Reply::Mount(m) => encode(&["mount", &m.scheme, &m.authority, &m.folder]),
+        Reply::Results(r) => encode(&["results", &r.title, &r.mount.scheme, &r.mount.authority, &r.mount.folder, &r.flat, &r.again, &r.name, &r.refresh]),
         Reply::Form(f) => {
             let mut parts = vec!["form".to_owned(), f.title.clone(), f.ok.clone(), f.command.clone()];
             parts.extend(f.fields.iter().map(encode_field));
@@ -205,6 +242,14 @@ pub(crate) fn decode_reply(s: &str) -> Option<Reply> {
         "done" => Reply::Done,
         "message" => Reply::Message(p.get(1)?.clone()),
         "mount" => Reply::Mount(Mount { scheme: p.get(1)?.clone(), authority: p.get(2)?.clone(), folder: p.get(3)?.clone() }),
+        "results" => Reply::Results(Results {
+            title: p.get(1)?.clone(),
+            mount: Mount { scheme: p.get(2)?.clone(), authority: p.get(3)?.clone(), folder: p.get(4)?.clone() },
+            flat: p.get(5)?.clone(),
+            again: p.get(6)?.clone(),
+            name: p.get(7)?.clone(),
+            refresh: p.get(8)?.clone(),
+        }),
         "form" => Reply::Form(Form {
             title: p.get(1)?.clone(),
             ok: p.get(2)?.clone(),
@@ -256,10 +301,24 @@ mod tests {
                 },
                 Field { id: "key".into(), label: "Key:".into(), kind: FieldKind::File, enabled_if: Some(("auth".into(), "key".into())), ..Default::default() },
                 Field { id: "state".into(), kind: FieldKind::Hidden, value: "1:,".into(), ..Default::default() },
+                Field { id: "dir".into(), label: "Look in:".into(), kind: FieldKind::Folder, value: r"C:\Users".into(), ..Default::default() },
             ],
         });
-        for r in [Reply::Done, Reply::Message("Hotovo, 🦎".into()), Reply::Mount(Mount { scheme: "scp".into(), authority: "me@host:22".into(), folder: "home\\me".into() }), form]
-        {
+        let results = Reply::Results(Results {
+            title: "Hledání: *.txt 🦎".into(),
+            name: "*.txt · Dokumenty".into(),
+            mount: Mount { scheme: "search".into(), authority: "3".into(), folder: String::new() },
+            flat: "3-list".into(),
+            again: "find".into(),
+            refresh: "refresh".into(),
+        });
+        for r in [
+            Reply::Done,
+            Reply::Message("Hotovo, 🦎".into()),
+            Reply::Mount(Mount { scheme: "scp".into(), authority: "me@host:22".into(), folder: "home\\me".into() }),
+            form,
+            results,
+        ] {
             assert_eq!(decode_reply(&encode_reply(&r)), Some(r));
         }
         let commands = vec![Command { id: "connect".into(), label: "Connect…".into() }, Command { id: "x".into(), label: "".into() }];
