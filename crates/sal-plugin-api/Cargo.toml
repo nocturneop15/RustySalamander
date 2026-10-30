@@ -1,0 +1,10 @@
+[package]
+name = "sal-plugin-api"
+description = "RustySalamander: what the program and its plugins (separate DLLs) share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]

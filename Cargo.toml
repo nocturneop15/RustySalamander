@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/sal-core", "crates/sal-plugin-api", "crates/sal-app", "plugins/sevenzip", "plugins/example-filelist"]
+
+[workspace.package]
+version = "0.1.0-alpha"
+edition = "2021"
+# slice::as_chunks
+rust-version = "1.88"
+license = "GPL-2.0-or-later"
+authors = ["RustySalamander contributors", "Open Salamander Authors (original C++ code)"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"

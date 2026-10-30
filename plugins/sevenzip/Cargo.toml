@@ -1,0 +1,18 @@
+[package]
+name = "sal-plugin-7zip"
+description = "RustySalamander plugin: archives as folders through 7-Zip's library (7z.dll)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# A DLL the program loads from plugins\7zip\7zip.spl (sal-app's build puts it there).
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sal-plugin-api = { path = "../../crates/sal-plugin-api" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,14 @@
+# RustySalamander UI strings — the template for translations.
+# Generated from the source; copy to <code>.toml, set [language] and translate the values.
+# Keys with "|" are plural forms: give as many forms as the language's plural rule has.
+
+[language]
+code = "en"
+name = "English"
+plural = "en"
+
+[strings]
+"7-Zip archives" = "7-Zip archives"
+"Opens zip, 7z, rar, tar, gz, iso, cab and other archives as folders, through 7-Zip's library (7z.dll); 7z, zip, tar and wim archives can also be changed." = "Opens zip, 7z, rar, tar, gz, iso, cab and other archives as folders, through 7-Zip's library (7z.dll); 7z, zip, tar and wim archives can also be changed."
+"{file} is missing in {dir}." = "{file} is missing in {dir}."
+"{path} ({n} formats)" = "{path} ({n} formats)"

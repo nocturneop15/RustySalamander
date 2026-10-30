@@ -1,0 +1,23 @@
+# Third-party notices
+
+RustySalamander is licensed under the GNU General Public License, version 2 or (at your option) any later version. See [LICENSE](LICENSE).
+
+## Open Salamander
+
+RustySalamander is a rewrite of [Open Salamander](https://github.com/OpenSalamander/salamander) (GPL-2.0-or-later). Its behaviour (keyboard model, mask syntax, sort order, file operations) follows the original, and parts are ports of its C++ code (`masks.cpp`, `sort.cpp` and the quick-search code). Open Salamander is the work of its authors; see the AUTHORS file in its repository.
+
+## 7-Zip (the 7-Zip plugin)
+
+The 7-Zip plugin (`plugins\7zip`) uses `7z.dll`, built unmodified from the 7-Zip 26.05 source in `third_party/7zip-26.05`.
+
+7-Zip Copyright (C) 1999-2026 Igor Pavlov.
+
+- Most of 7-Zip is under the GNU LGPL, version 2.1 or later.
+- The RAR decompression code (`CPP/7zip/Compress/Rar*`) is under the GNU LGPL with the **unRAR license restriction**: it may not be used to re-create the RAR compression algorithm, which is proprietary.
+- A few files are under BSD licenses or in the public domain.
+
+The full terms are in `third_party/7zip-26.05/DOC/License.txt` and `DOC/unRarLicense.txt`, and the build copies both next to `7z.dll` (`plugins\7zip\License.txt`, `plugins\7zip\unRarLicense.txt`). The source of the library is the 7-Zip source in this repository, or <https://www.7-zip.org/>.
+
+## Rust crates
+
+The program uses Rust crates from crates.io, among them egui/eframe (MIT or Apache-2.0), windows (MIT or Apache-2.0), serde and toml (MIT or Apache-2.0) and chrono (MIT or Apache-2.0). `Cargo.lock` lists every crate and version, and each crate's license is in its package metadata (`cargo metadata`, or a tool such as `cargo about` or `cargo deny` can produce the full list).

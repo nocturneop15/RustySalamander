@@ -1,0 +1,12 @@
+# Texty doplňku Archivy 7-Zip v češtině.
+
+[language]
+code = "cs"
+name = "Čeština"
+plural = "cs"
+
+[strings]
+"7-Zip archives" = "Archivy 7-Zip"
+"Opens zip, 7z, rar, tar, gz, iso, cab and other archives as folders, through 7-Zip's library (7z.dll); 7z, zip, tar and wim archives can also be changed." = "Otevírá archivy zip, 7z, rar, tar, gz, iso, cab a další jako složky pomocí knihovny 7-Zip (7z.dll); archivy 7z, zip, tar a wim lze i měnit."
+"{file} is missing in {dir}." = "V {dir} chybí {file}."
+"{path} ({n} formats)" = "{path} (formátů: {n})"

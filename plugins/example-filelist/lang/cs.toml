@@ -1,0 +1,13 @@
+# Texty ukázkového doplňku Seznamy souborů v češtině.
+
+[language]
+code = "cs"
+name = "Čeština"
+plural = "cs"
+
+[strings]
+"A file list can't contain folders." = "Seznam souborů nemůže obsahovat složky."
+"A file list can't rename files." = "Seznam souborů nemůže přejmenovávat soubory."
+"Cancelled." = "Zrušeno."
+"File lists" = "Seznamy souborů"
+"Shows *.filelist files (one path per line) as folders of the files they list." = "Zobrazuje soubory *.filelist (jedna cesta na řádek) jako složky se soubory, které uvádějí."

@@ -1,0 +1,21 @@
+[package]
+name = "sal-plugin-filelist"
+description = "Example RustySalamander plugin: *.filelist files (one path per line) shown as folders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+# A plugin is a DLL. Install it by copying the built
+# target\<profile>\sal_plugin_filelist.dll to plugins\filelist\filelist.spl
+# next to rustysalamander.exe, with the lang folder beside it.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sal-plugin-api = { path = "../../crates/sal-plugin-api" }
+
+[dev-dependencies]
+tempfile = "3"

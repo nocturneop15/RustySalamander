@@ -1,0 +1,15 @@
+# RustySalamander UI strings — the template for translations.
+# Generated from the source; copy to <code>.toml, set [language] and translate the values.
+# Keys with "|" are plural forms: give as many forms as the language's plural rule has.
+
+[language]
+code = "en"
+name = "English"
+plural = "en"
+
+[strings]
+"A file list can't contain folders." = "A file list can't contain folders."
+"A file list can't rename files." = "A file list can't rename files."
+"Cancelled." = "Cancelled."
+"File lists" = "File lists"
+"Shows *.filelist files (one path per line) as folders of the files they list." = "Shows *.filelist files (one path per line) as folders of the files they list."
