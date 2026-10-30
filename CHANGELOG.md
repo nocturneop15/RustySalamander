@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1-alpha (2026-10-30)
+
+- **No changes:** a release to try the update from 0.3.0 (Help → Check for updates… → Update now).
+
 ## 0.3.0-alpha (2026-10-30)
 
 ### Updates (new)
