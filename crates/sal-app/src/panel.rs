@@ -3,12 +3,13 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use sal_core::encoding::display_path;
 use sal_core::listing::{self, Listing, Visibility};
-use sal_core::location;
+use sal_core::{drives, location};
 use sal_core::{quicksearch, EntryKind, FileEntry, MaskGroup, SortSpec};
 
 use crate::plugins::{self, FolderPlugin, Index};
@@ -43,7 +44,17 @@ pub struct Panel {
     history: Vec<PathBuf>,
     history_pos: usize,
     dir_mtime: Option<SystemTime>,
+    /// The folder's date is still to be read (for a network folder, by the
+    /// first background check) before changes can be told.
+    baseline_pending: bool,
     last_check: Instant,
+    /// A change check running in the background: the path checked, its
+    /// date, and whether it still exists.
+    check: Option<Receiver<(PathBuf, Option<SystemTime>, bool)>>,
+    /// A network folder being read in the background at start-up: its
+    /// listing and the item to put the cursor on, or `None` if nothing
+    /// could be read.
+    loading: Option<Receiver<Loaded>>,
     /// Folder plugins that are on: files they handle open as folders.
     pub plugins: Vec<Arc<dyn FolderPlugin>>,
     /// Set while the panel shows a folder inside an archive.
@@ -70,6 +81,10 @@ fn archive_listing(view: &ArchiveView, vis: Visibility, sort: SortSpec) -> Listi
     Listing { path: base, entries, unreadable: 0 }
 }
 
+/// What a background read sends: the listing and the item to put the
+/// cursor on, or `None` when nothing could be read.
+type Loaded = Option<(Listing, Option<String>)>;
+
 fn fallback_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
@@ -87,11 +102,41 @@ impl Panel {
             history: Vec::new(),
             history_pos: 0,
             dir_mtime: None,
+            baseline_pending: false,
             last_check: Instant::now(),
+            check: None,
+            loading: None,
             plugins,
             archive: None,
         };
         let start = if path.is_empty() { fallback_dir() } else { PathBuf::from(path) };
+        // a network folder can take seconds to read (or to time out): read it
+        // in the background, so the window is usable at once
+        if drives::is_remote(&start) && plugins::split(&p.plugins, &start).is_none() {
+            p.listing = Listing { path: start.clone(), entries: Vec::new(), unreadable: 0 };
+            p.path_edit = display_path(&start);
+            let sort = p.sort;
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let t = Instant::now();
+                let found = listing::read_dir(&start, vis, sort).ok().map(|l| (l, None)).or_else(|| {
+                    // the nearest folder above it that still opens
+                    start.ancestors().skip(1).zip(start.ancestors()).find_map(|(dir, child)| {
+                        let name = child.file_name().map(|n| n.to_string_lossy().into_owned());
+                        listing::read_dir(dir, vis, sort).ok().map(|l| (l, name))
+                    })
+                });
+                crate::debuglog::write(format!(
+                    "background read of {}: {} ({})",
+                    start.display(),
+                    if found.is_some() { "done" } else { "failed" },
+                    crate::debuglog::ms(t.elapsed())
+                ));
+                let _ = tx.send(found);
+            });
+            p.loading = Some(rx);
+            return p;
+        }
         if p.load(&start, vis, None).is_err() {
             // the nearest folder that still opens (e.g. the folder of an
             // archive whose plugin is gone), with the cursor on what led on
@@ -150,23 +195,69 @@ impl Panel {
         self.archive.as_ref().map_or(self.listing.path.as_path(), |a| a.file.as_path())
     }
 
+    /// Whether a folder is still being read in the background.
+    pub fn is_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Take the background read's result when it has arrived; true when the
+    /// panel changed.
+    pub fn poll_loading(&mut self, vis: Visibility) -> bool {
+        let Some(rx) = &self.loading else { return false };
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => false,
+            Ok(Some((listing, focus))) => {
+                self.loading = None;
+                self.install(listing, None, focus.as_deref());
+                true
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => {
+                self.loading = None;
+                let _ = self.load(&fallback_dir(), vis, None);
+                true
+            }
+        }
+    }
+
     /// Load a directory; on error the old listing is kept.
     pub fn load(&mut self, path: &Path, vis: Visibility, focus: Option<&str>) -> Result<(), String> {
         let (listing, view) = self.read(path, vis)?;
-        let same_dir = listing.path == self.listing.path;
+        // a background read still running is no longer wanted
+        self.loading = None;
+        self.install(listing, view, focus);
+        Ok(())
+    }
+
+    /// Show a listing that was read: history, change detection, cursor.
+    fn install(&mut self, listing: Listing, view: Option<ArchiveView>, focus: Option<&str>) {
+        let same_dir = listing.path == self.listing.path && !self.history.is_empty();
         if !same_dir {
             self.history.truncate(self.history_pos + usize::from(!self.history.is_empty()));
             self.history.push(listing.path.clone());
             self.history_pos = self.history.len() - 1;
         }
         self.archive = view;
-        self.dir_mtime = std::fs::metadata(self.stamp_path()).and_then(|m| m.modified()).ok();
         self.listing = listing;
+        self.set_baseline();
         self.path_edit = display_path(&self.listing.path);
         self.qs.clear();
         self.cursor = focus.and_then(|n| self.listing.entries.iter().position(|e| e.name == n)).unwrap_or(0);
         self.scroll_to_cursor = true;
-        Ok(())
+    }
+
+    /// Remember the shown folder's date, to tell when it changes. Reading it
+    /// over the network can take a while, so for a network folder the first
+    /// background check does it.
+    fn set_baseline(&mut self) {
+        self.check = None;
+        if drives::is_remote(self.stamp_path()) {
+            self.dir_mtime = None;
+            self.baseline_pending = true;
+        } else {
+            self.dir_mtime = std::fs::metadata(self.stamp_path()).and_then(|m| m.modified()).ok();
+            self.baseline_pending = false;
+        }
+        self.last_check = Instant::now();
     }
 
     /// Re-read the directory keeping cursor and selection.
@@ -199,23 +290,56 @@ impl Panel {
     }
 
     /// Cheap change detection: directory mtime changes when entries are
-    /// added, removed or renamed (NTFS, ext4, …).
+    /// added, removed or renamed (NTFS, ext4, …). The date is read on a
+    /// background thread, so a slow network folder never holds up the
+    /// window; its answer is looked at in a later frame.
     pub fn needs_refresh(&mut self) -> bool {
-        if self.last_check.elapsed().as_millis() < 1500 {
+        if self.loading.is_some() {
+            return false;
+        }
+        if let Some(rx) = &self.check {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => return false,
+                Err(TryRecvError::Disconnected) => self.check = None,
+                Ok((path, mtime, exists)) => {
+                    self.check = None;
+                    if path != self.stamp_path() {
+                        return false; // the panel has moved on since
+                    }
+                    if std::mem::take(&mut self.baseline_pending) {
+                        self.dir_mtime = mtime;
+                        return !exists;
+                    }
+                    let changed = mtime != self.dir_mtime || !exists;
+                    if changed {
+                        crate::debuglog::write(format!("refresh {}: date {:?} -> {mtime:?}, exists {exists}", path.display(), self.dir_mtime));
+                    }
+                    return changed;
+                }
+            }
+        }
+        // network folders less often: each check is a round trip to the server
+        let every = if drives::is_remote(self.stamp_path()) { 5000 } else { 1500 };
+        if !self.baseline_pending && self.last_check.elapsed().as_millis() < every {
             return false;
         }
         self.last_check = Instant::now();
         // a server's share list has no mtime; re-enumerating it would hit the
         // network, and so would a plugin's connection (refreshed with Ctrl+R)
         if location::unc_server(&self.listing.path).is_some() || self.archive.as_ref().is_some_and(|a| !a.index.complete) {
+            self.baseline_pending = false;
             return false;
         }
-        let now = std::fs::metadata(self.stamp_path()).and_then(|m| m.modified()).ok();
-        let gone = match &self.archive {
-            Some(a) => !a.file.is_file(),
-            None => !self.listing.path.is_dir(),
-        };
-        now != self.dir_mtime || gone
+        let (path, file) = (self.stamp_path().to_path_buf(), self.archive.is_some());
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let md = std::fs::metadata(&path);
+            let mtime = md.as_ref().ok().and_then(|m| m.modified().ok());
+            let exists = md.is_ok_and(|m| if file { m.is_file() } else { m.is_dir() });
+            let _ = tx.send((path, mtime, exists));
+        });
+        self.check = Some(rx);
+        false
     }
 
     pub fn resort(&mut self, sort: SortSpec) {
@@ -261,9 +385,10 @@ impl Panel {
         // navigate without touching the history list
         let focus = if back { self.listing.path.file_name().map(|n| n.to_string_lossy().into_owned()) } else { None };
         self.history_pos = pos;
+        self.loading = None;
         self.archive = view;
-        self.dir_mtime = std::fs::metadata(self.stamp_path()).and_then(|m| m.modified()).ok();
         self.listing = listing;
+        self.set_baseline();
         self.path_edit = display_path(&self.listing.path);
         self.qs.clear();
         self.cursor = focus.and_then(|n| self.listing.entries.iter().position(|e| e.name == n)).unwrap_or(0);

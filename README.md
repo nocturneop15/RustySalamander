@@ -336,7 +336,7 @@ Set this under **Options → Settings…**:
 - **Arabic shaping:** Arabic letters appear in the correct order but without contextual joining forms (egui doesn't shape complex scripts). Indic conjuncts are affected the same way. File operations aren't affected.
 - **Missing features:** no encrypted archives, FTP, Find dialog, directory compare, panel view modes (brief, thumbnails) or drag and drop yet. See the roadmap in `docs/ANALYSIS.md`.
 - **Recycle Bin:** deleting to the Recycle Bin uses `SHFileOperationW`, which may reject paths longer than `MAX_PATH`. Permanent delete has no such limit.
-- **Network timeouts:** opening an unreachable `\\server` or share blocks the window until Windows gives up (up to about 30 s). Listings aren't loaded in the background yet.
+- **Network folders:** a panel that starts on a network folder reads it in the background (the window is usable at once), and free space and change checks never wait for the server. Opening a network folder later still waits for its listing, and an unreachable `\\server` blocks the window until Windows gives up (up to about 30 s).
 - **Untranslated messages:** error messages that come from Windows or from the core library (e.g. "Access is denied") stay in English or in the Windows language.
 
 ## License

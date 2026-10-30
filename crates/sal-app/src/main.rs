@@ -19,10 +19,12 @@
 
 mod app;
 mod ctxmenu;
+mod debuglog;
 mod dialogwin;
 mod dirsize;
 mod drive_icon;
 mod fonts;
+mod freespace;
 mod i18n;
 mod icons;
 mod keymap;
@@ -38,11 +40,13 @@ mod worker;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    debuglog::init();
     // optional start directories: rustysalamander [left] [right]
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title("RustySalamander").with_inner_size([1200.0, 760.0]).with_min_inner_size([640.0, 400.0]),
         ..Default::default()
     };
+    debuglog::write("startup: creating the window");
     eframe::run_native("RustySalamander", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))))
 }

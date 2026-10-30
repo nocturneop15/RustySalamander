@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1-alpha (2026-10-30)
+
+### Fixes
+
+- **Slow start and sluggish window with a network folder in a panel:** a panel that starts on a network drive (for example `X:\` mapped to a NAS) is read in the background, so the window is usable at once; the panel says "Loading…" until the listing arrives. Before, the program waited for the whole folder, then read it a second time.
+- **No more waiting for the server on every redraw:** free space was asked for on every frame (over 100 ms each on a network drive) and the folder's date every 1.5 s; both are now read in the background, and network folders are checked every 5 s.
+- **Faster folder listing:** folders are read in large batches (as `cmd`'s `dir` does), about three times faster on a network share (2,245 items: 7.3 s → 2–3 s).
+
+### For developers
+
+- **Timing log:** set `RUSTYSALAMANDER_LOG` (a file path, or `1` for `%TEMP%\rustysalamander.log`) to log each start-up step and every slow frame with its parts.
+
 ## 0.2.0-alpha (2026-10-30)
 
 Plugins can now add commands, ask for input and open connections, and the first plugin that does is **SCP**: files on SSH servers, in a panel.

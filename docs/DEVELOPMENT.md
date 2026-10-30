@@ -80,6 +80,7 @@ Examples are `snapshot_czech` (the main window and Settings in Czech), `snapshot
 |---|---|
 | `RUSTYSALAMANDER_CONFIG` | Use this configuration file instead of `config.toml` next to the program. |
 | `RUSTYSALAMANDER_PLUGINS` | Look for plugins in this folder instead of `plugins` next to the program. |
+| `RUSTYSALAMANDER_LOG` | A timing log: a file path, or `1` for `%TEMP%ustysalamander.log`. It records each start-up step (configuration, fonts, plugins, each panel) and every frame that takes over 150 ms, split into its parts (menu, each panel, dialogs…), plus background reads. Use it when the program is slow somewhere. |
 | `SAL_DIAG_DIALOG` | `mkdir`, `settings`, `help`, `copy` or `delete`: open that dialog shortly after start-up. Any other value opens a message box. |
 | `SAL_DIAG_DIALOG_CLOSE` | `cancel` or `ok`: close that dialog again after about 3 s. |
 | `SAL_DIAG_ANSWER` | Answer the first conflict or error question with *Skip* after about 6 s. |

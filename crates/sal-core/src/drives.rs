@@ -149,6 +149,29 @@ pub fn free_space(_p: &Path) -> Option<(u64, u64)> {
     None
 }
 
+/// Whether `p` is on the network: a UNC path or a mapped network drive.
+/// Answered locally (`GetDriveTypeW`), without contacting the server, so
+/// it is cheap even when the server is slow or gone.
+pub fn is_remote(p: &Path) -> bool {
+    if crate::location::virtual_parts(p).is_some() {
+        return false;
+    }
+    let s = p.to_string_lossy();
+    if s.starts_with(r"\\?\UNC\") || (s.starts_with(r"\\") && !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\")) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let b = s.trim_start_matches(r"\\?\").as_bytes();
+        if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            let root = wide(std::ffi::OsStr::new(&format!("{}:\\", b[0] as char)));
+            // DRIVE_REMOTE = 4
+            return unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(root.as_ptr()) } == 4;
+        }
+    }
+    false
+}
+
 /// Root of the drive/share containing `p` (`C:\`, `\\server\share\`, `/`).
 pub fn root_of(p: &Path) -> PathBuf {
     // std does not treat a bare `\\server` as a UNC root (it has no share)

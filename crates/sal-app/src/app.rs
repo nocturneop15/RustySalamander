@@ -294,6 +294,8 @@ pub struct App {
     body_rects: [egui::Rect; 2],
     /// Width each panel's table was laid out for.
     table_widths: [f32; 2],
+    /// Free space of the panels' drives, read in the background.
+    free: crate::freespace::FreeSpace,
 }
 
 /// An open Windows 11 style context menu.
@@ -461,8 +463,10 @@ fn describe(sources: &[PathBuf]) -> String {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<String>) -> App {
-        let cfg = Config::load();
-        crate::fonts::install(&cc.egui_ctx, &cfg.ui_font, &cfg.mono_font);
+        crate::debuglog::write("startup: window ready");
+        let cfg = crate::debuglog::time("startup: configuration", Config::load);
+        crate::debuglog::write(format!("startup: configuration file {}", sal_core::config::config_path().display()));
+        crate::debuglog::time("startup: fonts", || crate::fonts::install(&cc.egui_ctx, &cfg.ui_font, &cfg.mono_font));
         App::with_config(&cc.egui_ctx, cfg, args)
     }
 
@@ -482,15 +486,24 @@ impl App {
                 keymap::set_bindings(&mut cfg.shortcuts, Action::Root, list);
             }
         }
-        crate::i18n::set_language(&cfg.language);
-        apply_font_size(ctx, cfg.font_size);
-        apply_theme(ctx, cfg.theme);
-        apply_scrollbars(ctx, cfg.always_show_scrollbars);
-        let plugins = Plugins::load(&cfg.disabled_plugins);
+        use crate::debuglog::time;
+        time("startup: language", || crate::i18n::set_language(&cfg.language));
+        time("startup: font size, theme, scrollbars", || {
+            apply_font_size(ctx, cfg.font_size);
+            apply_theme(ctx, cfg.theme);
+            apply_scrollbars(ctx, cfg.always_show_scrollbars);
+        });
+        let plugins = time("startup: plugins", || Plugins::load(&cfg.disabled_plugins));
+        if crate::debuglog::enabled() {
+            let names: Vec<&str> = plugins.active.iter().map(|p| p.id()).collect();
+            crate::debuglog::write(format!("startup: plugins running {names:?}, failed {:?}, unusable {:?}", plugins.errors, plugins.broken));
+        }
         let panels = [
-            Panel::new(&cfg.left.path, cfg.left.sort, visibility(&cfg), plugins.active.clone()),
-            Panel::new(&cfg.right.path, cfg.right.sort, visibility(&cfg), plugins.active.clone()),
+            time(&format!("startup: left panel {}", cfg.left.path), || Panel::new(&cfg.left.path, cfg.left.sort, visibility(&cfg), plugins.active.clone())),
+            time(&format!("startup: right panel {}", cfg.right.path), || Panel::new(&cfg.right.path, cfg.right.sort, visibility(&cfg), plugins.active.clone())),
         ];
+        let icons = time("startup: icon loader", || Icons::new(ctx));
+        let languages = time("startup: language list", crate::i18n::available);
         let active = usize::from(cfg.right_active);
         App {
             cfg,
@@ -513,12 +526,12 @@ impl App {
             path_edit: [None, None],
             crumb_rects: [Vec::new(), Vec::new()],
             dir_sizes: DirSizes::default(),
-            icons: Icons::new(ctx),
+            icons,
             font_slider_rect: None,
             drive_popup_rect: None,
             dialog_places: Default::default(),
             font_list: Vec::new(),
-            languages: crate::i18n::available(),
+            languages,
             font_button_rect: None,
             font_filter: String::new(),
             size_report: None,
@@ -528,6 +541,7 @@ impl App {
             row_hits: [Vec::new(), Vec::new()],
             body_rects: [egui::Rect::NOTHING; 2],
             table_widths: [0.0; 2],
+            free: Default::default(),
         }
     }
 
@@ -1919,6 +1933,11 @@ impl App {
             });
 
         self.body_rects[idx] = body.response.rect;
+        if self.panels[idx].is_loading() {
+            let r = body.response.rect;
+            let weak = ui.visuals().weak_text_color();
+            ui.painter().text(r.center_top() + egui::vec2(0.0, row_h * 2.0), egui::Align2::CENTER_CENTER, tr("Loading…"), egui::TextStyle::Body.resolve(ui.style()), weak);
+        }
         self.row_hits[idx] = row_hits;
         if let Some(text) = banner {
             let fill = plugin_tint(ui.visuals()).gamma_multiply(2.5);
@@ -1970,7 +1989,7 @@ impl App {
             String::new()
         };
         let qs = panel.qs.clone();
-        let free = drives::free_space(panel.path()).map(|(f, t)| trf("{free} free of {total}", &[("free", &format_size(f)), ("total", &format_size(t))]));
+        let free = self.free.get(ui.ctx(), panel.path()).map(|(f, t)| trf("{free} free of {total}", &[("free", &format_size(f)), ("total", &format_size(t))]));
         // a strip that stands out from the panel in both themes
         let strip = strip_color(ui.visuals());
         let strong = ui.visuals().strong_text_color();
@@ -3138,6 +3157,7 @@ impl App {
             return;
         }
         self.dir_sizes.clear();
+        self.free.forget();
         let title = job.spec.kind.title();
         self.status = match job.result.unwrap() {
             Ok(s) => {
@@ -3990,7 +4010,17 @@ impl App {
 impl App {
     /// One UI frame; separate from `update` so tests can drive it headlessly.
     pub fn frame(&mut self, ctx: &egui::Context) {
+        let mut timing = crate::debuglog::Frame::start(ctx.cumulative_pass_nr());
         self.remember_dirs();
+        // network folders read in the background (at start-up)
+        let hidden = self.vis();
+        for p in &mut self.panels {
+            p.poll_loading(hidden);
+        }
+        if self.panels.iter().any(Panel::is_loading) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        timing.mark("background reads");
         let no_dialog = matches!(self.dialog, Dialog::None);
         let editing_path = self.path_edit.iter().any(Option::is_some);
         let menu_open = self.ctx_menu.is_some();
@@ -4005,12 +4035,14 @@ impl App {
                 }
             });
             self.handle_keys(ctx);
+            timing.mark("keys");
             let hidden = self.vis();
             for p in &mut self.panels {
                 if p.needs_refresh() {
                     p.reload(hidden);
                 }
             }
+            timing.mark("refresh check");
         }
 
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -4020,7 +4052,9 @@ impl App {
         }
         self.poll_plugin_task(ctx);
 
+        timing.mark("before menu");
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ctx, ui));
+        timing.mark("menu");
         if self.cfg.show_fkey_bar || !self.status.is_empty() || !self.jobs.is_idle() {
             egui::TopBottomPanel::bottom("fkeys").show(ctx, |ui| {
                 if !self.jobs.is_idle() {
@@ -4035,6 +4069,7 @@ impl App {
                 }
             });
         }
+        timing.mark("status and function keys");
         egui::CentralPanel::default().show(ctx, |ui| {
             let full = ui.available_rect_before_wrap();
             let half = ((full.width() - DIVIDER_WIDTH) / 2.0).floor();
@@ -4046,6 +4081,7 @@ impl App {
                     ui.set_clip_rect(rect.intersect(ui.clip_rect()));
                     self.panel_ui(ui, idx);
                 });
+                timing.mark(if idx == 0 { "left panel" } else { "right panel" });
             }
             paint_divider(ui, divider);
             ui.allocate_rect(full, Sense::hover());
@@ -4053,14 +4089,19 @@ impl App {
 
         self.report_sizes();
         self.icons.poll(ctx);
+        timing.mark("sizes and icons");
         self.context_menu_ui(ctx);
         self.dialogs(ctx);
+        timing.mark("dialogs");
         self.job_ui(ctx);
+        timing.mark("operations");
 
         for v in &mut self.viewers {
             v.show(ctx);
         }
         self.viewers.retain(|v| v.open);
+        timing.mark("viewers");
+        timing.finish();
 
         // poll directories for external changes
         ctx.request_repaint_after(Duration::from_millis(1500));
