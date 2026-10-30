@@ -65,7 +65,7 @@ A line-for-line port of ~1.3M lines is a multi-person-year effort. The rewrite i
 | 4 | Archives as virtual file systems | ✅ done: the 7-Zip plugin (7z.dll in-process) reads ~25 formats and changes 7z, zip, tar, wim. Still missing: encrypted archives |
 | 5 | New plugin interface: separate DLLs (`*.spl`), a C ABI generated from Rust traits, UTF-8 text and UTF-16 paths, no `CFileData` compatibility | ✅ folder plugins done (`sal-plugin-api`, docs/PLUGINS.md). Still missing: file-system plugins (FTP) and viewer plugins |
 | 6 | Find dialog, directory compare, change attributes, occupied space, pack/unpack, user menu, clipboard copy/paste of files | planned |
-| 7 | FS plugins (FTP/SFTP, network, registry); image viewer (`image` crate / WIC) | planned |
+| 7 | FS plugins (FTP/SFTP, network, registry); image viewer (`image` crate / WIC) | started: plugin commands, forms and connections in the interface; the SCP plugin (SSH servers). FTP, SFTP, registry and the image viewer planned |
 | 8 | Shell integration: context menus, shell icons (`SHGetFileInfoW`), drag & drop, IFileOperation-based Recycle Bin for long paths | partly: context menus (Windows 11 and classic) and shell icons done; drag & drop and the Recycle Bin for long paths planned |
 | 9 | Complex script shaping (Arabic joining, Indic conjuncts) via a shaping text renderer | planned (egui limitation) |
 

@@ -155,6 +155,10 @@ pub fn root_of(p: &Path) -> PathBuf {
     if let Some(server) = crate::location::unc_server(p) {
         return crate::location::server_path(&server);
     }
+    // a plugin's connection: its root
+    if let Some((scheme, authority, _)) = crate::location::virtual_parts(p) {
+        return crate::location::virtual_path(&scheme, &authority, &[]);
+    }
     p.ancestors().last().map(Path::to_path_buf).unwrap_or_else(|| p.to_path_buf())
 }
 

@@ -37,11 +37,54 @@ pub fn server_path(server: &str) -> PathBuf {
     PathBuf::from(format!(r"\\{server}"))
 }
 
+/// A location inside a plugin's connection, `\\?\<scheme>\<authority>\…`
+/// (see `sal_plugin_api::mount_root`): its scheme, authority and the folder
+/// names below the connection's root. The scheme is lowercase ASCII, which
+/// tells it from Windows' own `\\?\` paths (`\\?\C:\`, `\\?\Volume{…}`).
+pub fn virtual_parts(p: &Path) -> Option<(String, String, Vec<String>)> {
+    use std::path::{Component, Prefix};
+    let mut parts = p.components();
+    let Some(Component::Prefix(prefix)) = parts.next() else { return None };
+    let Prefix::Verbatim(scheme) = prefix.kind() else { return None };
+    let scheme = scheme.to_str()?;
+    if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return None;
+    }
+    let mut names = parts.filter_map(|c| if let std::path::Component::Normal(s) = c { Some(s.to_string_lossy().into_owned()) } else { None });
+    let authority = names.next()?;
+    Some((scheme.to_owned(), authority, names.collect()))
+}
+
+/// The path of a connection's location: `virtual_path("scp", "me@host", ["home"])`.
+pub fn virtual_path(scheme: &str, authority: &str, names: &[String]) -> PathBuf {
+    let mut p = PathBuf::from(format!(r"\\?\{scheme}\{authority}"));
+    for n in names {
+        p.push(n);
+    }
+    p
+}
+
+/// `scp://me@host/home/me` as typed → the connection's path.
+pub fn parse_url(s: &str) -> Option<PathBuf> {
+    let (scheme, rest) = s.split_once("://")?;
+    if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return None;
+    }
+    let mut parts = rest.split(['/', '\\']).filter(|x| !x.is_empty());
+    let authority = parts.next()?;
+    let names: Vec<String> = parts.map(str::to_owned).collect();
+    Some(virtual_path(scheme, authority, &names))
+}
+
 /// Parent location and the name to focus there. A share root's parent is
-/// its server; a server and drive roots have none.
+/// its server; a server, drive roots and a connection's root have none.
 pub fn parent_of(p: &Path) -> Option<(PathBuf, String)> {
     if unc_server(p).is_some() {
         return None;
+    }
+    if let Some((scheme, authority, mut names)) = virtual_parts(p) {
+        let name = names.pop()?;
+        return Some((virtual_path(&scheme, &authority, &names), name));
     }
     if let Some((server, share)) = unc_share_root(p) {
         return Some((server_path(&server), share));
@@ -55,6 +98,13 @@ pub fn parent_of(p: &Path) -> Option<(PathBuf, String)> {
 pub fn breadcrumbs(p: &Path) -> Vec<(String, PathBuf)> {
     let s = display_path(p);
     let mut out = Vec::new();
+    if let Some((scheme, authority, names)) = virtual_parts(p) {
+        out.push((format!("{scheme}://{authority}"), virtual_path(&scheme, &authority, &[])));
+        for i in 0..names.len() {
+            out.push((names[i].clone(), virtual_path(&scheme, &authority, &names[..=i])));
+        }
+        return out;
+    }
     if let Some(rest) = s.strip_prefix(r"\\") {
         let mut parts = rest.split(['\\', '/']).filter(|x| !x.is_empty());
         let Some(server) = parts.next() else { return out };
@@ -131,6 +181,22 @@ pub fn resolve_input(input: &str, cwd: &Path) -> io::Result<Target> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "no path entered"));
     }
     s = expand_env(&s);
+    // a plugin's connection: typed as a URL, or relative inside one
+    if let Some(p) = parse_url(&s) {
+        return Ok(Target::Dir(p));
+    }
+    if let Some((scheme, authority, mut names)) = virtual_parts(cwd) {
+        if !s.starts_with(['\\', '/']) && !s.contains(':') {
+            for part in s.split(['/', '\\']).filter(|x| !x.is_empty() && *x != ".") {
+                if part == ".." {
+                    names.pop();
+                } else {
+                    names.push(part.to_owned());
+                }
+            }
+            return Ok(Target::Dir(virtual_path(&scheme, &authority, &names)));
+        }
+    }
     if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
         let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
         s = format!("{home}{}", &s[1..]);
@@ -237,6 +303,26 @@ pub fn share_entries(server: &str, show_hidden: bool) -> io::Result<Vec<FileEntr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_locations() {
+        let root = virtual_path("scp", "me@host:2222", &[]);
+        let home = virtual_path("scp", "me@host:2222", &["home".into(), "já 🦎".into()]);
+        assert_eq!(display_path(&root), "scp://me@host:2222/");
+        assert_eq!(display_path(&home), "scp://me@host:2222/home/já 🦎");
+        assert_eq!(parent_of(&home), Some((virtual_path("scp", "me@host:2222", &["home".into()]), "já 🦎".into())));
+        assert_eq!(parent_of(&root), None, "no parent above the connection");
+        assert_eq!(crate::drives::root_of(&home), root);
+        let crumbs: Vec<String> = breadcrumbs(&home).into_iter().map(|c| c.0).collect();
+        assert_eq!(crumbs, ["scp://me@host:2222", "home", "já 🦎"]);
+        // typed: as a URL, and relative inside a connection
+        assert_eq!(resolve_input("scp://me@host:2222/home/já 🦎", Path::new("C:\\")).unwrap(), Target::Dir(home.clone()));
+        assert_eq!(resolve_input("..", &home).unwrap(), Target::Dir(virtual_path("scp", "me@host:2222", &["home".into()])));
+        assert_eq!(resolve_input("a/b", &root).unwrap(), Target::Dir(virtual_path("scp", "me@host:2222", &["a".into(), "b".into()])));
+        // Windows' own \\?\ paths are not connections
+        assert_eq!(virtual_parts(Path::new(r"\\?\C:\x")), None);
+        assert_eq!(display_path(Path::new(r"\\?\C:\x")), r"C:\x");
+    }
 
     #[test]
     fn unc_detection() {

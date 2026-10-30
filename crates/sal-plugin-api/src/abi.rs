@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
 /// changes; the program skips plugins built for another version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The name of the function every plugin exports:
 /// `extern "C" fn rustysalamander_plugin() -> *const Descriptor`.
@@ -239,8 +239,9 @@ pub struct VTable {
     pub can_write: unsafe extern "C" fn(this: *mut c_void, file: Wide) -> bool,
     /// [`crate::FolderPlugin::status`], sent to `out`.
     pub status: unsafe extern "C" fn(this: *mut c_void, out: *const StrOut),
-    /// [`crate::FolderPlugin::list`]: every item is sent to `items`.
-    pub list: unsafe extern "C" fn(this: *mut c_void, file: Wide, items: *const ItemOut, error: *const StrOut) -> i32,
+    /// [`crate::FolderPlugin::list`] of `folder`: every item is sent to
+    /// `items`, and `complete` is set to [`crate::Index::complete`].
+    pub list: unsafe extern "C" fn(this: *mut c_void, file: Wide, folder: Str, items: *const ItemOut, complete: *mut bool, error: *const StrOut) -> i32,
     /// [`crate::FolderPlugin::extract`]: `items` is an array of `n` paths inside.
     pub extract: unsafe extern "C" fn(this: *mut c_void, file: Wide, items: *const Str, n: usize, out: Wide, progress: *const ProgressFn, error: *const StrOut) -> i32,
     /// [`crate::FolderPlugin::add`]: `disk[i]` is added as `inner[i]`, `n` pairs.
@@ -251,6 +252,14 @@ pub struct VTable {
     pub rename: unsafe extern "C" fn(this: *mut c_void, file: Wide, old: Str, new: Str, progress: *const ProgressFn, error: *const StrOut) -> i32,
     /// [`crate::FolderPlugin::mkdir`].
     pub mkdir: unsafe extern "C" fn(this: *mut c_void, file: Wide, inner: Str, progress: *const ProgressFn, error: *const StrOut) -> i32,
+    /// [`crate::FolderPlugin::commands`], sent to `out` encoded by
+    /// [`crate::ui`] (pairs of id and label).
+    pub commands: unsafe extern "C" fn(this: *mut c_void, out: *const StrOut),
+    /// [`crate::FolderPlugin::run`]: `values` and the reply sent to `out`
+    /// are encoded by [`crate::ui`].
+    pub run: unsafe extern "C" fn(this: *mut c_void, command: Str, values: Str, out: *const StrOut, error: *const StrOut) -> i32,
+    /// [`crate::FolderPlugin::close`].
+    pub close: unsafe extern "C" fn(this: *mut c_void, root: Wide),
 }
 
 // Only pointers to static data and functions, or to data the program keeps

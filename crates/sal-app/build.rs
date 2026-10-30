@@ -3,10 +3,12 @@
 //! folder under `plugins`. The plugins are separate DLLs, not part of the
 //! program: they are built here with a cargo of their own.
 //!
-//! The 7-Zip plugin (`plugins/sevenzip` in the source) goes to
-//! `plugins\7zip\7zip.spl` with `7z.dll`, 7-Zip's archive library, built
-//! from the 7-Zip source in `third_party` with MinGW (`mingw32-make`, gcc).
-//! Without a working toolchain the program is built anyway, without it.
+//! - The 7-Zip plugin (`plugins/sevenzip` in the source) goes to
+//!   `plugins\7zip\7zip.spl` with `7z.dll`, 7-Zip's archive library, built
+//!   from the 7-Zip source in `third_party` with MinGW (`mingw32-make`,
+//!   gcc). Without a working toolchain the program is built anyway, without
+//!   it.
+//! - The SCP plugin (`plugins/scp`) goes to `plugins\scp\scp.spl`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,21 +36,31 @@ fn main() {
     if let Err(e) = seven_zip_plugin(manifest, profile_dir) {
         println!("cargo:warning=the 7-Zip plugin was not built: {e}");
     }
+    if let Err(e) = install_plugin(manifest, profile_dir, "sal-plugin-scp", "scp", "scp") {
+        println!("cargo:warning=the SCP plugin was not built: {e}");
+    }
 }
 
-/// `plugins\7zip`: the plugin DLL, its language files and `7z.dll`. Without
-/// `7z.dll` the plugin is installed anyway and says what is missing.
-fn seven_zip_plugin(manifest: &Path, profile_dir: &Path) -> Result<(), String> {
-    let dll = build_plugin(manifest, profile_dir, "sal-plugin-7zip")?;
-    let dir = profile_dir.join("plugins").join("7zip");
+/// Build the plugin crate `package` (source in `plugins/<source>`) and put
+/// it with its language files into `plugins\<folder>`; that folder.
+fn install_plugin(manifest: &Path, profile_dir: &Path, package: &str, source: &str, folder: &str) -> Result<PathBuf, String> {
+    let dll = build_plugin(manifest, profile_dir, package)?;
+    let dir = profile_dir.join("plugins").join(folder);
     std::fs::create_dir_all(dir.join("lang")).map_err(|e| e.to_string())?;
-    std::fs::copy(&dll, dir.join("7zip.spl")).map_err(|e| format!("copy the plugin: {e}"))?;
-    let lang = manifest.join("../../plugins/sevenzip/lang");
+    std::fs::copy(&dll, dir.join(format!("{folder}.spl"))).map_err(|e| format!("copy the plugin: {e}"))?;
+    let lang = manifest.join("../../plugins").join(source).join("lang");
     for e in std::fs::read_dir(&lang).map_err(|e| format!("{}: {e}", lang.display()))?.flatten() {
         if e.path().extension().is_some_and(|x| x == "toml") {
             std::fs::copy(e.path(), dir.join("lang").join(e.file_name())).map_err(|e| format!("copy a language file: {e}"))?;
         }
     }
+    Ok(dir)
+}
+
+/// `plugins\7zip`: the plugin DLL, its language files and `7z.dll`. Without
+/// `7z.dll` the plugin is installed anyway and says what is missing.
+fn seven_zip_plugin(manifest: &Path, profile_dir: &Path) -> Result<(), String> {
+    let dir = install_plugin(manifest, profile_dir, "sal-plugin-7zip", "sevenzip", "7zip")?;
     let lib = seven_zip(&manifest.join(SEVEN_ZIP))?;
     println!("cargo:rerun-if-changed={}", lib.display());
     std::fs::copy(&lib, dir.join("7z.dll")).map_err(|e| format!("copy 7z.dll: {e}"))?;

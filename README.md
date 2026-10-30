@@ -59,6 +59,10 @@ plugins/sevenzip  the 7-Zip plugin, a DLL of its own (plugins\7zip\7zip.spl)
   lib.rs          the plugin (formats, list / extract / add / delete / rename)
   library.rs      7z.dll in-process: interfaces, streams, callbacks
   lang/*.toml     the plugin's own texts: en.toml, cs.toml (copied to plugins\7zip\lang)
+plugins/scp       the SCP plugin (plugins\scp\scp.spl): SSH servers in a panel
+  lib.rs          the plugin: the Plugins menu command, forms, file operations
+  ssh.rs          the SSH connection (russh): host keys, sign-in, the SCP protocol
+  remote.rs       server paths, shell quoting, reading ls output
 plugins/example-filelist   a small example plugin for plugin authors (not installed)
 docs/             plugin guide, development guide, analysis of the original
 third_party/7zip-26.05/   7-Zip source (LGPL): built into 7z.dll
@@ -145,15 +149,28 @@ Archives open as folders in the panel. **Enter** on `archive.zip` shows what is 
 - **Turning it off:** in Settings → Plugins (see below). Enter then hands archives to Windows like any other file.
 - **Without the plugin or its library:** when `7zip.spl` is missing, or `7z.dll` is missing or damaged, archives are ordinary files. Enter opens them with Windows, F3 shows the file itself, and a panel remembered inside an archive opens the archive's folder instead. Copying into `archive.zip\` is refused with "… is a file, not a folder", and the archive stays untouched. Settings → Plugins says what is missing.
 
+## Servers (the SCP plugin)
+
+**Plugins → Connect to server…** opens a form for the server, the port, the user name, and a password or a private key (OpenSSH or PEM, with its passphrase). The server's files then open in the active panel as `scp://user@host/home/user`, in the user's home folder. Copying in and out (F5/F6), deleting (F8), renaming (F2), new folders (F7), viewing and editing (F3/F4) work as in any folder, with progress, pausing and cancelling. `scp://user@host/path` can also be typed into the path bar of a connected server.
+
+- **How:** SSH in pure Rust (`russh`); files go over the SCP protocol (`scp -f`/`-t` on the server), and listings and file management use `ls`, `rm`, `mv` and `mkdir`, so any Linux, BSD or macOS server works. Nothing installed on the computer is used.
+- **Server keys:** a key from `%USERPROFILE%\.ssh\known_hosts` or the plugin's own `known_hosts` is trusted. A new server shows its key's fingerprint first, and the key is remembered once you trust it. A changed key is refused with a warning.
+- **Sign-in:** password (servers that ask through keyboard-interactive prompts get it too) or a private key. The last server, port, user and key file are remembered, never a password.
+- **Drive selector:** connected servers are listed under *Connections* in the drive selector (Alt+F1 / Alt+F2), so either panel can open one in its start folder; the selector starts on it while the panel shows that server. Each has a **Disconnect** button there (or press Delete on it).
+- **Disconnecting:** **Plugins → Disconnect from …** lists every open session, one per row (the menu widens to fit), or use the drive selector's Disconnect button; panels go back to the folder they showed before. Quitting the program disconnects too.
+- **Limits:** no SFTP, no saved sites yet, and a lost connection needs a disconnect and a new connection. Panels of a server are refreshed with Ctrl+R, not automatically.
+
 ## Plugins
 
 Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each lives in its own folder under `plugins` next to `rustysalamander.exe`, with whatever it needs (`plugins\7zip\7zip.spl` and `7z.dll`). When the program starts, it looks at `plugins\*.spl` and `plugins\<folder>\*.spl`, so a plugin is installed by copying its folder there and removed by deleting it. Files that aren't usable plugins (not a DLL, made for another version of the interface, an id already taken) are listed in Settings with the reason. `RUSTYSALAMANDER_PLUGINS` names another plugins folder.
 
-**Settings → Plugins** lists them with a description and their state, for example the library a plugin uses or why it can't start. Each has a switch, and turning one on or off applies at once. A panel showing a folder inside a plugin's file goes back to that file's folder when the plugin is turned off. Turned-off plugins are saved in `config.toml` (`disabled_plugins`).
+**Settings → Plugins** lists them with a description and their state, for example the library a plugin uses or why it can't start. Each has a switch, and turning one on or off applies at once. A panel showing a folder inside a plugin's file goes back to that file's folder when the plugin is turned off, and a panel showing a plugin's connection goes back to where it was before. Turned-off plugins are saved in `config.toml` (`disabled_plugins`).
 
-- **Folder plugins:** a *folder plugin* makes certain files browsable as folders. The panel lists them, and copy, move, delete, rename and new folder work inside them through the plugin.
+**The Plugins menu** lists the commands of the plugins that are on, under each plugin's name, plus *Disconnect* for a panel showing a connection and *Plugin settings…*. A panel that a plugin shows (an archive, a server) has a tinted background and a banner with the plugin's name below the list.
+
+- **Folder plugins:** a *folder plugin* makes certain files, or connections it opens, browsable as folders. The panel lists them, and copy, move, delete, rename and new folder work inside them through the plugin. Plugins can add menu commands and ask for input in forms the program draws.
 - **Interface:** the program and a plugin talk only through a C interface (`crates/sal-plugin-api`), so each plugin is built on its own. Each plugin brings its own language files in its `lang` folder (`plugins\7zip\lang\cs.toml`).
-- **Shipped:** the 7-Zip archive plugin. `plugins/example-filelist` is a small example for plugin authors and isn't installed.
+- **Shipped:** the 7-Zip archive plugin and the SCP plugin. `plugins/example-filelist` is a small example for plugin authors and isn't installed.
 - **Writing a plugin:** see [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ## Portable mode
@@ -166,6 +183,7 @@ config.toml        settings, keyboard shortcuts, hot paths, typed paths (written
 lang\en.toml       English UI strings (the template for translations)
 lang\cs.toml       Czech
 plugins\7zip\      the 7-Zip plugin: 7zip.spl and 7z.dll, 7-Zip's archive library
+plugins\scp\       the SCP plugin: scp.spl; known_hosts and the last connection's details
 ```
 
 - **First start:** when the folder has no `config.toml` yet, the settings are read from `%APPDATA%\RustySalamander\config.toml` (the location used before) and saved next to the program on exit. The old file is left untouched.

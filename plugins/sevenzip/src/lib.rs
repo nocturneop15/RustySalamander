@@ -75,7 +75,7 @@ impl SevenZip {
                 index: Some(r.index),
             })
             .collect();
-        Index { items }
+        Index { items, complete: true }
     }
 
     /// Write the archive again with `plan` deciding its items. A new archive
@@ -149,7 +149,7 @@ impl FolderPlugin for SevenZip {
         trf("{path} ({n} formats)", &[("path", &display_path(&self.lib.path)), ("n", &self.lib.formats.len())])
     }
 
-    fn list(&self, archive: &Path) -> io::Result<Index> {
+    fn list(&self, archive: &Path, _folder: &str) -> io::Result<Index> {
         Ok(Self::index_of(&self.lib.open(archive)?))
     }
 
@@ -293,12 +293,12 @@ mod tests {
             })
             .unwrap();
             assert!(last.1 > 0 && last.0 == last.1, "{ext}: progress {last:?}");
-            let ix = z.list(&arc).unwrap();
+            let ix = z.list(&arc, "").unwrap();
             assert!(ix.exists("složka 日本\\soubor 🦎.txt") && ix.exists("vnořená\\-a.txt") && ix.is_dir("vnořená"), "{ext}: {:?}", ix.items);
             assert_eq!(ix.size_of("složka 日本"), 100_004);
             // adding to an archive that exists replaces it
             z.add(&arc, &[(src.join("-a.txt"), "druhý.txt".into())], &mut |_, _| true).unwrap();
-            assert!(z.list(&arc).unwrap().exists("druhý.txt"));
+            assert!(z.list(&arc, "").unwrap().exists("druhý.txt"));
             z.rename(&arc, "složka 日本", "nová", &mut |_, _| true).unwrap();
             z.mkdir(&arc, "nová\\prázdná", &mut |_, _| true).unwrap();
             let out = t.path().join(format!("out-{ext}"));
@@ -308,17 +308,17 @@ mod tests {
             assert!(out.join("nová").join("prázdná").is_dir());
             assert!(!out.join("vnořená").exists(), "only what was asked for");
             z.delete(&arc, &["nová".into(), "druhý.txt".into()], &mut |_, _| true).unwrap();
-            let ix = z.list(&arc).unwrap();
+            let ix = z.list(&arc, "").unwrap();
             assert_eq!(ix.items.iter().filter(|i| !i.dir).map(|i| i.path.as_str()).collect::<Vec<_>>(), ["vnořená\\-a.txt"], "{ext}");
             // cancelling leaves the archive as it was
             let r = z.add(&arc, &[(src.join("složka 日本"), "znovu".into())], &mut |_, _| false);
             assert_eq!(r.unwrap_err().kind(), io::ErrorKind::Interrupted);
-            assert_eq!(z.list(&arc).unwrap().items.len(), ix.items.len());
+            assert_eq!(z.list(&arc, "").unwrap().items.len(), ix.items.len());
             assert!(fs::read_dir(t.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".new")), "no leftovers");
         }
-        assert!(z.list(&t.path().join("missing.7z")).is_err());
+        assert!(z.list(&t.path().join("missing.7z"), "").is_err());
         fs::write(t.path().join("bad.zip"), "not an archive").unwrap();
-        assert!(z.list(&t.path().join("bad.zip")).is_err());
+        assert!(z.list(&t.path().join("bad.zip"), "").is_err());
         assert!(z.add(&t.path().join("x.rar"), &[(src.join("-a.txt"), "a".into())], &mut |_, _| true).is_err(), "rar is read-only");
     }
 }

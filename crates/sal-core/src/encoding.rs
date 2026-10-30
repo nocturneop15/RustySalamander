@@ -180,8 +180,12 @@ pub fn display_name(name: &str) -> Cow<'_, str> {
     Cow::Owned(name.chars().map(|c| unmap_private(c).unwrap_or(c)).collect())
 }
 
-/// UTF-8 path for display, without the `\\?\` verbatim prefix.
+/// UTF-8 path for display, without the `\\?\` verbatim prefix. A plugin's
+/// connection shows as a URL: `\\?\scp\me@host\home` → `scp://me@host/home`.
 pub fn display_path(p: &Path) -> String {
+    if let Some((scheme, authority, inner)) = crate::location::virtual_parts(p) {
+        return format!("{scheme}://{authority}/{}", inner.join("/"));
+    }
     let s = p.to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")

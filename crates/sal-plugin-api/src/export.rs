@@ -66,6 +66,9 @@ pub const fn vtable<T: Plugin>() -> VTable {
         delete: delete::<T>,
         rename: rename::<T>,
         mkdir: mkdir::<T>,
+        commands: commands::<T>,
+        run: run_command::<T>,
+        close: close::<T>,
     }
 }
 
@@ -144,9 +147,10 @@ unsafe extern "C" fn status<T: Plugin>(this: *mut c_void, out: *const StrOut) {
     (*out).send(&s);
 }
 
-unsafe extern "C" fn list<T: Plugin>(this: *mut c_void, file: Wide, items: *const ItemOut, error: *const StrOut) -> i32 {
+unsafe extern "C" fn list<T: Plugin>(this: *mut c_void, file: Wide, folder: Str, items: *const ItemOut, complete: *mut bool, error: *const StrOut) -> i32 {
     run(error, || {
-        let index = me::<T>(this).list(&file.path())?;
+        let index = me::<T>(this).list(&file.path(), folder.get())?;
+        *complete = index.complete;
         let out = &*items;
         for it in &index.items {
             let raw = RawItem {
@@ -186,4 +190,21 @@ unsafe extern "C" fn rename<T: Plugin>(this: *mut c_void, file: Wide, old: Str, 
 
 unsafe extern "C" fn mkdir<T: Plugin>(this: *mut c_void, file: Wide, inner: Str, progress: *const ProgressFn, error: *const StrOut) -> i32 {
     run(error, || with_progress(progress, |p| me::<T>(this).mkdir(&file.path(), inner.get(), p)))
+}
+
+unsafe extern "C" fn commands<T: Plugin>(this: *mut c_void, out: *const StrOut) {
+    let list = catch_unwind(|| me::<T>(this).commands()).unwrap_or_default();
+    (*out).send(&crate::ui::encode_commands(&list));
+}
+
+unsafe extern "C" fn run_command<T: Plugin>(this: *mut c_void, command: Str, values: Str, out: *const StrOut, error: *const StrOut) -> i32 {
+    run(error, || {
+        let reply = me::<T>(this).run(command.get(), &crate::ui::decode_values(values.get()))?;
+        (*out).send(&crate::ui::encode_reply(&reply));
+        Ok(())
+    })
+}
+
+unsafe extern "C" fn close<T: Plugin>(this: *mut c_void, root: Wide) {
+    let _ = catch_unwind(|| me::<T>(this).close(&root.path()));
 }

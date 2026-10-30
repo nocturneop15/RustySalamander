@@ -121,6 +121,53 @@ pub fn row(ui: &mut Ui, kind: DriveType, letter: &str, label: &str, detail: &str
     resp
 }
 
+/// A full-width row for an open connection: icon and its name, which ends
+/// `reserve` points before the right edge (room for a button) and is
+/// shortened with "…" when it doesn't fit.
+pub fn connection_row(ui: &mut Ui, label: &str, selected: bool, reserve: f32) -> Response {
+    let h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let vis = ui.visuals();
+        let fill = if selected {
+            vis.selection.bg_fill
+        } else if resp.hovered() {
+            vis.widgets.hovered.weak_bg_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, 3.0, fill);
+        let icon = h - 6.0;
+        let ir = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - icon / 2.0), vec2(icon, icon));
+        paint(p, ir, DriveType::Network, if selected { vis.selection.bg_fill } else { vis.window_fill });
+        let fg = if selected { vis.selection.stroke.color } else { vis.text_color() };
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let x = ir.right() + 8.0;
+        let room = (rect.right() - reserve - 8.0 - x).max(10.0);
+        let g = fit_head(p, label, &font, fg, room);
+        p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, fg);
+    }
+    resp
+}
+
+/// Fit `text` into `max_w` by cutting from the right ("scp://admin@long-na…").
+fn fit_head(p: &egui::Painter, text: &str, font: &egui::FontId, color: Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
+    let g = p.layout_no_wrap(text.to_owned(), font.clone(), color);
+    if g.size().x <= max_w {
+        return g;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    for keep in (1..chars.len()).rev() {
+        let t: String = chars[..keep].iter().copied().chain(std::iter::once('…')).collect();
+        let g = p.layout_no_wrap(t, font.clone(), color);
+        if g.size().x <= max_w {
+            return g;
+        }
+    }
+    p.layout_no_wrap("…".into(), font.clone(), color)
+}
+
 /// Fit `text` into `max_w` by cutting from the left ("…\deep\folder"), so the
 /// end of a path stays readable.
 fn fit_tail(p: &egui::Painter, text: &str, font: &egui::FontId, color: Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {

@@ -18,7 +18,8 @@ The first build of `sal-app` compiles `7z.dll` from `third_party/7zip-26.05` wit
 
 - copies `crates/sal-app/lang/*.toml` to `target\<profile>\lang`;
 - builds the 7-Zip plugin with a nested `cargo build` in `target\plugins-build`;
-- installs the plugin into `target\<profile>\plugins\7zip`, together with its `lang` folder, `7z.dll` and 7-Zip's license files.
+- installs the plugin into `target\<profile>\plugins\7zip`, together with its `lang` folder, `7z.dll` and 7-Zip's license files;
+- builds the SCP plugin the same way and installs it into `target\<profile>\plugins\scp`.
 
 So `target\<profile>` is a complete portable installation.
 
@@ -30,6 +31,7 @@ So `target\<profile>` is a complete portable installation.
 | `crates/sal-app` | The GUI (egui/eframe): main window, panels, dialogs, worker, viewer, plugin host. Most features are covered by headless UI tests in `app.rs`. |
 | `crates/sal-plugin-api` | The interface between the program and plugin DLLs. Documented for plugin authors (`cargo doc -p sal-plugin-api --open`). |
 | `plugins/sevenzip` | The 7-Zip plugin. |
+| `plugins/scp` | The SCP plugin: SSH servers in a panel. |
 | `plugins/example-filelist` | The example plugin for [PLUGINS.md](PLUGINS.md). It is built and tested, but not installed. |
 | `third_party/7zip-26.05` | Unmodified 7-Zip source; only `CPP/7zip/Bundles/Format7zF` is built. |
 | `docs/` | This guide, the plugin guide and the analysis of the original program. |
@@ -41,6 +43,7 @@ So `target\<profile>` is a complete portable installation.
 - **unit tests** in `sal-core`, `sal-plugin-api` and the plugins;
 - **headless UI tests** in `crates/sal-app/src/app.rs`. They drive the real app with real egui frames and key events, but without an OS window, against temporary folders. A typical test presses F5, types a target, presses Enter, waits for the job and checks the files on disk.
 - **archive tests**, which use the plugin and `7z.dll` the build installed into `target\debug\plugins`. Without MinGW they are skipped with a message.
+- **the SCP plugin against a real SSH server**: the test starts a small russh server on `127.0.0.1` that runs each command through Git for Windows' bash (`C:\Program Files\Git\usr\bin`, which has `ls`, `scp`, `rm`, …). Keys are made with Git's `ssh-keygen`. Without Git for Windows it is skipped.
 
 Rules the tests keep, and new tests must keep too:
 

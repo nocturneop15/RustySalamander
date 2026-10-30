@@ -3,10 +3,15 @@
 //! starts and turned on and off in Settings → Plugins. The program contains
 //! none of them; what it and the plugins share is `sal-plugin-api`.
 //!
-//! A *folder plugin* shows certain files as folders (archives): the panel
-//! browses them, and the file operations work inside them through the
-//! plugin. A path that goes through such a file is virtual:
-//! `C:\x\a.zip\dir\f.txt`.
+//! A *folder plugin* shows things as folders: the panel browses them, and
+//! the file operations work inside them through the plugin. Paths there are
+//! virtual:
+//!
+//! - through a file the plugin handles (an archive): `C:\x\a.zip\dir\f.txt`;
+//! - inside a connection the plugin opened from the Plugins menu (a
+//!   *mount*): `\\?\scp\me@host\home\f.txt`, shown as
+//!   `scp://me@host/home/f.txt`. The open mounts are listed here, with the
+//!   plugin each belongs to.
 
 pub mod ops;
 
@@ -15,11 +20,55 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use sal_core::location;
 use sal_plugin_api::abi::{self, Descriptor, HostApi, Str, StrOut};
 use sal_plugin_api::host::{self, Info};
-pub use sal_plugin_api::{join_inner, FolderPlugin, Index};
+pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Reply, Values};
+
+/// An open connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Connection {
+    pub root: PathBuf,
+    /// The id of the plugin it belongs to.
+    pub plugin: String,
+    /// The folder it opened in (the user's home on a server); the drive
+    /// selector goes there.
+    pub start: PathBuf,
+}
+
+/// Open connections, in the order they were opened.
+static MOUNTS: Mutex<Vec<Connection>> = Mutex::new(Vec::new());
+
+/// Remember a connection the plugin `id` opened at `start`.
+pub fn add_mount(root: &Path, id: &str, start: &Path) {
+    let mut m = MOUNTS.lock().unwrap();
+    m.retain(|c| c.root != root);
+    m.push(Connection { root: root.to_path_buf(), plugin: id.to_owned(), start: start.to_path_buf() });
+}
+
+/// Forget a connection (after the plugin closed it).
+pub fn remove_mount(root: &Path) {
+    MOUNTS.lock().unwrap().retain(|c| c.root != root);
+}
+
+/// The open connections.
+pub fn connections() -> Vec<Connection> {
+    MOUNTS.lock().unwrap().clone()
+}
+
+/// The open connections: (root, plugin id).
+pub fn mounts() -> Vec<(PathBuf, String)> {
+    connections().into_iter().map(|c| (c.root, c.plugin)).collect()
+}
+
+/// The root of the connection `path` is in, if it is open.
+pub fn mount_root_of(path: &Path) -> Option<(PathBuf, String)> {
+    let (scheme, authority, _) = location::virtual_parts(path)?;
+    let root = location::virtual_path(&scheme, &authority, &[]);
+    mounts().into_iter().find(|(r, _)| *r == root)
+}
 
 /// Translates a plugin's text; `ctx` is its `lang` folder (a `PathBuf`).
 unsafe extern "C" fn translate(ctx: *mut c_void, msg: Str, out: *const StrOut) {
@@ -141,6 +190,12 @@ impl Plugins {
         self.active.iter().find(|p| p.id() == id)
     }
 
+    /// A plugin's name in the language in use (its id when it wasn't found
+    /// in a DLL, as in tests).
+    pub fn name_of(&self, id: &str) -> String {
+        self.found.iter().find(|f| f.info.id == id).map(|f| f.tr(&f.info.name)).unwrap_or_else(|| id.to_owned())
+    }
+
     /// The plugin, file and path inside it, when `path` goes through a file
     /// that an active plugin shows as a folder.
     pub fn split(&self, path: &Path) -> Option<(Arc<dyn FolderPlugin>, PathBuf, String)> {
@@ -194,6 +249,12 @@ fn load_library(file: &Path) -> Result<&'static Descriptor, String> {
 pub fn split(plugins: &[Arc<dyn FolderPlugin>], path: &Path) -> Option<(Arc<dyn FolderPlugin>, PathBuf, String)> {
     if plugins.is_empty() {
         return None;
+    }
+    // inside an open connection
+    if let Some((_, _, names)) = location::virtual_parts(path) {
+        let (root, id) = mount_root_of(path)?;
+        let plugin = plugins.iter().find(|p| p.id() == id)?;
+        return Some((plugin.clone(), root, names.join("\\")));
     }
     // without a trailing separator: "a.zip\" names the file a.zip
     let path: PathBuf = path.components().collect();
@@ -258,7 +319,7 @@ mod tests {
         fn status(&self) -> String {
             String::new()
         }
-        fn list(&self, _: &Path) -> io::Result<Index> {
+        fn list(&self, _: &Path, _: &str) -> io::Result<Index> {
             Ok(Index::default())
         }
         fn extract(&self, _: &Path, _: &[String], _: &Path, _: &mut Progress) -> io::Result<()> {

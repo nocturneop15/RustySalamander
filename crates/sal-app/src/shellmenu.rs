@@ -304,6 +304,37 @@ mod imp {
         Some(if path.contains(' ') { format!("\"{path}\"") } else { path })
     }
 
+    /// The standard "Open" dialog for any file (a plugin form's Browse…),
+    /// starting in the folder of `current` when given. Never in tests: they
+    /// must not open windows.
+    pub fn pick_file(owner: Option<isize>, title: &str, current: Option<&Path>) -> Option<PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_DONTADDTORECENT, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW};
+        if cfg!(test) {
+            return None;
+        }
+        let filter: Vec<u16> = "All files (*.*)\0*.*\0\0".encode_utf16().collect();
+        let title = wide(title);
+        let dir: Option<Vec<u16>> = current.and_then(Path::parent).filter(|d| d.is_dir()).map(|d| d.as_os_str().encode_wide().chain([0]).collect());
+        let mut file = vec![0u16; 32768];
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: owner.map(hwnd).unwrap_or_default(),
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: PCWSTR(title.as_ptr()),
+            lpstrInitialDir: dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT,
+            ..Default::default()
+        };
+        if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
+            return None;
+        }
+        let n = file.iter().position(|&c| c == 0).unwrap_or(0);
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&file[..n])))
+    }
+
     /// Diagnostics (SAL_DIAG_MENU set): log to stderr.
     pub fn diag(msg: &str) {
         if std::env::var_os("SAL_DIAG_MENU").is_some() {
@@ -373,7 +404,7 @@ mod imp {
 #[cfg(all(windows, test))]
 use imp::verbs;
 #[cfg(windows)]
-pub use imp::{arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_program, screen_point, set_menu_theme, show_classic, show_native};
+pub use imp::{arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_program, screen_point, set_menu_theme, show_classic, show_native};
 
 #[cfg(not(windows))]
 mod fallback {
@@ -394,13 +425,16 @@ mod fallback {
         0
     }
     pub fn set_menu_theme(_: Option<bool>) {}
+    pub fn pick_file(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
+        None
+    }
     pub fn pick_program(_: Option<isize>, _: &str) -> Option<String> {
         None
     }
 }
 
 #[cfg(not(windows))]
-pub use fallback::{clipboard_has_files, invoke_verb, pick_program, screen_point, set_menu_theme, show_classic, show_native};
+pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_program, screen_point, set_menu_theme, show_classic, show_native};
 
 #[cfg(all(test, windows))]
 mod tests {

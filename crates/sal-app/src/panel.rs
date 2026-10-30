@@ -13,8 +13,10 @@ use sal_core::{quicksearch, EntryKind, FileEntry, MaskGroup, SortSpec};
 
 use crate::plugins::{self, FolderPlugin, Index};
 
-/// The archive being browsed: the plugin showing it, its file, the folder
-/// inside it, and its index (read once, again only when the file changes).
+/// What a plugin shows in the panel: the plugin, the archive file or the
+/// connection's root, the folder inside, and the index. An archive's index
+/// is complete (read once, again only when the file changes); a
+/// connection's is the listing of the folder shown.
 #[derive(Clone)]
 pub struct ArchiveView {
     pub plugin: Arc<dyn FolderPlugin>,
@@ -122,7 +124,7 @@ impl Panel {
         if let Some((plugin, file, inner)) = plugins::split(&self.plugins, path) {
             {
                 let view = self.archive_view(&plugin, &file, inner)?;
-                if !view.index.is_dir(&view.inner) {
+                if view.index.complete && !view.index.is_dir(&view.inner) {
                     return Err(format!("{}: {}", display_path(path), crate::i18n::tr("not found in the archive")));
                 }
                 return Ok((archive_listing(&view, vis, self.sort), Some(view)));
@@ -132,13 +134,14 @@ impl Panel {
         Ok((listing, None))
     }
 
-    /// The archive's index, read again only when the file has changed.
+    /// The plugin's index for `inner`: an archive's is read again only when
+    /// the file has changed, a connection's folder every time.
     fn archive_view(&mut self, plugin: &Arc<dyn FolderPlugin>, file: &Path, inner: String) -> Result<ArchiveView, String> {
         let stamp = stamp_of(file);
-        if let Some(v) = self.archive.as_ref().filter(|v| v.file == file && v.stamp == stamp && v.plugin.id() == plugin.id()) {
+        if let Some(v) = self.archive.as_ref().filter(|v| v.index.complete && v.file == file && v.stamp == stamp && v.plugin.id() == plugin.id()) {
             return Ok(ArchiveView { inner, ..v.clone() });
         }
-        let index = plugin.list(file).map_err(|e| format!("{}: {e}", display_path(file)))?;
+        let index = plugin.list(file, &inner).map_err(|e| format!("{}: {e}", display_path(&file.join(&inner))))?;
         Ok(ArchiveView { plugin: plugin.clone(), file: file.to_path_buf(), inner, index: Arc::new(index), stamp })
     }
 
@@ -176,7 +179,7 @@ impl Panel {
         // directory vanished: climb to the nearest existing ancestor (inside
         // an archive: the nearest folder the archive still has)
         let exists = |p: &Path, me: &mut Self| match plugins::split(&me.plugins, p) {
-            Some((plugin, file, inner)) => me.archive_view(&plugin, &file, inner.clone()).is_ok_and(|v| v.index.is_dir(&inner)),
+            Some((plugin, file, inner)) => me.archive_view(&plugin, &file, inner.clone()).is_ok_and(|v| !v.index.complete || v.index.is_dir(&inner)),
             None => p.is_dir(),
         };
         while !exists(&target, self) {
@@ -202,8 +205,9 @@ impl Panel {
             return false;
         }
         self.last_check = Instant::now();
-        // a server's share list has no mtime; re-enumerating it would hit the network
-        if location::unc_server(&self.listing.path).is_some() {
+        // a server's share list has no mtime; re-enumerating it would hit the
+        // network, and so would a plugin's connection (refreshed with Ctrl+R)
+        if location::unc_server(&self.listing.path).is_some() || self.archive.as_ref().is_some_and(|a| !a.index.complete) {
             return false;
         }
         let now = std::fs::metadata(self.stamp_path()).and_then(|m| m.modified()).ok();
@@ -222,6 +226,18 @@ impl Panel {
             self.cursor = self.listing.entries.iter().position(|e| e.name == n).unwrap_or(0);
         }
         self.scroll_to_cursor = true;
+    }
+
+    /// Leave a plugin's connection (closed, or its plugin turned off): back
+    /// to the last folder in the history that is outside it.
+    pub fn leave_connection(&mut self, vis: Visibility) {
+        let back: Vec<PathBuf> = self.history[..self.history_pos.min(self.history.len())].iter().rev().filter(|p| location::virtual_parts(p).is_none()).cloned().collect();
+        for p in back {
+            if self.load(&p, vis, None).is_ok() {
+                return;
+            }
+        }
+        let _ = self.load(&fallback_dir(), vis, None);
     }
 
     pub fn go_parent(&mut self, vis: Visibility) -> Result<(), String> {

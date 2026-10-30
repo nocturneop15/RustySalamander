@@ -3,7 +3,8 @@
 //! error questions) the files on disk.
 //!
 //! Copying out extracts into a temporary folder and moves the items from
-//! there; copying in adds the items under the target folder's path.
+//! there; copying in adds the items under the target folder's path. The
+//! same works for archives and for connections a plugin opened.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -89,8 +90,9 @@ impl Op<'_> {
         }
     }
 
-    fn index(&self, file: &Path) -> Result<Index, String> {
-        self.plugin.list(file).map_err(|e| format!("{}: {e}", display_path(file)))
+    /// What is in `folder` (and, for an archive, everywhere else).
+    fn index(&self, file: &Path, folder: &str) -> Result<Index, String> {
+        self.plugin.list(file, folder).map_err(|e| format!("{}: {e}", display_path(file)))
     }
 }
 
@@ -190,7 +192,8 @@ fn transfer(o: &Op, kind: OpKind, sources: &[PathBuf], target: &Path, obs: &mut 
 /// are there already. Returns the items added.
 fn pack(o: &Op, obs: &mut dyn OpObserver, file: &Path, inner: &str, sources: &[PathBuf], summary: &mut OpSummary) -> Result<Vec<PathBuf>, String> {
     o.writable(file)?;
-    let ix = if file.exists() { o.index(file)? } else { Index::default() };
+    // a connection always exists; an archive may be created by this copy
+    let ix = if file.exists() || sal_core::location::virtual_parts(file).is_some() { o.index(file, inner)? } else { Index::default() };
     let (mut overwrite_all, mut skip_all) = (false, false);
     let mut chosen = Vec::new();
     for s in sources {

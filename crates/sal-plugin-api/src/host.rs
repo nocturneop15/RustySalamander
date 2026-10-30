@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::abi::*;
-use crate::{FolderPlugin, Index, Item, Progress};
+use crate::{Command, FolderPlugin, Index, Item, Progress, Reply, Values};
 
 /// Who a plugin is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,12 +115,13 @@ impl FolderPlugin for Remote {
         s
     }
 
-    fn list(&self, file: &Path) -> io::Result<Index> {
+    fn list(&self, file: &Path, folder: &str) -> io::Result<Index> {
         let file = Wide::encode(file);
         let mut items: Vec<Item> = Vec::new();
+        let mut complete = false;
         let out = ItemOut { ctx: &mut items as *mut Vec<Item> as *mut c_void, put: put_item };
-        call(|e| unsafe { (self.vt.list)(self.this, Wide::of(&file), &out, e) })?;
-        Ok(Index { items })
+        call(|e| unsafe { (self.vt.list)(self.this, Wide::of(&file), Str::new(folder), &out, &mut complete, e) })?;
+        Ok(Index { items, complete })
     }
 
     fn extract(&self, file: &Path, items: &[String], out: &Path, progress: &mut Progress) -> io::Result<()> {
@@ -152,6 +153,25 @@ impl FolderPlugin for Remote {
         let file = Wide::encode(file);
         with_progress(progress, |p| call(|e| unsafe { (self.vt.mkdir)(self.this, Wide::of(&file), Str::new(inner), p, e) }))
     }
+
+    fn commands(&self) -> Vec<Command> {
+        let mut s = String::new();
+        unsafe { (self.vt.commands)(self.this, &StrOut::new(&mut s)) };
+        crate::ui::decode_commands(&s)
+    }
+
+    fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
+        let values = crate::ui::encode_values(input);
+        let mut reply = String::new();
+        let out = StrOut::new(&mut reply);
+        call(|e| unsafe { (self.vt.run)(self.this, Str::new(command), Str::new(&values), &out, e) })?;
+        crate::ui::decode_reply(&reply).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the plugin sent a damaged reply"))
+    }
+
+    fn close(&self, root: &Path) {
+        let root = Wide::encode(root);
+        unsafe { (self.vt.close)(self.this, Wide::of(&root)) }
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +183,7 @@ mod tests {
     /// A plugin for `.mem` files kept in memory; adding "boom" panics.
     struct Mem {
         items: Mutex<Vec<Item>>,
+        closed: Mutex<Vec<PathBuf>>,
     }
 
     impl FolderPlugin for Mem {
@@ -178,8 +199,11 @@ mod tests {
         fn status(&self) -> String {
             trf("{n} items", &[("n", &self.items.lock().unwrap().len())])
         }
-        fn list(&self, _: &Path) -> io::Result<Index> {
-            Ok(Index { items: self.items.lock().unwrap().clone() })
+        fn list(&self, _: &Path, folder: &str) -> io::Result<Index> {
+            if folder == "missing" {
+                return Err(io::ErrorKind::NotFound.into());
+            }
+            Ok(Index { items: self.items.lock().unwrap().clone(), complete: true })
         }
         fn extract(&self, _: &Path, items: &[String], out: &Path, progress: &mut Progress) -> io::Result<()> {
             if !progress(1, 2) {
@@ -214,6 +238,24 @@ mod tests {
             self.items.lock().unwrap().push(Item { path: inner.to_owned(), dir: true, size: 0, modified: None, attrs: 0x10, index: None });
             Ok(())
         }
+        fn commands(&self) -> Vec<Command> {
+            vec![Command { id: "open".into(), label: "Open memory…".into() }]
+        }
+        fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
+            match command {
+                "open" => Ok(Reply::Form(crate::Form {
+                    title: "Open".into(),
+                    ok: "OK".into(),
+                    command: "mount".into(),
+                    fields: vec![crate::Field { id: "name".into(), label: "Name:".into(), value: input.get("panel").cloned().unwrap_or_default(), ..Default::default() }],
+                })),
+                "mount" => Ok(Reply::Mount(crate::Mount { scheme: "mem".into(), authority: input["name"].clone(), folder: "a".into() })),
+                _ => Err(io::Error::new(io::ErrorKind::Unsupported, "no")),
+            }
+        }
+        fn close(&self, root: &Path) {
+            self.closed.lock().unwrap().push(root.to_path_buf());
+        }
     }
 
     impl Plugin for Mem {
@@ -224,7 +266,7 @@ mod tests {
             if dir.ends_with("bad") {
                 return Err(format!("{} is bad", dir.display()));
             }
-            Ok(Mem { items: Mutex::new(Vec::new()) })
+            Ok(Mem { items: Mutex::new(Vec::new()), closed: Mutex::new(Vec::new()) })
         }
     }
 
@@ -254,7 +296,9 @@ mod tests {
         assert!(p.handles("a.mem") && !p.handles("a.zip") && p.can_write(file) && p.id() == "mem");
         p.add(file, &[(src.clone(), "složka\\日本.txt".into())], &mut |_, _| true).unwrap();
         p.mkdir(file, "prázdná", &mut |_, _| true).unwrap();
-        let ix = p.list(file).unwrap();
+        let ix = p.list(file, "").unwrap();
+        assert!(ix.complete);
+        assert_eq!(p.list(file, "missing").unwrap_err().kind(), io::ErrorKind::NotFound);
         assert_eq!(ix.items.len(), 2);
         let it = &ix.items[0];
         assert_eq!((it.path.as_str(), it.size, it.index, it.attrs), ("složka\\日本.txt", 4, Some(7), 0x20));
@@ -277,7 +321,18 @@ mod tests {
         let e = p.add(file, &[(src.clone(), "boom".into())], &mut |_, _| true).unwrap_err();
         assert!(e.to_string().starts_with("the plugin failed"), "a panic becomes an error: {e}");
         p.delete(file, &["prázdná".into()], &mut |_, _| true).unwrap();
-        assert_eq!(p.list(file).unwrap().items.len(), 1);
+        assert_eq!(p.list(file, "").unwrap().items.len(), 1);
+
+        // commands, forms and connections cross the interface too
+        assert_eq!(p.commands(), [Command { id: "open".into(), label: "Open memory…".into() }]);
+        let input: Values = [("panel".to_owned(), r"C:\x".to_owned())].into();
+        let Reply::Form(form) = p.run("open", &input).unwrap() else { panic!("no form") };
+        assert_eq!((form.command.as_str(), form.fields[0].value.as_str()), ("mount", r"C:\x"));
+        let input: Values = [("name".to_owned(), "ram 🦎".to_owned())].into();
+        let Reply::Mount(m) = p.run(&form.command, &input).unwrap() else { panic!("no mount") };
+        assert_eq!(m.root(), crate::mount_root("mem", "ram 🦎"));
+        assert_eq!(p.run("nothing", &Values::new()).unwrap_err().to_string(), "no");
+        p.close(&m.root());
         drop(p);
         std::fs::remove_dir_all(&t).unwrap();
     }

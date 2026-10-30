@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.0-alpha (2026-10-30)
+
+Plugins can now add commands, ask for input and open connections, and the first plugin that does is **SCP**: files on SSH servers, in a panel.
+
+### SCP plugin (new)
+
+- **Servers in a panel:** **Plugins → Connect to server…** asks for the server, port, user name and a password or a private key (with its passphrase). The server's files open in the active panel as `scp://user@host/home/user`; copying in and out, deleting, renaming, new folders, viewing and editing work as in any folder, with progress, pausing and cancelling.
+- **Sign-in:** password (servers that use keyboard-interactive prompts get it too) or a private key in OpenSSH or PEM format.
+- **Server keys:** keys are checked against `%USERPROFILE%\.ssh\known_hosts` and the plugin's own `known_hosts`. A new server shows its key fingerprint before you trust it; a changed key is refused with a warning.
+- **Several sessions at once:** each is listed in the Plugins menu and in the drive selector.
+- **Remembered:** the last server, port, user and key file, never a password.
+- **How it works:** SSH in pure Rust (`russh`, with `ring`); transfers use the SCP protocol, listings and file management `ls`, `rm`, `mv` and `mkdir` on the server. No SFTP yet.
+
+### Plugins
+
+- **Plugins menu:** the commands of the plugins that are on, under each plugin's name; *Disconnect from …* for every open session, one per row (the menu widens to fit); *Plugin settings…*.
+- **Forms drawn by the program:** plugins describe dialogs (text, passwords, a file with Browse…, options, check boxes, notes) and the program draws them like its own.
+- **Connections:** plugins can open servers and other places in a panel, shown and typed as `scheme://…` paths. Closing one, turning its plugin off or quitting returns the panel to the folder it showed before.
+- **Plugin panels:** panels a plugin shows, archives included, have a tinted background and a banner with the plugin's name below the list.
+- **Plugin interface version 3:** `list` takes the folder to list, so plugins can list one folder at a time; `commands`, `run` and `close` are new. Plugins built for 0.1 must be rebuilt. The guide (`docs/PLUGINS.md`) has a new section on commands, forms and connections.
+
+### Drive selector
+
+- **Connections:** open sessions are listed under *Connections*; choosing one opens it in that panel at its start folder. Each row has a **Disconnect** button (or press Delete). Long names are shortened with "…", and the selector widens to fit them.
+- **Fits the window:** a long list in a low window no longer covers the menu bar; the selector stays below the path bar and scrolls, keeping the chosen row in view.
+- **Simpler:** no Cancel button and no empty space below the list (Esc or a click outside closes it).
+
+### Fixes
+
+- **Copying into a connection:** the copy dialog keeps `scp://` targets, and a typed `scp://…` path works in the path bar.
+
 ## 0.1.0-alpha (2026-10-30)
 
 The first public release: an alpha of a Rust rewrite of Open Salamander with full Unicode support. Everyday file management works, but many of Salamander's features are still missing (see *Not yet* below), and the plugin interface may change between releases.

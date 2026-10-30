@@ -1,0 +1,23 @@
+[package]
+name = "sal-plugin-scp"
+description = "RustySalamander plugin: files on SSH servers through the SCP protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# A DLL the program loads from plugins\scp\scp.spl (sal-app's build puts it there).
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sal-plugin-api = { path = "../../crates/sal-plugin-api" }
+# pure-Rust SSH; ring instead of aws-lc-rs, which would need cmake and nasm
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "io-util", "fs"] }
+
+[dev-dependencies]
+tempfile = "3"
+# the test SSH server runs commands through Git for Windows' bash
+tokio = { version = "1", features = ["process", "net"] }

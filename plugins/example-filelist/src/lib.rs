@@ -94,7 +94,7 @@ impl FolderPlugin for FileList {
         String::new()
     }
 
-    fn list(&self, file: &Path) -> io::Result<Index> {
+    fn list(&self, file: &Path, _folder: &str) -> io::Result<Index> {
         let mut items = Vec::new();
         for (line, path) in entries(file)? {
             // files that are gone are left out; folders aren't listed
@@ -103,7 +103,7 @@ impl FolderPlugin for FileList {
                 items.push(Item { path: name_of(&path), dir: false, size: md.len(), modified: md.modified().ok(), attrs: 0, index: Some(line) });
             }
         }
-        Ok(Index { items })
+        Ok(Index { items, complete: true })
     }
 
     fn extract(&self, file: &Path, items: &[String], out: &Path, progress: &mut Progress) -> io::Result<()> {
@@ -185,7 +185,7 @@ mod tests {
 
         let p = through_the_program();
         assert!(p.handles("x.FileList") && !p.handles("x.txt"));
-        let names: Vec<String> = p.list(&list).unwrap().items.into_iter().map(|i| i.path).collect();
+        let names: Vec<String> = p.list(&list, "").unwrap().items.into_iter().map(|i| i.path).collect();
         assert_eq!(names, ["zpráva 🦎.txt", "b.bin"], "missing files are left out");
 
         // copy out, with progress, and cancelled
@@ -206,7 +206,7 @@ mod tests {
         fs::write(&c, "c").unwrap();
         p.add(&list, &[(c.clone(), "c.txt".into())], &mut |_, _| true).unwrap();
         p.delete(&list, &["zpráva 🦎.txt".into()], &mut |_, _| true).unwrap();
-        let names: Vec<String> = p.list(&list).unwrap().items.into_iter().map(|i| i.path).collect();
+        let names: Vec<String> = p.list(&list, "").unwrap().items.into_iter().map(|i| i.path).collect();
         assert_eq!(names, ["b.bin", "c.txt"]);
         assert!(a.is_file(), "deleting from the list keeps the file");
         let e = p.mkdir(&list, "new", &mut |_, _| true).unwrap_err();

@@ -10,12 +10,15 @@
 //! [`Plugin`] and exports itself with [`export_plugin!`](crate::export_plugin); the program wraps
 //! what it finds back into a [`FolderPlugin`].
 //!
-//! A *folder plugin* shows certain files as folders (archives): the panel
-//! browses them, and the file operations work inside them through the
-//! plugin. A path that goes through such a file is virtual:
-//! `C:\x\a.zip\dir\f.txt`.
+//! A *folder plugin* shows things as folders in a panel, and the file
+//! operations work inside them through the plugin:
 //!
-//! The guide for plugin authors, with a complete example, is
+//! - **files** it handles, such as archives: a path through such a file is
+//!   virtual, `C:\x\a.zip\dir\f.txt`;
+//! - **connections** it opens from a command in the Plugins menu, such as a
+//!   server: a [`Mount`] with a virtual root, shown as `scp://user@host/dir`.
+//!
+//! The guide for plugin authors, with complete examples, is
 //! `docs/PLUGINS.md` in the repository.
 
 #![warn(missing_docs)]
@@ -24,34 +27,50 @@ pub mod abi;
 #[doc(hidden)]
 pub mod export;
 pub mod host;
+pub mod ui;
 
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::SystemTime;
 
 pub use export::{n_, tr, trf};
+pub use ui::{Command, Field, FieldKind, Form, Mount, Reply, Values};
 
 /// The attribute bit of folders (`FILE_ATTRIBUTE_DIRECTORY`).
 pub const ATTR_DIRECTORY: u32 = 0x10;
+/// The attribute bit of hidden items (`FILE_ATTRIBUTE_HIDDEN`).
+pub const ATTR_HIDDEN: u32 = 0x2;
 
 /// Reports (bytes done, bytes total); returning false cancels. It may block
 /// for as long as the operation is paused.
 pub type Progress<'a> = dyn FnMut(u64, u64) -> bool + 'a;
 
-/// A plugin that shows certain files as folders.
+/// A plugin that shows files it handles, or connections it opens, as
+/// folders.
+///
+/// `file` in the methods below is the file on disk (an archive) or the root
+/// of a connection the plugin opened ([`Mount::root`]). Paths inside it
+/// ("inner paths") are `\`-separated without a leading separator; the root
+/// is `""`.
 pub trait FolderPlugin: Send + Sync {
     /// Its id in the configuration ("7zip").
     fn id(&self) -> &str;
-    /// Whether a file with this name opens as a folder.
+    /// Whether a file with this name opens as a folder. Plugins that only
+    /// open connections return false.
     fn handles(&self, name: &str) -> bool;
-    /// Whether the file's contents can be changed.
+    /// Whether the contents can be changed.
     fn can_write(&self, file: &Path) -> bool;
     /// One line about its state, for Settings (e.g. its library and formats).
     fn status(&self) -> String;
 
-    /// Everything in the file.
-    fn list(&self, file: &Path) -> io::Result<Index>;
+    /// The items in the folder `folder`. A plugin that reads a whole file at
+    /// once (an archive) returns everything and sets [`Index::complete`];
+    /// the program then asks only again when the file changes. Otherwise
+    /// return at least the folder's children; the program asks for each
+    /// folder it shows. Fail with `NotFound` when `folder` isn't a folder.
+    fn list(&self, file: &Path, folder: &str) -> io::Result<Index>;
     /// Copy `items` (folders with their contents) to `out`, keeping their
     /// paths: `out\inner\item`.
     fn extract(&self, file: &Path, items: &[String], out: &Path, progress: &mut Progress) -> io::Result<()>;
@@ -64,14 +83,34 @@ pub trait FolderPlugin: Send + Sync {
     fn rename(&self, file: &Path, old: &str, new: &str, progress: &mut Progress) -> io::Result<()>;
     /// Create the folder `inner`.
     fn mkdir(&self, file: &Path, inner: &str, progress: &mut Progress) -> io::Result<()>;
+
+    /// Commands for the Plugins menu, labels translated.
+    fn commands(&self) -> Vec<Command> {
+        Vec::new()
+    }
+    /// Run `command` (from [`FolderPlugin::commands`], or the
+    /// [`Form::command`] of a form the plugin showed) with `input`: the
+    /// form's values, plus `panel` (the active panel's path) and `mount`
+    /// (the root of the plugin's connection shown in it, if any). It runs
+    /// in the background, so it may take a while (connecting to a server).
+    fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
+        let _ = input;
+        Err(io::Error::new(io::ErrorKind::Unsupported, format!("unknown command \"{command}\"")))
+    }
+    /// The connection with this root ([`Mount::root`]) is closed by the user
+    /// or the program is ending: release it.
+    fn close(&self, root: &Path) {
+        let _ = root;
+    }
 }
 
 /// What a plugin DLL says about itself and how it starts.
 pub trait Plugin: FolderPlugin + Sized + 'static {
     /// Its id in the configuration; the same as [`FolderPlugin::id`].
     const ID: &'static str;
-    /// The name shown in Settings → Plugins, in English, marked with [`n_`]
-    /// (the program translates it from the plugin's language files).
+    /// The name shown in Settings → Plugins and on its panels, in English,
+    /// marked with [`n_`] (the program translates it from the plugin's
+    /// language files).
     const NAME: &'static str;
     /// One or two sentences about what the plugin does, in English, marked
     /// with [`n_`].
@@ -91,10 +130,33 @@ pub fn join_inner(base: &str, name: &str) -> String {
 
 /// Whether `path` is `folder` or inside it.
 pub fn under(path: &str, folder: &str) -> bool {
-    path == folder || (path.len() > folder.len() && path.starts_with(folder) && path.as_bytes()[folder.len()] == b'\\')
+    folder.is_empty() || path == folder || (path.len() > folder.len() && path.starts_with(folder) && path.as_bytes()[folder.len()] == b'\\')
 }
 
-/// One item inside a plugin's file.
+/// The root of a connection: `\\?\<scheme>\<authority>`, a path no file
+/// system has, shown as `<scheme>://<authority>`.
+pub fn mount_root(scheme: &str, authority: &str) -> PathBuf {
+    PathBuf::from(format!(r"\\?\{scheme}\{authority}"))
+}
+
+/// The scheme and authority of a connection root or a path inside one, and
+/// the inner path: `\\?\scp\me@host\home\me` → `("scp", "me@host", "home\me")`.
+pub fn mount_of(path: &Path) -> Option<(String, String, String)> {
+    let mut parts = path.components();
+    let Some(Component::Prefix(p)) = parts.next() else { return None };
+    let Prefix::Verbatim(scheme) = p.kind() else { return None };
+    let scheme = scheme.to_str()?.to_owned();
+    // a scheme is lowercase ASCII, which tells it from \\?\Volume{…} and the like
+    if scheme.is_empty() || !scheme.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+        return None;
+    }
+    let mut rest = parts.filter_map(|c| if let Component::Normal(s) = c { Some(s.to_string_lossy().into_owned()) } else { None });
+    let authority = rest.next()?;
+    let inner: Vec<String> = rest.collect();
+    Some((scheme, authority, inner.join("\\")))
+}
+
+/// One item inside a plugin's file or connection.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     /// Path inside, `\`-separated, without a leading separator.
@@ -103,22 +165,27 @@ pub struct Item {
     pub dir: bool,
     /// Size in bytes (0 for folders; the program adds up their files).
     pub size: u64,
-    /// Last change, if the file records it.
+    /// Last change, if known.
     pub modified: Option<SystemTime>,
     /// Windows file attributes (`FILE_ATTRIBUTE_*`); [`ATTR_DIRECTORY`] is
-    /// added for folders.
+    /// added for folders, [`ATTR_HIDDEN`] hides an item unless hidden files
+    /// are shown.
     pub attrs: u32,
     /// The plugin's own number for it; `None` for folders known only from
     /// the paths inside them.
     pub index: Option<u32>,
 }
 
-/// Everything inside a plugin's file, for browsing it folder by folder.
+/// Items inside a plugin's file or connection, for browsing it folder by
+/// folder.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
-    /// Every item, in any order. Folders don't need entries of their own:
-    /// a folder that appears only in the paths of other items exists too.
+    /// The items, in any order. Folders don't need entries of their own: a
+    /// folder that appears only in the paths of other items exists too.
     pub items: Vec<Item>,
+    /// Whether `items` is everything (a whole archive). When false, they are
+    /// the listed folder's contents, and folder sizes are unknown.
+    pub complete: bool,
 }
 
 /// Size, files and folders inside a folder.
@@ -184,12 +251,12 @@ impl Index {
     }
 
     /// Size, files and folders inside the folder `inner` (like a folder size
-    /// calculated on disk).
+    /// calculated on disk). Meaningful only for a complete index.
     pub fn stats(&self, inner: &str) -> Stats {
         let mut s = Stats::default();
         let mut dirs = HashSet::new();
         for it in self.items.iter().filter(|it| it.path.len() > inner.len() && under(&it.path, inner)) {
-            let rest = &it.path[inner.len() + 1..];
+            let rest = if inner.is_empty() { &it.path[..] } else { &it.path[inner.len() + 1..] };
             if it.dir {
                 dirs.insert(rest.to_owned());
             } else {
@@ -213,6 +280,16 @@ impl Index {
     }
 }
 
+/// A path's text as given, for the names in [`Values`].
+pub(crate) fn path_text(p: &Path) -> String {
+    p.as_os_str().to_string_lossy().into_owned()
+}
+
+/// A path from its text in [`Values`].
+pub(crate) fn text_path(s: &str) -> PathBuf {
+    PathBuf::from(OsString::from(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,7 +301,8 @@ mod tests {
     #[test]
     fn folders_of_an_index() {
         let ix = Index {
-            items: vec![item("složka 日本", true, 0), item("a.txt", false, 3), item("složka 日本\\soubor 🦎.txt", false, 6), item("jen\\v cestě\\x.bin", false, 10)]
+            items: vec![item("složka 日本", true, 0), item("a.txt", false, 3), item("složka 日本\\soubor 🦎.txt", false, 6), item("jen\\v cestě\\x.bin", false, 10)],
+            complete: true,
         };
         let root: Vec<(String, bool, u64)> = ix.children("").into_iter().map(|i| (i.path, i.dir, i.size)).collect();
         assert_eq!(root, [("a.txt".into(), false, 3), ("jen".into(), true, 10), ("složka 日本".into(), true, 6)], "folders only known from deeper paths are listed too");
@@ -233,5 +311,18 @@ mod tests {
         assert!(ix.exists("a.txt") && !ix.exists("b.txt"));
         assert_eq!(ix.size_of("složka 日本"), 6);
         assert_eq!(ix.stats("jen"), Stats { bytes: 10, files: 1, dirs: 1 });
+        assert_eq!(ix.stats(""), Stats { bytes: 19, files: 3, dirs: 3 });
+    }
+
+    #[test]
+    fn connection_roots() {
+        let root = mount_root("scp", "me@host:2222");
+        assert_eq!(mount_of(&root), Some(("scp".into(), "me@host:2222".into(), String::new())));
+        assert_eq!(mount_of(&root.join("home").join("me")), Some(("scp".into(), "me@host:2222".into(), "home\\me".into())));
+        assert!(root.is_absolute() && root.join("a").parent() == Some(root.as_path()));
+        assert_eq!(mount_of(Path::new(r"C:\x")), None);
+        assert_eq!(mount_of(Path::new(r"\\?\C:\x")), None);
+        assert_eq!(mount_of(Path::new(r"\\?\Volume{1}\x")), None);
+        assert_eq!(mount_of(Path::new(r"\\server\share")), None);
     }
 }

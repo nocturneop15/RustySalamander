@@ -87,6 +87,13 @@ enum Cmd {
 
 enum Dialog {
     None,
+    /// A form a plugin asked for (`sal_plugin_api::Form`); OK runs the form's
+    /// command with `values`.
+    PluginForm {
+        plugin: String,
+        form: plugins::Form,
+        values: plugins::Values,
+    },
     Transfer {
         kind: OpKind,
         sources: Vec<PathBuf>,
@@ -108,10 +115,12 @@ enum Dialog {
         mask: String,
         error: Option<String>,
     },
-    /// Drive selector; `cursor` runs over `drives`, then `paths`.
+    /// Drive selector; `cursor` runs over `drives`, then `conns`, then `paths`.
     Drive {
         panel: usize,
         drives: Vec<Drive>,
+        /// Open plugin connections (servers), opened at their start folder.
+        conns: Vec<DriveConn>,
         paths: Vec<String>,
         cursor: usize,
     },
@@ -200,6 +209,34 @@ enum KeyEdit {
     ResetAll,
 }
 
+/// A button drawn exactly into `rect` (inside a list row), whatever the
+/// style's minimum button height: text in `font`, centred.
+fn row_button(ui: &mut egui::Ui, rect: egui::Rect, text: &str, font: &egui::FontId, id: impl std::hash::Hash) -> egui::Response {
+    let r = ui.interact(rect, ui.id().with(id), Sense::click());
+    let v = ui.style().interact(&r);
+    let p = ui.painter();
+    p.rect(rect, 3.0, v.weak_bg_fill, v.bg_stroke);
+    let g = p.layout_no_wrap(text.to_owned(), font.clone(), v.text_color());
+    p.galley(rect.center() - g.size() / 2.0, g, v.text_color());
+    r
+}
+
+/// An open plugin connection as the drive selector lists it.
+struct DriveConn {
+    /// `scp://me@host`
+    label: String,
+    /// The plugin's name.
+    detail: String,
+    root: PathBuf,
+    start: PathBuf,
+}
+
+/// A plugin command running in the background, and where its reply arrives.
+struct PluginTask {
+    plugin: Arc<dyn FolderPlugin>,
+    reply: std::sync::mpsc::Receiver<std::io::Result<plugins::Reply>>,
+}
+
 pub struct App {
     cfg: Config,
     panels: [Panel; 2],
@@ -212,6 +249,8 @@ pub struct App {
     jobs: Jobs,
     /// The plugins that are on (Settings → Plugins).
     plugins: Plugins,
+    /// A plugin command running in the background (e.g. connecting).
+    plugin_task: Option<PluginTask>,
     /// Where the next operation goes (set by the Copy/Move dialog's queue buttons).
     queue_place: Placement,
     viewers: Vec<Viewer>,
@@ -462,6 +501,7 @@ impl App {
             last_mask: "*.*".into(),
             jobs: Jobs::default(),
             plugins,
+            plugin_task: None,
             queue_place: Placement::Now,
             viewers: Vec::new(),
             viewer_serial: 0,
@@ -504,7 +544,10 @@ impl App {
         for p in &mut self.panels {
             p.plugins = active.clone();
             let gone = p.archive.as_ref().is_some_and(|a| !active.iter().any(|x| x.id() == a.plugin.id()));
-            if gone {
+            if gone && location::virtual_parts(p.path()).is_some() {
+                p.archive = None;
+                p.leave_connection(hidden);
+            } else if gone {
                 if let Some(a) = p.archive.take() {
                     let name = a.file.file_name().map(|n| n.to_string_lossy().into_owned());
                     let dir = a.file.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -526,6 +569,104 @@ impl App {
     }
 
     /// Extract a file from an archive into a temporary folder, then open it.
+    /// Run a plugin's command in the background; its reply is handled when
+    /// it arrives ([`Self::poll_plugin_task`]). The plugin gets the active
+    /// panel's path, and its connection shown there, with the values.
+    fn run_plugin_command(&mut self, ctx: &egui::Context, plugin: Arc<dyn FolderPlugin>, command: String, mut values: plugins::Values) {
+        if self.plugin_task.is_some() {
+            self.status = tr("A plugin command is still running.").into();
+            return;
+        }
+        let here = self.act().path().to_path_buf();
+        values.insert("panel".into(), sal_plugin_api::ui::path_value(&here));
+        match plugins::mount_root_of(&here) {
+            Some((root, id)) if id == plugin.id() => values.insert("mount".into(), sal_plugin_api::ui::path_value(&root)),
+            _ => values.remove("mount"),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (p, wake) = (plugin.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(p.run(&command, &values));
+            wake.request_repaint();
+        });
+        self.status = trf("{plugin}: working…", &[("plugin", &self.plugins.name_of(plugin.id()))]);
+        self.plugin_task = Some(PluginTask { plugin, reply: rx });
+    }
+
+    /// Handle the reply of the plugin command running in the background.
+    fn poll_plugin_task(&mut self, ctx: &egui::Context) {
+        let Some(task) = &self.plugin_task else { return };
+        let reply = match task.reply.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(std::io::Error::other(tr("The plugin stopped."))),
+        };
+        let plugin = self.plugin_task.take().map(|t| t.plugin).expect("task");
+        self.status.clear();
+        let name = self.plugins.name_of(plugin.id());
+        match reply {
+            Ok(plugins::Reply::Done) => {}
+            Ok(plugins::Reply::Message(text)) => self.open_dialog(Dialog::Message { title: name, text }),
+            Ok(plugins::Reply::Form(form)) => {
+                let values = form.fields.iter().map(|f| (f.id.clone(), f.value.clone())).collect();
+                self.open_dialog(Dialog::PluginForm { plugin: plugin.id().to_owned(), form, values });
+            }
+            Ok(plugins::Reply::Mount(m)) => self.open_connection(&plugin, &m),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => self.open_dialog(Dialog::Message { title: name, text: e.to_string() }),
+        }
+    }
+
+    /// Show a connection a plugin opened in the active panel.
+    fn open_connection(&mut self, plugin: &Arc<dyn FolderPlugin>, m: &plugins::Mount) {
+        let root = m.root();
+        let hidden = self.vis();
+        let start = if m.folder.is_empty() { root.clone() } else { root.join(&m.folder) };
+        plugins::add_mount(&root, plugin.id(), &start);
+        let opened = self.act().load(&start, hidden, None).or_else(|_| self.act().load(&root, hidden, None));
+        match opened {
+            Ok(()) => self.status = trf("Connected to {where}.", &[("where", &display_path(&root))]),
+            Err(e) => {
+                plugins::remove_mount(&root);
+                let p = plugin.clone();
+                std::thread::spawn(move || p.close(&root));
+                self.error(e);
+            }
+        }
+    }
+
+    /// Close a connection: panels showing it go back to where they were
+    /// before, and the plugin releases it in the background.
+    fn close_connection(&mut self, root: &Path) {
+        let Some((_, id)) = plugins::mount_root_of(root) else { return };
+        plugins::remove_mount(root);
+        let hidden = self.vis();
+        for p in &mut self.panels {
+            if p.path().starts_with(root) {
+                p.archive = None;
+                p.leave_connection(hidden);
+            }
+        }
+        if let Some(plugin) = self.plugins.get(&id).cloned() {
+            let root = root.to_path_buf();
+            std::thread::spawn(move || plugin.close(&root));
+        }
+        self.status = trf("Disconnected from {where}.", &[("where", &display_path(root))]);
+    }
+
+    /// The program is ending: let the plugins close their connections.
+    fn close_all_connections(&mut self) {
+        for (root, id) in plugins::mounts() {
+            plugins::remove_mount(&root);
+            if let Some(plugin) = self.plugins.get(&id) {
+                plugin.close(&root);
+            }
+        }
+    }
+
     fn open_from_archive(&mut self, ctx: &egui::Context, file: PathBuf, how: OpenAs) -> Result<(), String> {
         let plugin = self.in_archive(&file).map(|(p, _, _)| PluginRef(p));
         let dir = plugins::temp_dir("open").map_err(|e| e.to_string())?;
@@ -534,8 +675,12 @@ impl App {
     }
 
     fn save_config(&mut self) {
-        self.cfg.left = PanelConfig { path: display_path(self.panels[0].path()), sort: self.panels[0].sort };
-        self.cfg.right = PanelConfig { path: display_path(self.panels[1].path()), sort: self.panels[1].sort };
+        // a connection is gone at the next start: keep the folder saved before it
+        for (i, saved) in [(0, &mut self.cfg.left), (1, &mut self.cfg.right)] {
+            let p = &self.panels[i];
+            let path = if location::virtual_parts(p.path()).is_some() { saved.path.clone() } else { display_path(p.path()) };
+            *saved = PanelConfig { path, sort: p.sort };
+        }
         self.cfg.right_active = self.active == 1;
         if let Err(e) = self.cfg.save() {
             eprintln!("cannot save configuration: {e}");
@@ -685,7 +830,7 @@ impl App {
     fn open_context_menu(&mut self, ctx: &egui::Context, panel: usize, row: Option<usize>, pos: egui::Pos2, from_mouse: bool) {
         self.active = panel;
         if self.panels[panel].archive.is_some() {
-            self.status = tr("The context menu isn't available inside archives.").into();
+            self.status = tr("The context menu isn't available in plugin panels.").into();
             return;
         }
         let p = &mut self.panels[panel];
@@ -1105,8 +1250,10 @@ impl App {
                 let sources = self.act().targets();
                 if !sources.is_empty() {
                     let mut target = display_path(self.panels[other].path());
-                    if !target.ends_with(MAIN_SEPARATOR) {
-                        target.push(MAIN_SEPARATOR);
+                    // a connection is shown as a URL: its folders end with /
+                    let sep = if location::virtual_parts(self.panels[other].path()).is_some() { '/' } else { MAIN_SEPARATOR };
+                    if !target.ends_with(sep) {
+                        target.push(sep);
                     }
                     let kind = if cmd == Cmd::Copy { OpKind::Copy } else { OpKind::Move };
                     self.open_dialog(Dialog::Transfer { kind, sources, target });
@@ -1122,7 +1269,7 @@ impl App {
                 self.delete_items(ctx, sources, permanent);
                 Ok(())
             }
-            Cmd::ContextMenu if self.act().archive.is_some() => Err(tr("The context menu isn't available inside archives.").into()),
+            Cmd::ContextMenu if self.act().archive.is_some() => Err(tr("The context menu isn't available in plugin panels.").into()),
             Cmd::ContextMenu => {
                 let idx = self.active;
                 let cursor = self.panels[idx].cursor;
@@ -1133,7 +1280,7 @@ impl App {
                 self.open_context_menu(ctx, idx, Some(cursor), pos, false);
                 Ok(())
             }
-            Cmd::Properties if self.act().archive.is_some() => Err(tr("Properties aren't available inside archives.").into()),
+            Cmd::Properties if self.act().archive.is_some() => Err(tr("Properties aren't available in plugin panels.").into()),
             Cmd::Properties => {
                 let mut items = self.act().targets();
                 if items.is_empty() {
@@ -1263,9 +1410,16 @@ impl App {
                 let mut drives = self.cached_drives().to_vec();
                 drives.sort_by_key(|d| (!d.kind.is_local(), d.letter.clone()));
                 let root = drives::root_of(self.panels[panel].path());
-                let cursor = drives.iter().position(|d| d.root == root).unwrap_or(0);
+                let conns: Vec<DriveConn> = plugins::connections()
+                    .into_iter()
+                    .map(|c| DriveConn { label: display_path(&c.root).trim_end_matches('/').to_owned(), detail: self.plugins.name_of(&c.plugin), root: c.root, start: c.start })
+                    .collect();
+                let cursor = match conns.iter().position(|c| self.panels[panel].path().starts_with(&c.root)) {
+                    Some(i) => drives.len() + i,
+                    None => drives.iter().position(|d| d.root == root).unwrap_or(0),
+                };
                 let paths = if self.cfg.remember_typed_paths { self.cfg.typed_paths.clone() } else { Vec::new() };
-                self.open_dialog(Dialog::Drive { panel, drives, paths, cursor });
+                self.open_dialog(Dialog::Drive { panel, drives, conns, paths, cursor });
                 Ok(())
             }
             Cmd::Terminal => {
@@ -1560,12 +1714,19 @@ impl App {
         self.crumb_rects[idx] = crumb_rects;
 
         let footer_h = row_h + 4.0;
-        let body_h = (ui.available_height() - footer_h).max(row_h * 3.0);
+        // a panel a plugin shows: tinted, with the plugin's name below the list
+        let banner = self.panels[idx].archive.as_ref().map(|a| plugin_banner(&self.plugins.name_of(a.plugin.id()), &a.file));
+        let banner_h = if banner.is_some() { row_h } else { 0.0 };
+        let body_h = (ui.available_height() - footer_h - banner_h).max(row_h * 3.0);
+        if banner.is_some() {
+            let body = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), body_h));
+            ui.painter().rect_filled(body, 0.0, plugin_tint(ui.visuals()));
+        }
         self.panels[idx].visible_rows = ((body_h - row_h) / row_h).floor().max(1.0) as usize;
 
         let mut sizes = self.dir_sizes.snapshot();
         // inside an archive every folder's size is known from the archive's index
-        if let Some(a) = &self.panels[idx].archive {
+        if let Some(a) = self.panels[idx].archive.as_ref().filter(|a| a.index.complete) {
             for e in self.panels[idx].entries().iter().filter(|e| e.kind == EntryKind::Dir) {
                 let info = crate::dirsize::SizeInfo { size: plugins::stats(&a.index, &plugins::join_inner(&a.inner, &e.name)), done: true };
                 sizes.insert(e.path.clone(), info);
@@ -1759,6 +1920,13 @@ impl App {
 
         self.body_rects[idx] = body.response.rect;
         self.row_hits[idx] = row_hits;
+        if let Some(text) = banner {
+            let fill = plugin_tint(ui.visuals()).gamma_multiply(2.5);
+            egui::Frame::none().fill(fill).inner_margin(egui::Margin::symmetric(6.0, 1.0)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(text).small().strong()).truncate());
+            });
+        }
 
         // footer: selection or cursor info + free space
         let panel = &self.panels[idx];
@@ -1932,8 +2100,16 @@ impl App {
             }
         };
 
+        let mut browse_field: Option<String> = None;
+        let mut drive_disconnect: Option<PathBuf> = None;
         match &mut dialog {
             Dialog::None => return,
+            Dialog::PluginForm { form, values, .. } => {
+                dw.modal().show(ctx, &mut self.dialog_places, "plugin-form", &form.title, 500.0, &mut enter, &mut escape, &mut |ui| {
+                    plugin_form(ui, form, values, focus, &mut browse_field);
+                    outcome = buttons(ui, &form.ok);
+                });
+            }
             Dialog::Transfer { kind, sources, target } => {
                 let verb = if *kind == OpKind::Copy { tr("Copy") } else { tr("Move") };
                 let busy = self.jobs.running.len() + self.jobs.queue.len();
@@ -1981,7 +2157,7 @@ impl App {
                     ui.label(trf("Do you want to delete {what}?", &[("what", &describe(sources))]));
                     if from_archive {
                         *recycle = false;
-                        ui.colored_label(ui.visuals().warn_fg_color, tr("Items will be deleted from the archive."));
+                        ui.colored_label(ui.visuals().warn_fg_color, tr("Items will be deleted permanently, by the plugin."));
                     } else {
                         ui.checkbox(recycle, tr("Move to Recycle Bin"));
                     }
@@ -2001,8 +2177,8 @@ impl App {
                     outcome = buttons(ui, tr("OK"));
                 });
             }
-            Dialog::Drive { panel, drives, paths, cursor } => {
-                let count = drives.len() + paths.len();
+            Dialog::Drive { panel, drives, conns, paths, cursor } => {
+                let count = drives.len() + conns.len() + paths.len();
                 let (up, down) = ctx.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown)));
                 if up {
                     *cursor = cursor.saturating_sub(1);
@@ -2018,48 +2194,90 @@ impl App {
                         outcome = 1;
                     }
                 }
-                // a dropdown right under the panel's path bar, as wide as needed
+                // a dropdown right under the panel's path bar, as wide as needed;
+                // it stays below the menu bar, and a long list scrolls
                 let panel_rect = self.body_rects[*panel];
-                let width = 420.0f32.min(panel_rect.width() - 8.0).max(280.0);
                 let pos = panel_rect.left_top() + egui::vec2(4.0, 0.0);
-                let shown = egui::Area::new(egui::Id::new("drive_selector")).order(egui::Order::Foreground).fixed_pos(pos).constrain(true).show(ctx, |ui| {
+                let screen = ctx.screen_rect();
+                // wider for a long connection name (with its Disconnect button), up to the screen's edge
+                let font = egui::TextStyle::Body.resolve(&ctx.style());
+                let longest = conns.iter().map(|c| ctx.fonts(|f| f.layout_no_wrap(c.label.clone(), font.clone(), Color32::WHITE).size().x)).fold(0.0f32, f32::max);
+                let small = egui::TextStyle::Small.resolve(&ctx.style());
+                let button_w = ctx.fonts(|f| f.layout_no_wrap(tr("Disconnect").to_owned(), small.clone(), Color32::WHITE).size().x) + 16.0;
+                let needed = if conns.is_empty() { 0.0 } else { longest + 40.0 + button_w + 24.0 };
+                let width = 420.0f32.min(panel_rect.width() - 8.0).max(280.0).max(needed).min(screen.right() - pos.x - 16.0);
+                let bounds = egui::Rect::from_min_max(egui::pos2(screen.left(), pos.y), screen.max);
+                let row_h = ctx.style().text_styles.get(&egui::TextStyle::Body).map_or(14.0, |f| f.size) + 9.0;
+                // all of the room below the path bar, less the frame's margins
+                let list_h = (bounds.height() - 24.0).max(row_h * 3.0);
+                let moved = up || down;
+                let shown = egui::Area::new(egui::Id::new("drive_selector")).order(egui::Order::Foreground).fixed_pos(pos).constrain_to(bounds).show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_width(width);
-                        ui.spacing_mut().item_spacing.y = 1.0;
-                        for (k, d) in drives.iter().enumerate() {
-                            let detail = match &d.remote {
-                                Some(r) => format!("{} · {r}", tr(d.kind.label())),
-                                None => tr(d.kind.label()).to_owned(),
+                        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+                            ui.set_width(width);
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            let shown_cursor = *cursor;
+                            let keep_visible = |r: &egui::Response, i: usize| {
+                                if moved && i == shown_cursor {
+                                    r.scroll_to_me(None);
+                                }
                             };
-                            // local drives first, then network: a separator marks the change
-                            if k > 0 && drives[k - 1].kind.is_local() != d.kind.is_local() {
-                                ui.add_space(3.0);
-                                ui.separator();
-                                ui.add_space(3.0);
-                            }
-                            if drive_icon::row(ui, d.kind, &d.letter, &d.label, &detail, k == *cursor).on_hover_text(describe_drive(d)).clicked() {
-                                *cursor = k;
-                                outcome = 1;
-                            }
-                        }
-                        if !paths.is_empty() {
-                            ui.add_space(4.0);
-                            ui.separator();
-                            ui.label(RichText::new(tr("Recent paths")).small().weak());
-                            for (k, p) in paths.iter().enumerate() {
-                                let i = drives.len() + k;
-                                let kind = drives::kind_of_root(&drives::root_of(Path::new(p)), drives.as_slice());
-                                if drive_icon::path_row(ui, kind, &display_name(p), i == *cursor).on_hover_text(p.as_str()).clicked() {
-                                    *cursor = i;
+                            for (k, d) in drives.iter().enumerate() {
+                                let detail = match &d.remote {
+                                    Some(r) => format!("{} · {r}", tr(d.kind.label())),
+                                    None => tr(d.kind.label()).to_owned(),
+                                };
+                                // local drives first, then network: a separator marks the change
+                                if k > 0 && drives[k - 1].kind.is_local() != d.kind.is_local() {
+                                    ui.add_space(3.0);
+                                    ui.separator();
+                                    ui.add_space(3.0);
+                                }
+                                let r = drive_icon::row(ui, d.kind, &d.letter, &d.label, &detail, k == *cursor).on_hover_text(describe_drive(d));
+                                keep_visible(&r, k);
+                                if r.clicked() {
+                                    *cursor = k;
                                     outcome = 1;
                                 }
                             }
-                        }
-                        ui.spacing_mut().item_spacing.y = 4.0;
-                        ui.add_space(4.0);
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button(tr("Cancel")).clicked() {
-                                outcome = 2;
+                            // servers a plugin is connected to
+                            if !conns.is_empty() {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.label(RichText::new(tr("Connections")).small().weak());
+                                for (k, c) in conns.iter().enumerate() {
+                                    let i = drives.len() + k;
+                                    let tip = format!("{} · {}\n{}\n{}", c.label, c.detail, display_path(&c.start), tr("Delete: disconnect"));
+                                    let r = drive_icon::connection_row(ui, &c.label, i == *cursor, button_w + 8.0).on_hover_text(tip);
+                                    keep_visible(&r, i);
+                                    // a compact button inside the row's right end; it takes its clicks
+                                    let at = egui::Rect::from_min_max(
+                                        egui::pos2(r.rect.right() - 4.0 - button_w, r.rect.top() + 3.0),
+                                        egui::pos2(r.rect.right() - 4.0, r.rect.bottom() - 3.0),
+                                    );
+                                    if row_button(ui, at, tr("Disconnect"), &small, ("disconnect", k)).on_hover_text(tr("Close this connection")).clicked() {
+                                        drive_disconnect = Some(c.root.clone());
+                                    } else if r.clicked() {
+                                        *cursor = i;
+                                        outcome = 1;
+                                    }
+                                }
+                            }
+                            if !paths.is_empty() {
+                                ui.add_space(4.0);
+                                ui.separator();
+                                ui.label(RichText::new(tr("Recent paths")).small().weak());
+                                for (k, p) in paths.iter().enumerate() {
+                                    let i = drives.len() + conns.len() + k;
+                                    let kind = drives::kind_of_root(&drives::root_of(Path::new(p)), drives.as_slice());
+                                    let r = drive_icon::path_row(ui, kind, &display_name(p), i == *cursor).on_hover_text(p.as_str());
+                                    keep_visible(&r, i);
+                                    if r.clicked() {
+                                        *cursor = i;
+                                        outcome = 1;
+                                    }
+                                }
                             }
                         });
                     });
@@ -2596,6 +2814,28 @@ impl App {
         if escape {
             outcome = 2;
         }
+        // the drive selector's Disconnect (button, or Delete on a connection)
+        if let Dialog::Drive { drives, conns, cursor, .. } = &dialog {
+            let on_conn = cursor.checked_sub(drives.len()).and_then(|k| conns.get(k));
+            if drive_disconnect.is_none() && ctx.input(|i| i.key_pressed(Key::Delete)) {
+                drive_disconnect = on_conn.map(|c| c.root.clone());
+            }
+        }
+        if let Some(root) = drive_disconnect {
+            if let Dialog::Drive { drives, conns, paths, cursor, .. } = &mut dialog {
+                conns.retain(|c| c.root != root);
+                *cursor = (*cursor).min((drives.len() + conns.len() + paths.len()).saturating_sub(1));
+            }
+            self.close_connection(&root);
+            outcome = 0;
+        }
+        // a plugin form's Browse… button: the Windows "Open" dialog
+        if let (Some(id), Dialog::PluginForm { values, .. }) = (browse_field, &mut dialog) {
+            let current = values.get(&id).map(PathBuf::from);
+            if let Some(path) = shellmenu::pick_file(self.hwnd, tr("Choose a file"), current.as_deref()) {
+                values.insert(id, path.to_string_lossy().into_owned());
+            }
+        }
         if enter && outcome == 0 {
             outcome = 1;
         }
@@ -2614,9 +2854,13 @@ impl App {
     fn dialog_ok(&mut self, ctx: &egui::Context, dialog: Dialog) {
         let hidden = self.vis();
         match dialog {
+            Dialog::PluginForm { plugin, form, values } => match self.plugins.get(&plugin).cloned() {
+                Some(p) => self.run_plugin_command(ctx, p, form.command, values),
+                None => self.error(tr("The plugin for this file is not enabled.")),
+            },
             Dialog::Transfer { kind, sources, target } => {
                 let base = self.panels[self.active].path().to_path_buf();
-                let t = PathBuf::from(target.trim());
+                let t = location::parse_url(target.trim()).unwrap_or_else(|| PathBuf::from(target.trim()));
                 let mut target = if t.is_absolute() { t } else { base.join(t) };
                 if target.as_os_str().is_empty() {
                     target = base;
@@ -2689,9 +2933,15 @@ impl App {
                     self.open_dialog(Dialog::SelectMask { select, mask, error: Some(e.to_string()) });
                 }
             },
-            Dialog::Drive { panel, drives, paths, cursor } => {
-                let res = match (drives.get(cursor), paths.get(cursor.wrapping_sub(drives.len()))) {
+            Dialog::Drive { panel, drives, conns, paths, cursor } => {
+                let conn = conns.get(cursor.wrapping_sub(drives.len()));
+                let res = match (drives.get(cursor), paths.get(cursor.wrapping_sub(drives.len() + conns.len()))) {
                     (Some(d), _) => self.change_drive(panel, &d.root),
+                    // a connection: where it started, or its root
+                    (None, _) if conn.is_some() => {
+                        let c = conn.unwrap();
+                        self.panels[panel].load(&c.start, hidden, None).or_else(|_| self.panels[panel].load(&c.root, hidden, None))
+                    }
                     (None, Some(p)) => {
                         let p = PathBuf::from(p);
                         let r = self.panels[panel].load(&p, hidden, None);
@@ -2929,7 +3179,7 @@ impl App {
             OpenAs::Edit => {
                 let editor = self.cfg.use_custom_editor.then_some(self.cfg.editor.as_str());
                 sal_core::shell::edit(&file, editor).map_err(err)?;
-                self.status = tr("A copy from the archive is open; changes are not saved into the archive.").into();
+                self.status = tr("A temporary copy is open; changes to it are not saved back.").into();
             }
         }
         Ok(())
@@ -2981,6 +3231,14 @@ impl App {
         let mut sys_icons = self.cfg.system_icons;
         let mut layout_cmd = None;
         let mut lang_pick: Option<String> = None;
+        // the Plugins menu: each plugin's commands under its name
+        let plugin_menu: Vec<(String, Arc<dyn FolderPlugin>, Vec<plugins::Command>)> =
+            self.plugins.active.iter().map(|p| (self.plugins.name_of(p.id()), p.clone(), p.commands())).filter(|(_, _, c)| !c.is_empty()).collect();
+        let connections: Vec<PathBuf> = plugins::connections().into_iter().map(|c| c.root).collect();
+        let busy = self.plugin_task.is_some();
+        let mut plugin_pick: Option<(Arc<dyn FolderPlugin>, String)> = None;
+        let mut disconnect: Option<PathBuf> = None;
+        let mut plugin_settings = false;
         egui::menu::bar(ui, |ui| {
             // `key` is for fixed keys; configurable commands show their current binding
             let mut item = |ui: &mut egui::Ui, label: &str, key: &str, c: Cmd| {
@@ -3067,6 +3325,38 @@ impl App {
                     ui.close_menu();
                 }
             });
+            ui.menu_button(tr("Plugins"), |ui| {
+                // as wide as its longest entry: every connection on one row
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                if plugin_menu.is_empty() {
+                    ui.label(RichText::new(tr("No plugin that is on offers commands.")).weak());
+                }
+                for (name, plugin, commands) in &plugin_menu {
+                    ui.label(RichText::new(name.as_str()).small().weak());
+                    for c in commands {
+                        if ui.add_enabled(!busy, egui::Button::new(c.label.as_str())).clicked() {
+                            plugin_pick = Some((plugin.clone(), c.id.clone()));
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                }
+                if !connections.is_empty() {
+                    ui.label(RichText::new(tr("Connections")).small().weak());
+                    for root in &connections {
+                        let shown = display_path(root).trim_end_matches('/').to_owned();
+                        if ui.button(trf("Disconnect from {where}", &[("where", &shown)])).clicked() {
+                            disconnect = Some(root.clone());
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                }
+                if ui.button(tr("Plugin settings…")).clicked() {
+                    plugin_settings = true;
+                    ui.close_menu();
+                }
+            });
             ui.menu_button(tr("Options"), |ui| {
                 ui.checkbox(&mut self.cfg.use_recycle_bin, tr(LBL_RECYCLE));
                 ui.checkbox(&mut self.cfg.confirm_delete, tr(LBL_CONFIRM));
@@ -3121,6 +3411,15 @@ impl App {
         if let Some(code) = lang_pick {
             self.set_language(&code);
         }
+        if let Some((plugin, id)) = plugin_pick {
+            self.run_plugin_command(ctx, plugin, id, plugins::Values::new());
+        }
+        if let Some(root) = disconnect {
+            self.close_connection(&root);
+        }
+        if plugin_settings {
+            self.open_dialog(Dialog::Settings { tab: SettingsTab::Plugins, recording: None });
+        }
         if let Some(c) = cmd {
             self.command(ctx, c);
         }
@@ -3155,6 +3454,86 @@ impl App {
 
 /// Dialog windows that belong to the running operations, not to `self.dialog`.
 const JOB_WINDOWS: [&str; 2] = ["job", "prompt"];
+
+/// The fields of a plugin's form: a label and an input per row. The first
+/// text input takes the focus when the dialog opens; `browse` is set to the
+/// field whose Browse… button was clicked.
+fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Values, focus: bool, browse: &mut Option<String>) {
+    use plugins::FieldKind;
+    let mut focus_next = true;
+    egui::Grid::new("plugin-form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+        for f in &form.fields {
+            let enabled = f.enabled_if.as_ref().is_none_or(|(id, v)| values.get(id) == Some(v));
+            match &f.kind {
+                FieldKind::Hidden => continue,
+                FieldKind::Note => {
+                    ui.label("");
+                    ui.add(egui::Label::new(f.label.as_str()).wrap());
+                    ui.end_row();
+                    continue;
+                }
+                _ => {
+                    ui.add_enabled(enabled, egui::Label::new(f.label.as_str()));
+                }
+            }
+            let value = values.entry(f.id.clone()).or_default();
+            ui.add_enabled_ui(enabled, |ui| {
+                let mut text = |ui: &mut egui::Ui, value: &mut String, password: bool| {
+                    let r = ui.add(egui::TextEdit::singleline(value).password(password).desired_width(ui.available_width().min(320.0)).id_salt(("plugin-field", &f.id)));
+                    if focus_next && enabled && (focus || ui.memory(|m| m.focused().is_none())) {
+                        r.request_focus();
+                    }
+                    focus_next = false;
+                };
+                match &f.kind {
+                    FieldKind::Text => text(ui, value, false),
+                    FieldKind::Password => text(ui, value, true),
+                    FieldKind::File => {
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 90.0).clamp(120.0, 260.0);
+                            ui.add(egui::TextEdit::singleline(value).desired_width(w).id_salt(("plugin-field", &f.id)));
+                            if ui.button(tr("Browse…")).clicked() {
+                                *browse = Some(f.id.clone());
+                            }
+                        });
+                    }
+                    FieldKind::Choice(options) => {
+                        ui.horizontal(|ui| {
+                            for (v, label) in options {
+                                if ui.radio(value == v, label.as_str()).clicked() {
+                                    *value = v.clone();
+                                }
+                            }
+                        });
+                    }
+                    FieldKind::Check => {
+                        let mut on = !value.is_empty();
+                        if ui.checkbox(&mut on, "").changed() {
+                            *value = if on { "1".into() } else { String::new() };
+                        }
+                    }
+                    FieldKind::Note | FieldKind::Hidden => {}
+                }
+            });
+            ui.end_row();
+        }
+    });
+}
+
+/// The background tint of a panel a plugin shows.
+fn plugin_tint(v: &egui::Visuals) -> Color32 {
+    v.selection.bg_fill.gamma_multiply(if v.dark_mode { 0.12 } else { 0.22 })
+}
+
+/// The banner below a plugin's panel: its name and what it shows (the
+/// archive's name, or the connection).
+fn plugin_banner(plugin: &str, file: &Path) -> String {
+    let what = match location::virtual_parts(file) {
+        Some((scheme, authority, _)) => format!("{scheme}://{authority}"),
+        None => file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+    };
+    format!("🧩 {plugin} · {what}")
+}
 
 /// Background of status strips: the panels' status bar, the operations
 /// window's global controls.
@@ -3636,8 +4015,10 @@ impl App {
 
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_config();
+            self.close_all_connections();
             plugins::cleanup_temp();
         }
+        self.poll_plugin_task(ctx);
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ctx, ui));
         if self.cfg.show_fkey_bar || !self.status.is_empty() || !self.jobs.is_idle() {
@@ -3997,6 +4378,242 @@ mod tests {
             None => {}
         }
         Some(dir)
+    }
+
+    /// A plugin that opens "connections" to a folder in memory: a command
+    /// shows a form, the form's OK mounts it. Listed per folder, like a
+    /// server.
+    struct MemServer {
+        files: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+        closed: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl FolderPlugin for MemServer {
+        fn id(&self) -> &str {
+            "memserver"
+        }
+        fn handles(&self, _: &str) -> bool {
+            false
+        }
+        fn can_write(&self, _: &Path) -> bool {
+            true
+        }
+        fn status(&self) -> String {
+            String::new()
+        }
+        fn list(&self, _: &Path, folder: &str) -> std::io::Result<plugins::Index> {
+            let files = self.files.lock().unwrap();
+            let is_dir = |p: &str| p.is_empty() || files.keys().any(|k| k.starts_with(&format!("{p}\\")));
+            if !is_dir(folder) {
+                return Err(std::io::ErrorKind::NotFound.into());
+            }
+            let mut items = Vec::new();
+            for (k, v) in files.iter().filter(|(k, _)| sal_plugin_api::under(k, folder) && k.as_str() != folder) {
+                let rest = if folder.is_empty() { k.as_str() } else { &k[folder.len() + 1..] };
+                let name = rest.split('\\').next().unwrap();
+                let dir = rest.contains('\\') || k.ends_with("\\.keep");
+                let path = plugins::join_inner(folder, name);
+                if name != ".keep" && !items.iter().any(|i: &sal_plugin_api::Item| i.path == path) {
+                    items.push(sal_plugin_api::Item { path, dir, size: if dir { 0 } else { v.len() as u64 }, modified: None, attrs: 0, index: None });
+                }
+            }
+            Ok(plugins::Index { items, complete: false })
+        }
+        fn extract(&self, _: &Path, items: &[String], out: &Path, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            for (k, v) in self.files.lock().unwrap().iter().filter(|(k, _)| items.iter().any(|i| sal_plugin_api::under(k, i))) {
+                fs::create_dir_all(out.join(k).parent().unwrap())?;
+                fs::write(out.join(k), v)?;
+            }
+            Ok(())
+        }
+        fn add(&self, _: &Path, items: &[(PathBuf, String)], _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            for (disk, inner) in items {
+                self.files.lock().unwrap().insert(inner.clone(), fs::read(disk)?);
+            }
+            Ok(())
+        }
+        fn delete(&self, _: &Path, items: &[String], _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            self.files.lock().unwrap().retain(|k, _| !items.iter().any(|i| sal_plugin_api::under(k, i)));
+            Ok(())
+        }
+        fn rename(&self, _: &Path, _: &str, _: &str, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn mkdir(&self, _: &Path, inner: &str, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            self.files.lock().unwrap().insert(format!("{inner}\\.keep"), Vec::new());
+            Ok(())
+        }
+        fn commands(&self) -> Vec<plugins::Command> {
+            vec![plugins::Command { id: "connect".into(), label: "Connect…".into() }]
+        }
+        fn run(&self, command: &str, input: &plugins::Values) -> std::io::Result<plugins::Reply> {
+            match command {
+                "connect" => Ok(plugins::Reply::Form(plugins::Form {
+                    title: "Connect".into(),
+                    ok: "Connect".into(),
+                    command: "mount".into(),
+                    fields: vec![
+                        sal_plugin_api::Field { id: "host".into(), label: "Server:".into(), ..Default::default() },
+                        sal_plugin_api::Field { id: "password".into(), label: "Password:".into(), kind: plugins::FieldKind::Password, ..Default::default() },
+                    ],
+                })),
+                "mount" if input["password"] != "tajné" => Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Wrong password.")),
+                "mount" => Ok(plugins::Reply::Mount(plugins::Mount { scheme: "mem".into(), authority: input["host"].clone(), folder: "home".into() })),
+                _ => Err(std::io::ErrorKind::Unsupported.into()),
+            }
+        }
+        fn close(&self, root: &Path) {
+            self.closed.lock().unwrap().push(root.to_path_buf());
+        }
+    }
+
+    /// Wait for the plugin command running in the background.
+    fn wait_plugin(ui: &mut Ui) {
+        for _ in 0..500 {
+            ui.frames(1);
+            if ui.app.plugin_task.is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("plugin command did not finish");
+    }
+
+    #[test]
+    fn a_plugin_connection_in_a_panel() {
+        let t = tempfile::tempdir().unwrap();
+        let local = t.path().join("local");
+        fs::create_dir_all(&local).unwrap();
+        fs::write(local.join("místní 🦎.txt"), "z disku").unwrap();
+        let server = Arc::new(MemServer {
+            files: std::sync::Mutex::new([("home\\vzdálený.txt".to_owned(), b"ze serveru".to_vec()), ("home\\docs\\a.txt".to_owned(), b"a".to_vec())].into()),
+            closed: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut ui = Ui::new(&local, &local);
+        let plugin: Arc<dyn FolderPlugin> = server.clone();
+        ui.app.plugins.active.push(plugin.clone());
+        for p in &mut ui.app.panels {
+            p.plugins = ui.app.plugins.active.clone();
+        }
+        let ctx = ui.ctx.clone();
+
+        // the command shows the plugin's form; a wrong password is reported
+        ui.app.run_plugin_command(&ctx, plugin.clone(), "connect".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        let Dialog::PluginForm { values, .. } = &mut ui.app.dialog else { panic!("no form") };
+        values.insert("host".into(), "test-ui".into());
+        values.insert("password".into(), "špatné".into());
+        ui.key(Key::Enter);
+        wait_plugin(&mut ui);
+        assert!(matches!(&ui.app.dialog, Dialog::Message { text, .. } if text == "Wrong password."));
+        ui.key(Key::Enter);
+
+        // connected: the panel shows the plugin's folder, with its banner
+        ui.app.run_plugin_command(&ctx, plugin.clone(), "connect".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        let Dialog::PluginForm { values, .. } = &mut ui.app.dialog else { panic!("no form") };
+        values.insert("host".into(), "test-ui".into());
+        values.insert("password".into(), "tajné".into());
+        ui.key(Key::Enter);
+        wait_plugin(&mut ui);
+        ui.app.active = 1;
+        let root = sal_plugin_api::mount_root("mem", "test-ui");
+        assert_eq!(ui.app.panels[0].path(), root.join("home"), "opened in the active panel");
+        assert_eq!(display_path(ui.app.panels[0].path()), "mem://test-ui/home");
+        assert_eq!(names(&ui, 0), ["..", "docs", "vzdálený.txt"]);
+        let a = ui.app.panels[0].archive.as_ref().expect("a plugin view");
+        assert_eq!(plugin_banner(&ui.app.plugins.name_of(a.plugin.id()), &a.file), "🧩 memserver · mem://test-ui");
+        ui.frames(2);
+
+        // copy in (F5 from the other panel), copy out, new folder, delete
+        ui.app.panels[1].reload(ui.app.vis());
+        cursor_to(&mut ui, "místní 🦎.txt");
+        ui.key(Key::F5);
+        let Dialog::Transfer { target, .. } = &ui.app.dialog else { panic!("no copy dialog") };
+        assert_eq!(target, "mem://test-ui/home/");
+        ui.key(Key::Enter);
+        ui.wait_job();
+        assert_eq!(server.files.lock().unwrap().get("home\\místní 🦎.txt").map(Vec::as_slice), Some(&b"z disku"[..]));
+        ui.app.panels[0].reload(ui.app.vis());
+        assert_eq!(names(&ui, 0), ["..", "docs", "místní 🦎.txt", "vzdálený.txt"]);
+        ui.app.active = 0;
+        cursor_to(&mut ui, "vzdálený.txt");
+        ui.key(Key::F5);
+        ui.key(Key::Enter);
+        ui.wait_job();
+        assert_eq!(fs::read_to_string(local.join("vzdálený.txt")).unwrap(), "ze serveru");
+        ui.key(Key::F7);
+        ui.text("nová");
+        ui.key(Key::Enter);
+        ui.wait_job();
+        assert!(names(&ui, 0).contains(&"nová".to_owned()), "{:?}", names(&ui, 0));
+        cursor_to(&mut ui, "docs");
+        ui.key(Key::F8);
+        ui.key(Key::Enter);
+        ui.wait_job();
+        assert!(!server.files.lock().unwrap().contains_key("home\\docs\\a.txt"));
+        // .. goes up inside the connection; its root has no ..
+        ui.key(Key::Home);
+        ui.key(Key::Enter);
+        assert_eq!(ui.app.panels[0].path(), root.as_path());
+        assert_ne!(names(&ui, 0).first().map(String::as_str), Some(".."));
+
+        // the drive selector lists the connection; choosing it opens where it started
+        ui.app.command(&ctx, Cmd::DriveMenu(1));
+        let Dialog::Drive { drives, conns, cursor, .. } = &mut ui.app.dialog else { panic!("drive menu not open") };
+        assert_eq!(conns.iter().map(|c| (c.label.as_str(), c.detail.as_str())).collect::<Vec<_>>(), [("mem://test-ui", "memserver")]);
+        *cursor = drives.len();
+        ui.frames(2);
+        ui.key(Key::Enter);
+        assert_eq!(ui.app.panels[1].path(), root.join("home"), "the connection's start folder");
+        // in that panel, the selector starts on the connection
+        ui.app.command(&ctx, Cmd::DriveMenu(1));
+        let Dialog::Drive { drives, cursor, .. } = &ui.app.dialog else { panic!("drive menu not open") };
+        assert_eq!(*cursor, drives.len());
+        ui.key(Key::Escape);
+        ui.app.panels[1].load(&local, ui.app.vis(), None).unwrap();
+
+        // a second session: both listed; one is disconnected from the drive selector
+        ui.app.run_plugin_command(&ctx, plugin.clone(), "connect".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        let Dialog::PluginForm { values, .. } = &mut ui.app.dialog else { panic!("no form") };
+        values.insert("host".into(), "test-ui-2".into());
+        values.insert("password".into(), "tajné".into());
+        ui.key(Key::Enter);
+        wait_plugin(&mut ui);
+        let second = sal_plugin_api::mount_root("mem", "test-ui-2");
+        assert_eq!(ui.app.panels[1].path(), second.join("home"));
+        ui.app.command(&ctx, Cmd::DriveMenu(1));
+        ui.frames(2);
+        let Dialog::Drive { conns, .. } = &ui.app.dialog else { panic!("drive menu not open") };
+        assert_eq!(conns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["mem://test-ui", "mem://test-ui-2"]);
+        ui.key(Key::Delete);
+        let Dialog::Drive { conns, .. } = &ui.app.dialog else { panic!("the selector stays open") };
+        assert_eq!(conns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["mem://test-ui"]);
+        assert!(plugins::mount_root_of(&second).is_none());
+        assert_eq!(ui.app.panels[1].path(), local.as_path(), "the panel left the closed session");
+        assert_eq!(ui.app.panels[0].path(), root.as_path(), "the other session stays");
+        ui.key(Key::Escape);
+
+        // disconnecting returns the panel to where it was, and closes the connection
+        ui.app.close_connection(&root);
+        ui.app.command(&ctx, Cmd::DriveMenu(1));
+        assert!(matches!(&ui.app.dialog, Dialog::Drive { conns, .. } if conns.is_empty()), "gone from the drive selector");
+        ui.key(Key::Escape);
+        assert_eq!(ui.app.panels[0].path(), local.as_path());
+        assert!(plugins::mount_root_of(&root).is_none());
+        // the plugin closes both sessions (in the background)
+        for _ in 0..100 {
+            if server.closed.lock().unwrap().len() == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut closed = server.closed.lock().unwrap().clone();
+        closed.sort();
+        assert_eq!(closed, [root.clone(), second.clone()]);
+        // the connection's path is no longer open
+        assert!(ui.app.panels[0].load(&root, ui.app.vis(), None).is_err());
     }
 
     /// Everything still works when the plugin or its 7z.dll is missing or
@@ -4497,7 +5114,8 @@ mod tests {
             ui.app.drives_loaded = Some(Instant::now() + Duration::from_secs(60));
             ui.app.cfg.drive_buttons = DriveButtons::All;
             list.sort_by_key(|d| (!d.kind.is_local(), d.letter.clone()));
-            ui.app.dialog = Dialog::Drive { panel: 0, drives: list, paths: vec![r"D:\Projekty\Účetnictví 2026".into(), r"\\nas\data\fotky".into()], cursor: 5 };
+            ui.app.dialog =
+                Dialog::Drive { panel: 0, drives: list, conns: Vec::new(), paths: vec![r"D:\Projekty\Účetnictví 2026".into(), r"\\nas\data\fotky".into()], cursor: 5 };
             ui.frames(20); // past the popup's fade-in
             let bg = ui.ctx.style().visuals.panel_fill;
             let out = ui.last.take().unwrap();
@@ -5256,9 +5874,9 @@ mod tests {
         // offered after the drives; choosing one opens it
         ui.app.command(&ui.ctx.clone(), Cmd::DriveMenu(0));
         ui.frames(2);
-        let Dialog::Drive { drives, paths, cursor, .. } = &mut ui.app.dialog else { panic!() };
+        let Dialog::Drive { drives, conns, paths, cursor, .. } = &mut ui.app.dialog else { panic!() };
         assert_eq!(paths.len(), 2);
-        *cursor = drives.len() + 1; // "druhá"
+        *cursor = drives.len() + conns.len() + 1; // "druhá"
         ui.key(Key::Enter);
         assert_eq!(ui.app.panels[0].path(), b.as_path());
         assert_eq!(ui.app.cfg.typed_paths[0], display_path(&b), "used again: now the most recent");
@@ -5271,6 +5889,32 @@ mod tests {
         ui.app.command(&ui.ctx.clone(), Cmd::DriveMenu(0));
         let Dialog::Drive { paths, .. } = &ui.app.dialog else { panic!() };
         assert!(paths.is_empty());
+    }
+
+    /// A long drive list in a low window stays below the menu bar and
+    /// scrolls, keeping the chosen row in view.
+    #[test]
+    fn drive_selector_stays_below_the_menu() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        ui.screen = egui::vec2(900.0, 320.0);
+        ui.app.cfg.typed_paths = (0..12).map(|i| format!(r"C:\cesta {i}")).collect();
+        ui.frames(2);
+        ui.app.command(&ui.ctx.clone(), Cmd::DriveMenu(1));
+        ui.frames(3);
+        let popup = ui.app.drive_popup_rect.expect("drawn");
+        let body = ui.app.body_rects[1];
+        assert!(popup.top() >= body.top() - 0.5, "covers the menu or path bar: {popup:?} above {body:?}");
+        assert!(popup.bottom() <= 320.5, "{popup:?}");
+        // the last row, reached with the keyboard
+        for _ in 0..30 {
+            ui.key(Key::ArrowDown);
+        }
+        ui.frames(3);
+        let popup = ui.app.drive_popup_rect.expect("drawn");
+        assert!(popup.top() >= body.top() - 0.5 && popup.bottom() <= 320.5, "{popup:?}");
+        let Dialog::Drive { drives, conns, paths, cursor, .. } = &ui.app.dialog else { panic!() };
+        assert_eq!(*cursor, drives.len() + conns.len() + paths.len() - 1);
     }
 
     #[cfg(windows)]
@@ -5417,6 +6061,95 @@ mod tests {
             let out = ui.last.take().unwrap();
             ui.snap.render(&ui.ctx, out, bg, &out_dir.join(name));
         }
+    }
+
+    /// A connection in a plugin panel (tinted, with its banner) in both
+    /// themes, and the SCP plugin's connect form:
+    /// `cargo test -p sal-app snapshot_plugin_panel -- --ignored`
+    #[test]
+    #[ignore]
+    fn snapshot_plugin_panel() {
+        let out_dir = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let t = tempfile::tempdir().unwrap();
+        sized_tree(t.path());
+        let server = Arc::new(MemServer {
+            files: std::sync::Mutex::new(
+                [("home\\zpráva 🦎.txt".to_owned(), b"ahoj".to_vec()), ("home\\docs\\a.txt".to_owned(), b"a".to_vec()), ("home\\.bashrc".to_owned(), b"x".to_vec())].into(),
+            ),
+            closed: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut ui = Ui::new(t.path(), t.path());
+        crate::fonts::install(&ui.ctx, "", "");
+        ui.screen = egui::vec2(1100.0, 600.0);
+        let plugin: Arc<dyn FolderPlugin> = server;
+        ui.app.plugins.active.push(plugin.clone());
+        for p in &mut ui.app.panels {
+            p.plugins = ui.app.plugins.active.clone();
+        }
+        ui.app.open_connection(&plugin, &plugins::Mount { scheme: "scp".into(), authority: "me@example.org".into(), folder: "home".into() });
+        for (theme, name) in [(ThemeMode::Light, "plugin_panel_light.png"), (ThemeMode::Dark, "plugin_panel_dark.png")] {
+            ui.app.cfg.theme = theme;
+            apply_theme(&ui.ctx, theme);
+            ui.frames(10);
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &out_dir.join(name));
+        }
+        // the connection in the other panel's drive selector, in a low window
+        ui.app.cfg.theme = ThemeMode::Light;
+        apply_theme(&ui.ctx, ThemeMode::Light);
+        ui.app.cfg.typed_paths = (1..=8).map(|i| format!(r"C:\Projekty\cesta {i}")).collect();
+        ui.app.active = 1;
+        ui.app.open_connection(
+            &plugin,
+            &plugins::Mount { scheme: "scp".into(), authority: "administrator@a-rather-long-server-name.example.org:2222".into(), folder: "home".into() },
+        );
+        ui.app.panels[1].load(t.path(), ui.app.vis(), None).unwrap();
+        ui.screen = egui::vec2(1100.0, 420.0);
+        ui.frames(3);
+        ui.app.command(&ui.ctx.clone(), Cmd::DriveMenu(1));
+        ui.frames(5);
+        let bg = ui.ctx.style().visuals.panel_fill;
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_drive_menu.png"));
+        ui.key(Key::Escape);
+        // no recent paths, then one session disconnected from the selector
+        ui.app.cfg.typed_paths.clear();
+        ui.app.command(&ui.ctx.clone(), Cmd::DriveMenu(1));
+        ui.frames(5);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_drive_menu_short.png"));
+        if let Dialog::Drive { drives, conns, cursor, .. } = &mut ui.app.dialog {
+            *cursor = drives.len() + conns.len() - 1;
+        }
+        ui.frames(2);
+        ui.key(Key::Delete);
+        ui.frames(5);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_drive_menu_after.png"));
+        ui.key(Key::Escape);
+        // the Plugins menu, opened with a click on its title
+        click(&mut ui, egui::pos2(262.0, 12.0));
+        ui.frames(5);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_menu.png"));
+        ui.key(Key::Escape);
+        ui.frames(2);
+        ui.screen = egui::vec2(1100.0, 600.0);
+        // the SCP plugin's form, drawn by the program
+        let Some(dir) = built_library() else { return };
+        let mut found = Plugins::scan(Some(&dir));
+        found.start(&[]);
+        let Some(scp) = found.get("scp").cloned() else { return };
+        ui.app.cfg.theme = ThemeMode::Light;
+        apply_theme(&ui.ctx, ThemeMode::Light);
+        let ctx = ui.ctx.clone();
+        ui.app.run_plugin_command(&ctx, scp, "connect".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        ui.frames(25);
+        let bg = ui.ctx.style().visuals.panel_fill;
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_form.png"));
     }
 
     /// The operations window (a paused copy and two queued operations) and a
