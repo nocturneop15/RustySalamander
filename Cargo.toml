@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/sal-core", "crates/sal-plugin-api", "crates/sal-app", "plugins/sevenzip", "plugins/example-filelist", "plugins/scp"]
 
 [workspace.package]
-version = "0.2.1-alpha"
+version = "0.3.0-alpha"
 edition = "2021"
 # slice::as_chunks
 rust-version = "1.88"

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0-alpha (2026-10-30)
+
+### Updates (new)
+
+- **Looks for new versions:** at start-up the program asks GitHub whether a newer release exists (alpha releases count). If one does, a window shows the new version and a link to its release page. **Help → Check for updates…** and **Settings → General → Updates → Check now** check at any time; the start-up check can be turned off there (`check_updates` in `config.toml`).
+- **Update now:** downloads the new version, unpacks it into a folder named by the version next to this one (for example `…\RustySalamander\0.2.1-alpha` → `…\RustySalamander\0.3.0-alpha`) and copies the settings there: `config.toml` and what plugins saved in their folders (such as the SCP plugin's `known_hosts` and last connection). **Start the new version** then opens it and closes this one. The running version is never changed, a folder that already exists is never overwritten, and a failed or damaged download leaves nothing behind.
+- **How it works:** downloads go through Windows' WinHTTP, so the system's proxy settings and certificates apply; each file in the zip is checked against its CRC before it is written.
+
 ## 0.2.1-alpha (2026-10-30)
 
 ### Fixes

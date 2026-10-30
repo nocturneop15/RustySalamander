@@ -157,6 +157,8 @@ pub struct Config {
     pub root_shortcut: Option<String>,
     /// Hot paths, Ctrl+Shift+0..9 to set, Ctrl+0..9 to go (Salamander's "Hot Paths").
     pub hot_paths: Vec<String>,
+    /// Look for a new release on GitHub when the program starts.
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -197,6 +199,7 @@ impl Default for Config {
             shortcuts: BTreeMap::new(),
             root_shortcut: None,
             hot_paths: vec![String::new(); 10],
+            check_updates: true,
         }
     }
 }

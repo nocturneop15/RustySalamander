@@ -37,6 +37,7 @@ const SELECTED_COLOR: Color32 = Color32::from_rgb(230, 40, 40);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Cmd {
     Help,
+    CheckUpdates,
     Rename,
     View,
     Edit,
@@ -129,6 +130,11 @@ enum Dialog {
         text: String,
     },
     Help,
+    /// A newer release; `install` while (or after) it is being installed.
+    Update {
+        release: crate::update::Release,
+        install: Option<crate::update::Install>,
+    },
     /// `recording`: the next key combination is added to that action.
     Settings {
         tab: SettingsTab,
@@ -239,6 +245,8 @@ struct PluginTask {
 
 pub struct App {
     cfg: Config,
+    /// A look for a new release, until its answer is shown.
+    update_check: Option<crate::update::Check>,
     panels: [Panel; 2],
     active: usize,
     dialog: Dialog,
@@ -505,8 +513,11 @@ impl App {
         let icons = time("startup: icon loader", || Icons::new(ctx));
         let languages = time("startup: language list", crate::i18n::available);
         let active = usize::from(cfg.right_active);
+        // the headless tests never go online
+        let update_check = (cfg.check_updates && !cfg!(test)).then(|| crate::update::Check::start(ctx, false));
         App {
             cfg,
+            update_check,
             panels,
             active,
             dialog: Dialog::None,
@@ -698,6 +709,27 @@ impl App {
         self.cfg.right_active = self.active == 1;
         if let Err(e) = self.cfg.save() {
             eprintln!("cannot save configuration: {e}");
+        }
+    }
+
+    /// Show the answer of a look for a new release. One made at start-up
+    /// waits until no dialog is open, and only speaks up about an update.
+    fn poll_update_check(&mut self) {
+        let Some(check) = &self.update_check else { return };
+        if !check.manual && !matches!(self.dialog, Dialog::None) {
+            return;
+        }
+        let Some(result) = check.take() else { return };
+        let manual = check.manual;
+        self.update_check = None;
+        match result {
+            Ok(Some(release)) => self.open_dialog(Dialog::Update { release, install: None }),
+            Ok(None) if manual => self.open_dialog(Dialog::Message {
+                title: tr("Check for updates").into(),
+                text: trf("You have the newest version ({version}).", &[("version", &env!("CARGO_PKG_VERSION"))]),
+            }),
+            Err(e) if manual => self.error(trf("Could not look for updates: {error}", &[("error", &e)])),
+            _ => {}
         }
     }
 
@@ -1196,6 +1228,10 @@ impl App {
         let res: Result<(), String> = match cmd {
             Cmd::Help => {
                 self.open_dialog(Dialog::Help);
+                Ok(())
+            }
+            Cmd::CheckUpdates => {
+                self.update_check = Some(crate::update::Check::start(ctx, true));
                 Ok(())
             }
             Cmd::Enter => match self.act().enter(hidden) {
@@ -2320,6 +2356,88 @@ impl App {
                     outcome = 2;
                 }
             }
+            Dialog::Update { release, install } => {
+                use crate::update::Progress;
+                let state = install.as_ref().map(|i| i.lock().unwrap().clone());
+                let running = matches!(state, Some(Progress::Downloading { .. } | Progress::Unpacking));
+                let (mut open_page, mut start, mut run_new) = (false, false, None);
+                dw.modal().show(ctx, &mut self.dialog_places, "update", tr("Update available"), 480.0, &mut enter, &mut escape, &mut |ui| {
+                    ui.label(trf("RustySalamander {new} is available. You have {current}.", &[("new", &release.version), ("current", &env!("CARGO_PKG_VERSION"))]));
+                    ui.add_space(2.0);
+                    open_page = ui.link(release.page.as_str()).on_hover_text(tr("Open the release page in the browser")).clicked();
+                    ui.add_space(6.0);
+                    match &state {
+                        None => {
+                            let folder = crate::update::target_dir(release).map(|p| display_path(&p)).unwrap_or_default();
+                            ui.label(trf(
+                                "Update now downloads the new version, unpacks it to {folder} and copies your settings there. This version stays as it is.",
+                                &[("folder", &folder)],
+                            ));
+                            ui.add_space(6.0);
+                            match centered_buttons(ui, &[(tr("Update now"), ""), (tr("Close"), "")]) {
+                                Some(0) => start = true,
+                                Some(_) => outcome = 2,
+                                None => {}
+                            }
+                        }
+                        Some(Progress::Downloading { done, total }) => {
+                            ui.label(trf("Downloading… {done} of {total}", &[("done", &format_size(*done)), ("total", &format_size(*total))]));
+                            ui.add(egui::ProgressBar::new(if *total > 0 { *done as f32 / *total as f32 } else { 0.0 }));
+                        }
+                        Some(Progress::Unpacking) => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(tr("Unpacking…"));
+                            });
+                        }
+                        Some(Progress::Done { folder, copied }) => {
+                            ui.label(trf("RustySalamander {new} is installed in {folder}.", &[("new", &release.version), ("folder", &display_path(folder))]));
+                            ui.label(if copied.is_empty() {
+                                tr("There were no settings to copy.").to_owned()
+                            } else {
+                                trf("Settings copied: {files}", &[("files", &copied.join(", "))])
+                            });
+                            ui.add_space(6.0);
+                            match centered_buttons(ui, &[(tr("Start the new version"), tr("Closes this version")), (tr("Close"), "")]) {
+                                Some(0) => run_new = Some(folder.clone()),
+                                Some(_) => outcome = 2,
+                                None => {}
+                            }
+                        }
+                        Some(Progress::Failed(e)) => {
+                            ui.label(trf("The update failed: {error}", &[("error", e)]));
+                            ui.add_space(6.0);
+                            match centered_buttons(ui, &[(tr("Try again"), ""), (tr("Close"), "")]) {
+                                Some(0) => start = true,
+                                Some(_) => outcome = 2,
+                                None => {}
+                            }
+                        }
+                    }
+                });
+                // the window stays while the download runs
+                if running {
+                    enter = false;
+                    escape = false;
+                }
+                if open_page {
+                    if let Err(e) = shell_open(Path::new(&release.page)) {
+                        self.error(format!("{}: {e}", release.page));
+                    }
+                }
+                if start {
+                    // the settings as they are now go to the new version
+                    self.save_config();
+                    *install = Some(crate::update::install(ctx, release.clone()));
+                }
+                if let Some(folder) = run_new {
+                    let exe = folder.join("rustysalamander.exe");
+                    match std::process::Command::new(&exe).current_dir(&folder).spawn() {
+                        Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                        Err(e) => self.error(format!("{}: {e}", display_path(&exe))),
+                    }
+                }
+            }
             Dialog::Settings { tab, recording } => {
                 let cfg = &mut self.cfg;
                 let mut edit: Option<KeyEdit> = None;
@@ -2335,6 +2453,7 @@ impl App {
                 let languages = &self.languages;
                 let mut lang_changed = false;
                 let mut plugins_changed = false;
+                let mut check_now = false;
                 // each plugin found: id, name, description, its file and its
                 // state: running (its status) or why it couldn't start
                 let plugin_rows: Vec<PluginRow> = self
@@ -2594,6 +2713,15 @@ impl App {
                                     });
                                     ui.end_row();
                                 });
+
+                                section(ui, n_("Updates"), false, &mut |ui| {
+                                    ui.label(tr("New versions"));
+                                    ui.horizontal(|ui| {
+                                        ui.checkbox(&mut cfg.check_updates, tr("Look for a new version on GitHub at start-up"));
+                                        check_now |= ui.button(tr("Check now")).clicked();
+                                    });
+                                    ui.end_row();
+                                });
                             });
                         }
                         SettingsTab::Plugins => {
@@ -2768,6 +2896,9 @@ impl App {
                 }
                 if plugins_changed {
                     self.apply_plugins();
+                }
+                if check_now {
+                    self.update_check = Some(crate::update::Check::start(ctx, true));
                 }
                 if fonts_changed {
                     crate::fonts::install(ctx, &self.cfg.ui_font, &self.cfg.mono_font);
@@ -2975,7 +3106,7 @@ impl App {
                     self.error(e);
                 }
             }
-            Dialog::Message { .. } | Dialog::Help | Dialog::Settings { .. } | Dialog::None => {}
+            Dialog::Message { .. } | Dialog::Help | Dialog::Update { .. } | Dialog::Settings { .. } | Dialog::None => {}
         }
     }
 
@@ -3403,6 +3534,7 @@ impl App {
             });
             ui.menu_button(tr("Help"), |ui| {
                 item(ui, tr("Keyboard"), "", Cmd::Help);
+                item(ui, tr("Check for updates…"), "", Cmd::CheckUpdates);
                 if ui.button(tr("About")).clicked() {
                     self.open_dialog(Dialog::Message {
                         title: tr("About").into(),
@@ -4020,6 +4152,7 @@ impl App {
         if self.panels.iter().any(Panel::is_loading) {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+        self.poll_update_check();
         timing.mark("background reads");
         let no_dialog = matches!(self.dialog, Dialog::None);
         let editing_path = self.path_edit.iter().any(Option::is_some);
@@ -5814,6 +5947,50 @@ mod tests {
         assert!(ui.app.font_slider_rect.is_some(), "General tab drawn");
         ui.app.command(&ui.ctx.clone(), Cmd::ToggleIcons);
         assert!(!ui.app.cfg.system_icons);
+    }
+
+    /// The update window in each state; Escape closes it except while the
+    /// download runs. SNAPSHOT_DIR set: also saved as update_*.png.
+    #[test]
+    fn update_dialog_states() {
+        use crate::update::{Progress, Release};
+        use std::sync::{Arc, Mutex};
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        crate::fonts::install(&ui.ctx, "", "");
+        let release = Release {
+            version: "0.3.0-alpha".into(),
+            page: "https://github.com/nocturneop15/RustySalamander/releases/tag/v0.3.0-alpha".into(),
+            asset: "RustySalamander-0.3.0-alpha-win64.zip".into(),
+            asset_url: String::new(),
+            asset_size: 7_126_108,
+        };
+        let states = [
+            ("offer", None),
+            ("downloading", Some(Progress::Downloading { done: 3_100_000, total: 7_126_108 })),
+            (
+                "done",
+                Some(Progress::Done {
+                    folder: PathBuf::from(r"D:\Applications\RustySalamander\0.3.0-alpha"),
+                    copied: vec!["config.toml".into(), r"plugins\scp\known_hosts".into()],
+                }),
+            ),
+            ("failed", Some(Progress::Failed("https://github.com/…: the server answered 404".into()))),
+        ];
+        for (name, state) in states {
+            let running = matches!(state, Some(Progress::Downloading { .. }));
+            ui.app.dialog = Dialog::Update { release: release.clone(), install: state.map(|p| Arc::new(Mutex::new(p))) };
+            ui.frames(4);
+            assert!(matches!(ui.app.dialog, Dialog::Update { .. }), "{name}: open");
+            if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+                let bg = ui.ctx.style().visuals.panel_fill;
+                let out = ui.last.take().unwrap();
+                ui.snap.render(&ui.ctx, out, bg, &dir.join(format!("update_{name}.png")));
+            }
+            ui.key(Key::Escape);
+            ui.frames(1);
+            assert_eq!(matches!(ui.app.dialog, Dialog::Update { .. }), running, "{name}: Escape");
+        }
     }
 
     #[cfg(windows)]

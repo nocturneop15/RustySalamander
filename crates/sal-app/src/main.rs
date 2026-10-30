@@ -12,6 +12,7 @@
 //! - `viewer`: the F3 text/hex viewer
 //! - `dialogwin`: dialogs in their own native windows
 //! - `i18n`: translations
+//! - `update`: new releases on GitHub, and installing them
 //! - the rest: icons, fonts, context menus, shortcuts, folder sizes
 
 // a release build has no console window; debug builds keep one for logs
@@ -34,6 +35,7 @@ mod shellmenu;
 mod shortcut;
 #[cfg(test)]
 mod snapshot;
+mod update;
 mod viewer;
 mod worker;
 

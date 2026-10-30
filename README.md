@@ -191,6 +191,12 @@ plugins\scp\       the SCP plugin: scp.spl; known_hosts and the last connection'
 - **Other location:** the `RUSTYSALAMANDER_CONFIG` environment variable can name a different configuration file.
 - **Development builds:** the program folder is `target\release` (or `target\debug`), so `cargo clean` deletes the settings saved there. Copy `config.toml` elsewhere first if you want to keep it.
 
+## Updates
+
+At start-up the program asks GitHub whether a newer release exists. If one does, a window shows the new version and a link to its release page. **Update now** downloads it and unpacks it into a folder named by the version, next to the folder the program runs from (`…\RustySalamander\0.2.1-alpha` → `…\RustySalamander\0.3.0-alpha`), then copies the settings there: `config.toml` and the files plugins saved in their folders (such as the SCP plugin's `known_hosts`). **Start the new version** opens it and closes the old one. The old version stays as it was, so you can go back to it.
+
+**Help → Check for updates…** checks at any time. **Settings → General → Updates** turns the start-up check off (`check_updates` in `config.toml`).
+
 ## Languages
 
 The UI language is chosen in **Options → Language** or **Settings → General → Appearance → Language**. The choice applies immediately. *System default* follows the Windows display language and falls back to English. English is built in; every other language is a file in the `lang` folder next to the program (Czech ships as `lang\cs.toml`).
