@@ -13,3 +13,5 @@ authors = ["RustySalamander contributors", "Open Salamander Authors (original C+
 [profile.release]
 opt-level = 3
 lto = "thin"
+# no symbol tables in the shipped exe and plugins (about 25 % smaller)
+strip = "symbols"
