@@ -84,7 +84,10 @@ fn seven_zip_plugin(manifest: &Path, profile_dir: &Path) -> Result<(), String> {
 fn build_plugin(manifest: &Path, profile_dir: &Path, package: &str) -> Result<PathBuf, String> {
     let root = manifest.join("../..");
     println!("cargo:rerun-if-changed={}", root.join("plugins").display());
-    println!("cargo:rerun-if-changed={}", root.join("crates/sal-plugin-api").display());
+    // the crates plugins share with the program: a change there changes them too
+    for shared in ["crates/sal-plugin-api", "crates/sal-ui", "crates/sal-core"] {
+        println!("cargo:rerun-if-changed={}", root.join(shared).display());
+    }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let target = profile_dir.parent().ok_or("no target folder")?.join("plugins-build");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());

@@ -4,6 +4,7 @@
 //! [`window`]).
 
 mod doc;
+mod highlight;
 mod window;
 
 use std::io;

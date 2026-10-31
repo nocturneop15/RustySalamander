@@ -4,11 +4,15 @@
 //! its icons sit in a private-use area no text font has, so an icon can be
 //! put into any text: `format!("{} {name}", mdi::MAGNIFY)`.
 //!
-//! Only the icons in use are named here; the codes come from the font's
-//! `materialdesignicons.css` (`.mdi-<name>::before`).
+//! Only the icons in use are named here, and only they are in the font the
+//! program carries: the full font (7,400 icons, 1.3 MB) cut down to them by
+//! `tools/subset-mdi.py` (a few kilobytes). To use another icon, add it here
+//! with its code from the font's `materialdesignicons.css`
+//! (`.mdi-<name>::before`) and run that script; the test below fails until
+//! the font has it.
 
-/// The font itself.
-pub(crate) const FONT: &[u8] = include_bytes!("../fonts/materialdesignicons-webfont.ttf");
+/// The font itself, cut down to the icons below.
+pub(crate) const FONT: &[u8] = include_bytes!("../fonts/materialdesignicons-subset.ttf");
 
 /// Its name in the font set.
 pub const FONT_NAME: &str = "mdi";
@@ -52,3 +56,29 @@ pub const MENU_UP: &str = "\u{F0360}";
 pub const MENU_DOWN: &str = "\u{F035D}";
 pub const CHEVRON_UP: &str = "\u{F0143}";
 pub const CHEVRON_DOWN: &str = "\u{F0140}";
+
+#[cfg(test)]
+mod tests {
+    /// Every icon named in this file is in the cut-down font, and the font
+    /// has nothing else to speak of.
+    #[test]
+    fn every_icon_is_in_the_font() {
+        let source = include_str!("mdi.rs");
+        let codes: Vec<char> = source
+            .split("\\u{")
+            .skip(1)
+            .filter_map(|rest| rest.split('}').next())
+            .filter_map(|hex| u32::from_str_radix(hex, 16).ok())
+            .filter_map(char::from_u32)
+            .collect();
+        assert!(codes.len() >= 30, "found {} icons", codes.len());
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx, "", "");
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let icons = egui::FontId::new(16.0, egui::FontFamily::Name(crate::fonts::ICON_FONT.into()));
+        for c in codes {
+            assert!(ctx.fonts(|f| f.has_glyphs(&icons, &c.to_string())), "U+{:X} is not in the font: run tools/subset-mdi.py", c as u32);
+        }
+        assert!(super::FONT.len() < 64 * 1024, "the full font slipped in: {} bytes", super::FONT.len());
+    }
+}

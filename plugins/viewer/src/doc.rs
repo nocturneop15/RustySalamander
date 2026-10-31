@@ -1,8 +1,13 @@
 //! A file as the viewer shows it: its text in an encoding (detected, or
-//! chosen), or its bytes as hex. No window here, so it can be tested.
+//! chosen), colored by its syntax, or its bytes as hex. No window here, so
+//! it can be tested.
 
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use crate::highlight::{self, Span};
 
 use sal_core::encoding::{self, display_path, TextEncoding};
 use sal_plugin_api::tr;
@@ -24,6 +29,35 @@ pub struct Doc {
     pub wrap: bool,
     /// Why the file couldn't be read.
     pub error: Option<String>,
+    /// The syntax its text is colored by (detected, or chosen); `None` for
+    /// plain text.
+    pub syntax: Option<String>,
+    /// The colors of the lines: (dark theme, `version` they were made for, spans).
+    spans: Option<(bool, u64, Vec<Vec<Span>>)>,
+    /// Changes with the lines and the syntax, so old colors aren't used.
+    version: u64,
+    /// Coloring running in the background.
+    job: Option<Job>,
+}
+
+/// Coloring the lines on a thread of its own.
+struct Job {
+    dark: bool,
+    version: u64,
+    stop: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<Option<Vec<Vec<Span>>>>>>,
+}
+
+/// Where coloring a document stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colors {
+    /// Plain text, or hex.
+    Off,
+    /// Too large to color ([`highlight::MAX_BYTES`]).
+    TooLarge,
+    /// Being made; plain until then.
+    Working,
+    Ready,
 }
 
 impl Doc {
@@ -39,6 +73,10 @@ impl Doc {
             hex: false,
             wrap: false,
             error: None,
+            syntax: None,
+            spans: None,
+            version: 0,
+            job: None,
         };
         match std::fs::File::open(path) {
             Ok(f) => {
@@ -53,6 +91,8 @@ impl Doc {
                 d.set_encoding(enc);
                 // binary files open in hex mode
                 d.hex = d.bytes.iter().take(8192).any(|&b| b == 0) && !matches!(enc, TextEncoding::Utf16Le | TextEncoding::Utf16Be);
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                d.syntax = highlight::detect(&name, d.lines.first().map(String::as_str).unwrap_or(""));
             }
             Err(e) => d.error = Some(e.to_string()),
         }
@@ -65,6 +105,76 @@ impl Doc {
         let bom = if matches!((enc, self.bom), (TextEncoding::Utf8, 3) | (TextEncoding::Utf16Le | TextEncoding::Utf16Be, 2)) { self.bom } else { 0 };
         let text = encoding::decode(&self.bytes[bom..], enc);
         self.lines = text.lines().map(|l| encoding::visual_order(&l.replace('\t', "    "), false).into_owned()).collect();
+        self.version += 1;
+    }
+
+    /// Color the text by `syntax` (`None`: plain text).
+    pub fn set_syntax(&mut self, syntax: Option<String>) {
+        self.syntax = syntax;
+        self.version += 1;
+    }
+
+    /// The colors of line `row`, once they are made.
+    pub fn line_spans(&self, row: usize) -> Option<&[Span]> {
+        match &self.spans {
+            Some((_, v, spans)) if *v == self.version => spans.get(row).map(Vec::as_slice),
+            _ => None,
+        }
+    }
+
+    /// Keep the colors up to date for the dark or the light theme: start
+    /// coloring in the background when needed (`wake` is called when it is
+    /// done), take the result when it is there.
+    pub fn colors(&mut self, dark: bool, wake: impl Fn() + Send + 'static) -> Colors {
+        let Some(syntax) = self.syntax.clone().filter(|_| !self.hex && self.error.is_none()) else {
+            self.cancel();
+            return Colors::Off;
+        };
+        if self.bytes.len() > highlight::MAX_BYTES {
+            return Colors::TooLarge;
+        }
+        if matches!(&self.spans, Some((d, v, _)) if *d == dark && *v == self.version) {
+            return Colors::Ready;
+        }
+        if let Some(job) = &self.job {
+            if job.dark == dark && job.version == self.version {
+                let done = job.result.lock().unwrap().take();
+                return match done {
+                    None => Colors::Working,
+                    Some(spans) => {
+                        self.job = None;
+                        match spans {
+                            Some(spans) => {
+                                self.spans = Some((dark, self.version, spans));
+                                Colors::Ready
+                            }
+                            None => Colors::Off,
+                        }
+                    }
+                };
+            }
+            self.cancel();
+        }
+        let job = Job { dark, version: self.version, stop: Arc::new(AtomicBool::new(false)), result: Arc::new(Mutex::new(None)) };
+        let (lines, stop, result) = (self.lines.clone(), job.stop.clone(), job.result.clone());
+        let spawned = std::thread::Builder::new().name("viewer colors".into()).spawn(move || {
+            let spans = highlight::highlight(&lines, &syntax, dark, &stop);
+            if !stop.load(Ordering::Relaxed) {
+                *result.lock().unwrap() = Some(spans);
+                wake();
+            }
+        });
+        if spawned.is_err() {
+            return Colors::Off;
+        }
+        self.job = Some(job);
+        Colors::Working
+    }
+
+    fn cancel(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.stop.store(true, Ordering::Relaxed);
+        }
     }
 
     /// The bytes read (at most [`MAX_BYTES`]).
@@ -99,6 +209,13 @@ impl Doc {
         s.push(' ');
         s.extend(chunk.iter().map(|&b| if (0x20..0x7F).contains(&b) { b as char } else { '.' }));
         s
+    }
+}
+
+impl Drop for Doc {
+    /// The window closed: coloring that still runs stops.
+    fn drop(&mut self) {
+        self.cancel();
     }
 }
 
@@ -138,5 +255,43 @@ mod tests {
 
         let missing = Doc::open(&t.path().join("není.txt"));
         assert!(missing.error.is_some());
+    }
+
+    /// A JSON file is colored in the background; another syntax or the
+    /// other theme colors it again; plain text and hex aren't colored.
+    #[test]
+    fn colors_in_the_background() {
+        let t = tempfile::tempdir().unwrap();
+        let json = t.path().join("data.json");
+        std::fs::write(&json, "{\n  \"a\": [1, true, \"x\"]\n}\n").unwrap();
+        let mut d = Doc::open(&json);
+        assert_eq!(d.syntax.as_deref(), Some("JSON"));
+        let wait = |d: &mut Doc, dark: bool| {
+            for _ in 0..500 {
+                match d.colors(dark, || {}) {
+                    Colors::Working => std::thread::sleep(std::time::Duration::from_millis(5)),
+                    other => return other,
+                }
+            }
+            panic!("never colored");
+        };
+        assert!(d.line_spans(1).is_none(), "not before they are made");
+        assert_eq!(wait(&mut d, true), Colors::Ready);
+        let dark = d.line_spans(1).unwrap().to_vec();
+        assert!(dark.len() > 3);
+        assert_eq!(wait(&mut d, false), Colors::Ready);
+        assert_ne!(d.line_spans(1).unwrap(), dark.as_slice(), "the light theme");
+        d.set_syntax(Some("YAML".into()));
+        assert!(d.line_spans(1).is_none(), "old colors go with the syntax");
+        assert_eq!(wait(&mut d, false), Colors::Ready);
+        d.set_syntax(None);
+        assert_eq!(d.colors(false, || {}), Colors::Off);
+        d.set_syntax(Some("JSON".into()));
+        d.hex = true;
+        assert_eq!(d.colors(false, || {}), Colors::Off);
+
+        let txt = t.path().join("a.txt");
+        std::fs::write(&txt, "text").unwrap();
+        assert_eq!(Doc::open(&txt).syntax, None);
     }
 }

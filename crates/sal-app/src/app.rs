@@ -5259,26 +5259,27 @@ mod tests {
         p.start(&[]);
         let viewer = p.get("viewer").unwrap_or_else(|| panic!("{:?}", p.errors)).clone();
         let t = tempfile::tempdir().unwrap();
-        let (a, b) = (t.path().join("první 🦎.txt"), t.path().join("druhý.bin"));
-        fs::write(&a, "Příliš žluťoučký kůň\n日本語").unwrap();
+        let (a, b) = (t.path().join("první 🦎.json"), t.path().join("druhý.bin"));
+        // a JSON file is colored in the background while its window is open
+        fs::write(&a, "{\n  \"text\": \"Příliš žluťoučký kůň 日本語\",\n  \"count\": 42\n}\n").unwrap();
         fs::write(&b, [0u8, 1, 2, 3, 255]).unwrap();
         let options: plugins::Values = [("theme".to_owned(), "dark".to_owned())].into();
 
         viewer.open_file("text", &a, &options).unwrap();
-        wait_for("the first window", || windows_with("první 🦎.txt").len() == 1);
+        wait_for("the first window", || windows_with("první 🦎.json").len() == 1);
         viewer.open_file("text", &b, &options).unwrap();
         wait_for("the second window", || windows_with("druhý.bin").len() == 1);
         // closing the first (the loop's main window) keeps the second
-        let (first, _) = windows_with("první 🦎.txt")[0];
+        let (first, _) = windows_with("první 🦎.json")[0];
         unsafe { PostMessageW(first, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
-        wait_for("the first file's window gone", || windows_with("první 🦎.txt").is_empty());
+        wait_for("the first file's window gone", || windows_with("první 🦎.json").is_empty());
         wait_for("the second file stays open, in one window", || windows_with("druhý.bin").len() == 1);
         let (second, _) = windows_with("druhý.bin")[0];
         unsafe { PostMessageW(second, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
         wait_for("all closed", || windows_with(" - Viewer").is_empty());
         // the loop starts again for the next file
         viewer.open_file("text", &a, &options).unwrap();
-        wait_for("a window again", || windows_with("první 🦎.txt").len() == 1);
+        wait_for("a window again", || windows_with("první 🦎.json").len() == 1);
         // turning the plugin off closes its windows
         drop(viewer);
         p.start(&["viewer".to_owned()]);

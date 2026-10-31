@@ -22,9 +22,13 @@ The full terms are in `third_party/7zip-26.05/DOC/License.txt` and `DOC/unRarLic
 
 The SCP plugin (`plugins\scp`) contains russh (Apache-2.0), its key handling (ssh-key, MIT or Apache-2.0), tokio (MIT), and ring for cryptography (ISC-style and Apache-2.0 licenses, with parts from BoringSSL). They are listed in `Cargo.lock` like the program's own crates.
 
+## The Viewer plugin's syntax highlighting
+
+The Viewer plugin (`plugins\viewer`) colors text with [syntect](https://github.com/trishume/syntect) (MIT), the syntax definitions and themes of [bat](https://github.com/sharkdp/bat) as packaged by [two-face](https://github.com/CosmicHorrorDev/two-face) (MIT or Apache-2.0), and the [Oniguruma](https://github.com/kkos/oniguruma) regular expression library (BSD-2-Clause, through the `onig` crate). The syntax definitions and color themes come from many authors under their own open licenses (mostly MIT, Apache-2.0 and BSD); two-face lists each one with its license at <https://github.com/CosmicHorrorDev/two-face/blob/v0.4.5/generated/acknowledgements_full.md>.
+
 ## Material Design Icons (the program's icons)
 
-The icons (drives, connections, searches, the context menu, sort marks, and files and folders when Windows' file icons are off) come from [Material Design Icons](https://pictogrammers.com/library/mdi/) by Pictogrammers, the `@mdi/font` 7.4.47 font (`materialdesignicons-webfont.ttf`), built into the program and the Viewer plugin. The font is distributed under the **Apache License 2.0** (<https://www.apache.org/licenses/LICENSE-2.0>), which is compatible with RustySalamander's license through the GNU GPL version 3. Its license file is `crates/sal-ui/fonts/materialdesignicons-LICENSE.txt` in the source:
+The icons (drives, connections, searches, the context menu, sort marks, and files and folders when Windows' file icons are off) come from [Material Design Icons](https://pictogrammers.com/library/mdi/) by Pictogrammers, the `@mdi/font` 7.4.47 font (`materialdesignicons-webfont.ttf`), cut down to the icons in use (`tools/subset-mdi.py`) and built into the program and the Viewer plugin. The font is distributed under the **Apache License 2.0** (<https://www.apache.org/licenses/LICENSE-2.0>), which is compatible with RustySalamander's license through the GNU GPL version 3. Its license file is `crates/sal-ui/fonts/materialdesignicons-LICENSE.txt` in the source:
 
 > Pictogrammers Free License. This icon collection is released as free, open source, and GPL friendly by the Pictogrammers icon group. Icons: Apache 2.0. Fonts: Apache 2.0. Code: MIT.
 

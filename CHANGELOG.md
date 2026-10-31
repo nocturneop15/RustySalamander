@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.7-alpha (2026-10-31)
+
+- **Smaller program:** the built-in Material Design Icons font holds only the 32 icons the program uses (5 KB instead of 1.3 MB), in the program and in the Viewer plugin. `tools/subset-mdi.py` makes it again when an icon is added, and a test says when one is missing.
+- **The Viewer plugin 0.5.3-alpha** is bundled. **Syntax highlighting:** text is colored by its format: JSON, XML, HTML, PowerShell, Bash, Batch, INI, TOML, YAML, Markdown, CSS, JavaScript, Python, C/C++, C#, Rust, SQL, Dockerfile and about 200 more. The format is recognised from the file name (`.json`, `Makefile`, `.bashrc`) or the first line (`#!/bin/bash`, `<?xml`), and the **Syntax** list in the toolbar picks another one, or Plain text. The colors follow the light or dark theme. Coloring runs in the background, so a large file opens at once and gets its colors a moment later; files over 8 MB, and lines over 20,000 characters, stay plain.
+
 ## 0.5.6-alpha (2026-10-31)
 
 - **Material Design Icons:** the program's icons come from Material Design Icons (built in, Apache-2.0): drive types (disk, USB stick, CD/DVD, RAM disk, network drive), server connections and searches in the drive selector and on the drive button, the context menu (instead of the Windows icon font), the sort marks of the panels and the results window, the job queue's arrows, the plugin banner, and files, folders and `..` when Windows' file icons are turned off.

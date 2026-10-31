@@ -22,7 +22,7 @@ Documentation:
 - **Characters Windows forbids:** names from Macs, Samba/NAS shares or WSL may contain `* : ? | < > " \`. Windows stores these as private-use stand-ins (U+F020–F029 or U+F000+char) that no font can draw, so they're shown as the original characters. This is display only; operations use the exact name.
 - **Fonts:** a fallback chain over the Windows system fonts covers CJK, Korean, Indic, Thai, symbols and emoji.
 - **Icons:** [Material Design Icons](https://pictogrammers.com/library/mdi/) (built in): drives, connections, searches, the context menu, sort marks, and files and folders when Windows' file icons are turned off.
-- **Viewer** (the Viewer plugin): detects UTF-8, UTF-16 LE/BE (with or without a BOM) and the system ANSI code page. You can switch to Windows-125x, ISO-8859-2, KOI8-R, CP866, Shift-JIS, EUC-JP, GBK, Big5 or EUC-KR.
+- **Viewer** (the Viewer plugin): colors text by its format (JSON, XML, HTML, PowerShell, Bash and about 200 more, recognised from the file name or the first line, or chosen in the Syntax list) and detects UTF-8, UTF-16 LE/BE (with or without a BOM) and the system ANSI code page. You can switch to Windows-125x, ISO-8859-2, KOI8-R, CP866, Shift-JIS, EUC-JP, GBK, Big5 or EUC-KR.
 - **Config:** stored as UTF-8 TOML in `config.toml` next to `rustysalamander.exe` (portable mode) instead of the registry. See [Portable mode](#portable-mode).
 
 ## Layout

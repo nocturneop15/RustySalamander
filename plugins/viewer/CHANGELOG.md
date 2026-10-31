@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.3-alpha (2026-10-31)
+
+- **Syntax highlighting:** text is colored by its format: JSON, XML, HTML, PowerShell, Bash, Batch, INI, TOML, YAML, Markdown, CSS, JavaScript, Python, C/C++, C#, Rust, SQL, Dockerfile and about 200 more. The format is recognised from the file name (`.json`, `Makefile`, `.bashrc`) or the first line (`#!/bin/bash`, `<?xml`), and the **Syntax** list in the toolbar picks another one, or Plain text. The colors follow the light or dark theme. Coloring runs in the background, so a large file opens at once and gets its colors a moment later; files over 8 MB, and lines over 20,000 characters, stay plain.
+
 ## 0.5.2-alpha (2026-10-31)
 
 - **The accent color:** the windows follow the accent color chosen in the program (Settings → General → Appearance), for the selected Text/Hex button, the encoding list and text selections.
