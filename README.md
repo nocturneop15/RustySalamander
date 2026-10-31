@@ -265,7 +265,7 @@ Copy/Move, Create directory, Rename, Delete, Select by mask and messages are mod
 
 **View → Theme** offers *System default* (follows Windows), *Light* and *Dark*; the same choice is in **Settings → General**. A *Switch dark/light mode* command is available in the keyboard shortcuts table. It has no default key; `Ctrl+Shift+D` is offered as a preset. The theme covers the panels, the window title bar and the native context menus.
 
-**Plugin panel tint** (Settings → General → Appearance) colors the background of panels a plugin shows (archives, servers, search results) and their banner: *From the theme* uses a faint wash of the theme's selection color, *Custom* one of a color you pick, with a preview next to it. Stored in `config.toml` as `plugin_tint` (RGB).
+**Plugin panel tint** (Settings → General → Appearance) colors panels a plugin shows (archives, servers, search results) from the path bar to the banner, the column header included: *From the theme* uses a faint wash of the theme's selection color, *Custom* one of a color you pick, with a preview next to it. Stored in `config.toml` as `plugin_tint` (RGB).
 
 ## Fonts
 

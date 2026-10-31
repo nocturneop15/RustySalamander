@@ -1971,6 +1971,12 @@ impl App {
         let mut drive_picked: Option<PathBuf> = None;
         let drive_list = self.cached_drives().to_vec();
         let show_all = self.cfg.drive_buttons == DriveButtons::All;
+        // a panel a plugin shows is tinted from the path bar to its banner;
+        // the tint goes under what is drawn, once the panel's height is known
+        let plugin_panel = self.panels[idx].archive.is_some();
+        let tint = plugin_tint(ui.visuals(), self.cfg.plugin_tint);
+        let top = ui.cursor().min;
+        let tint_slot = ui.painter().add(egui::Shape::Noop);
 
         // path bar
         ui.horizontal(|ui| {
@@ -2006,7 +2012,11 @@ impl App {
                     drive_clicked = true;
                 }
             }
-            let (bg, fg) = if active { (ui.visuals().selection.bg_fill, ui.visuals().selection.stroke.color) } else { (ui.visuals().faint_bg_color, ui.visuals().text_color()) };
+            let (bg, fg) = match (active, plugin_panel) {
+                (true, _) => (ui.visuals().selection.bg_fill, ui.visuals().selection.stroke.color),
+                (false, true) => (tint.gamma_multiply(2.5), ui.visuals().text_color()),
+                (false, false) => (ui.visuals().faint_bg_color, ui.visuals().text_color()),
+            };
             let edit_key = menu_key(&self.cfg.shortcuts, Cmd::ChangeDir);
             egui::Frame::none().fill(bg).inner_margin(egui::Margin::symmetric(6.0, 3.0)).rounding(3.0f32).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -2088,9 +2098,10 @@ impl App {
         let banner = self.panels[idx].archive.as_ref().map(|a| plugin_banner(&self.plugins.name_of(a.plugin.id()), &a.file));
         let banner_h = if banner.is_some() { row_h } else { 0.0 };
         let body_h = (ui.available_height() - footer_h - banner_h).max(row_h * 3.0);
-        if banner.is_some() {
-            let body = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), body_h));
-            ui.painter().rect_filled(body, 0.0, plugin_tint(ui.visuals(), self.cfg.plugin_tint));
+        if plugin_panel {
+            let bottom = ui.cursor().min.y + body_h;
+            let rect = egui::Rect::from_min_max(top, egui::pos2(top.x + ui.available_width(), bottom));
+            ui.painter().set(tint_slot, egui::Shape::rect_filled(rect, 0.0, tint));
         }
         self.panels[idx].visible_rows = ((body_h - row_h) / row_h).floor().max(1.0) as usize;
 
@@ -2264,7 +2275,8 @@ impl App {
                                             ui.label(text(match kind {
                                                 EntryKind::File => format_thousands(e.size),
                                                 EntryKind::Dir => tr("DIR").into(),
-                                                EntryKind::UpDir => tr("UP-DIR").into(),
+                                                // the up-dir row needs no text: its name says it
+                                                EntryKind::UpDir => String::new(),
                                             }));
                                         }
                                     }
@@ -7671,6 +7683,15 @@ mod tests {
             let out = ui.last.take().unwrap();
             ui.snap.render(&ui.ctx, out, bg, &out_dir.join(name));
         }
+        // a custom tint, on the inactive panel too
+        ui.app.cfg.plugin_tint = Some([220, 120, 30]);
+        ui.app.active = 1;
+        ui.frames(10);
+        let bg = ui.ctx.style().visuals.panel_fill;
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_panel_tint.png"));
+        ui.app.cfg.plugin_tint = None;
+        ui.app.active = 0;
         // the connection in the other panel's drive selector, in a low window
         ui.app.cfg.theme = ThemeMode::Light;
         apply_theme(&ui.ctx, ThemeMode::Light);
@@ -7704,21 +7725,15 @@ mod tests {
             search_roots.push(r.mount.root());
             search_roots.push(plugins::Mount { authority: r.flat.clone(), ..r.mount.clone() }.root());
             ui.app.open_results(plugin.clone(), r);
+            // as if a panel showed it, so the next search keeps it
+            ui.app.results = None;
         }
-        ui.app.results = None;
         ui.frames(2);
         ui.app.command(&ui.ctx.clone(), Cmd::DriveMenu(1));
         ui.frames(6);
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("drive_menu_searches.png"));
         ui.key(Key::Escape);
-        // a search in a panel: the path bar and the banner name it
-        let hidden = ui.app.vis();
-        ui.app.panels[1].load(&search_roots[0].join("home"), hidden, None).unwrap();
-        ui.frames(4);
-        let out = ui.last.take().unwrap();
-        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("search_panel.png"));
-        ui.app.panels[1].load(t.path(), hidden, None).unwrap();
         // a search in a panel: the path bar and the banner name it
         let hidden = ui.app.vis();
         ui.app.panels[1].load(&search_roots[0].join("home"), hidden, None).unwrap();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.4-alpha (2026-10-31)
+
+- **The whole plugin panel is tinted:** the tint of a panel a plugin shows now covers its path bar row and column header too, not only the list; the path bar of the inactive panel takes a stronger shade of it.
+- **No UP-DIR text:** the `..` row no longer shows "UP-DIR" (Czech "NADADR") in the Size column.
+
 ## 0.5.3-alpha (2026-10-31)
 
 - **Plugin panel tint:** Settings → General → Appearance chooses the color of panels a plugin shows (archives, servers, search results) and of their banner: from the theme, as before, or a custom color picked with a color picker, with a preview. Applies at once.
