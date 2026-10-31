@@ -278,11 +278,11 @@ impl ResultsWin {
                     for (col, label) in &headers {
                         h.col(|ui| {
                             let mark = match self.sort {
-                                Some((c, true)) if c == *col => " ▲",
-                                Some((c, false)) if c == *col => " ▼",
+                                Some((c, true)) if c == *col => sal_ui::mdi::MENU_UP,
+                                Some((c, false)) if c == *col => sal_ui::mdi::MENU_DOWN,
                                 _ => "",
                             };
-                            if ui.add(egui::Label::new(RichText::new(format!("{label}{mark}")).strong()).sense(egui::Sense::click())).clicked() {
+                            if ui.add(egui::Label::new(RichText::new(format!("{label} {mark}")).strong()).sense(egui::Sense::click())).clicked() {
                                 clicked_sort = Some(*col);
                             }
                         });
@@ -294,7 +294,7 @@ impl ResultsWin {
                         let r = &self.rows[i];
                         row.set_selected(self.selected == Some(i));
                         row.col(|ui| {
-                            ui.label(if r.dir { format!("📁 {}", r.name) } else { r.name.clone() });
+                            ui.label(if r.dir { format!("{} {}", sal_ui::mdi::FOLDER_OUTLINE, r.name) } else { r.name.clone() });
                         });
                         row.col(|ui| {
                             ui.label(&r.folder);

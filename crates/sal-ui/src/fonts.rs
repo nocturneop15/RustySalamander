@@ -183,13 +183,13 @@ pub fn definitions(ui_font: &str, mono_font: &str, installed: &[SystemFont]) -> 
         }
         list.extend(fallbacks.iter().cloned());
     }
-    // Windows icon font for the Windows 11 style context menu
-    for file in ["SegoeIcons.ttf", "segmdl2.ttf"] {
-        if load(&mut defs, ICON_FONT, &dir.join(file), 0) {
-            defs.families.insert(FontFamily::Name(ICON_FONT.into()), vec![ICON_FONT.to_owned()]);
-            break;
-        }
+    // the program's icons (Material Design Icons), behind everything, so an
+    // icon can stand in any text; and as a family of their own
+    defs.font_data.insert(crate::mdi::FONT_NAME.to_owned(), FontData::from_static(crate::mdi::FONT));
+    for fam in [FontFamily::Proportional, FontFamily::Monospace] {
+        defs.families.entry(fam).or_default().push(crate::mdi::FONT_NAME.to_owned());
     }
+    defs.families.insert(FontFamily::Name(ICON_FONT.into()), vec![crate::mdi::FONT_NAME.to_owned()]);
     defs
 }
 
@@ -200,7 +200,7 @@ pub fn install(ctx: &egui::Context, ui_font: &str, mono_font: &str) {
 
 pub const ICON_FONT: &str = "icons";
 
-/// The icon font family, if a Windows icon font was found.
+/// The icon font family (Material Design Icons) once the fonts are installed.
 pub fn icon_family(ctx: &egui::Context) -> Option<FontFamily> {
     let fam = FontFamily::Name(ICON_FONT.into());
     ctx.fonts(|f| f.families().contains(&fam)).then_some(fam)
@@ -248,5 +248,8 @@ mod tests {
         assert_eq!(d.families[&FontFamily::Monospace][0], "consola.ttf");
         let d = definitions("No Such Font", "Nope", &fonts);
         assert_eq!(d.families[&FontFamily::Proportional][0], "segoeui.ttf");
+        // the icons are in every font set, last
+        assert_eq!(d.families[&FontFamily::Proportional].last().map(String::as_str), Some(crate::mdi::FONT_NAME));
+        assert_eq!(d.families[&FontFamily::Name(ICON_FONT.into())], [crate::mdi::FONT_NAME]);
     }
 }

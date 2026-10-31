@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.6-alpha (2026-10-31)
+
+- **Material Design Icons:** the program's icons come from Material Design Icons (built in, Apache-2.0): drive types (disk, USB stick, CD/DVD, RAM disk, network drive), server connections and searches in the drive selector and on the drive button, the context menu (instead of the Windows icon font), the sort marks of the panels and the results window, the job queue's arrows, the plugin banner, and files, folders and `..` when Windows' file icons are turned off.
+
 ## 0.5.5-alpha (2026-10-31)
 
 - **Accent color instead of the plugin panel tint:** Settings → General → Appearance → Accent color colors everything selected or active: the cursor row, the active panel's path bar, selected tabs and buttons, text selections; panels a plugin shows are tinted with a faint wash of it, as before. Text on it stays readable (dark on light colors, white on dark ones). A tint chosen in 0.5.3 or 0.5.4 becomes the accent color.

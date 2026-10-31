@@ -1770,7 +1770,7 @@ impl App {
                 let mut conns: Vec<DriveConn> = plugins::connections()
                     .into_iter()
                     .map(|c| DriveConn {
-                        label: if c.name.is_empty() { display_path(&c.root).trim_end_matches('/').to_owned() } else { format!("🔍 {}", c.name) },
+                        label: if c.name.is_empty() { display_path(&c.root).trim_end_matches('/').to_owned() } else { c.name.clone() },
                         detail: self.plugins.name_of(&c.plugin),
                         root: c.root,
                         start: c.start,
@@ -2000,7 +2000,7 @@ impl App {
                 let named = plugins::mount_root_of(&root).and_then(|(r, id)| Some((plugins::results_name(&r)?, id)));
                 let label = match &named {
                     // results: the plugin's name; the path bar says which
-                    Some((_, id)) => format!("🔍 {}", self.plugins.name_of(id)),
+                    Some((_, id)) => format!("{} {}", sal_ui::mdi::MAGNIFY, self.plugins.name_of(id)),
                     None => display_path(&root).trim_end_matches(['\\', '/']).to_owned(),
                 };
                 let tip = match drive_list.iter().find(|d| d.root == root) {
@@ -2010,7 +2010,13 @@ impl App {
                 };
                 let menu_key = menu_key(&self.cfg.shortcuts, Cmd::DriveMenu(idx));
                 let tip = if menu_key.is_empty() { tip } else { format!("{tip}\n{}", trf("Drive menu: {key}", &[("key", &menu_key)])) };
-                if drive_icon::button(ui, root_kind, if label.is_empty() { "/" } else { &label }, false).on_hover_text(tip).clicked() {
+                // a plugin's connection: a server, or a search's magnifier
+                let (glyph, color) = match (&named, plugins::mount_root_of(&root)) {
+                    (Some(_), _) => (sal_ui::mdi::MAGNIFY, drive_icon::color(sal_core::drives::DriveType::Network)),
+                    (None, Some(_)) => (sal_ui::mdi::SERVER_NETWORK, drive_icon::color(sal_core::drives::DriveType::Network)),
+                    (None, None) => (drive_icon::glyph(root_kind), drive_icon::color(root_kind)),
+                };
+                if drive_icon::glyph_button(ui, glyph, color, if label.is_empty() { "/" } else { &label }, false).on_hover_text(tip).clicked() {
                     drive_clicked = true;
                 }
             }
@@ -2171,14 +2177,14 @@ impl App {
                             h.col(|ui| {
                                 let arrow = if sort.key == key {
                                     if sort.reverse {
-                                        " ⏶"
+                                        sal_ui::mdi::MENU_UP
                                     } else {
-                                        " ⏷"
+                                        sal_ui::mdi::MENU_DOWN
                                     }
                                 } else {
                                     ""
                                 };
-                                if ui.add(egui::Label::new(RichText::new(format!("{title}{arrow}")).strong()).sense(Sense::click())).clicked() {
+                                if ui.add(egui::Label::new(RichText::new(format!("{title} {arrow}")).strong()).sense(Sense::click())).clicked() {
                                     sort_click = Some(key);
                                 }
                             });
@@ -2368,7 +2374,7 @@ impl App {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 if !qs.is_empty() {
-                    ui.label(RichText::new(format!("🔍 {qs}")).color(ui.visuals().warn_fg_color)).on_hover_text(if qs_anywhere {
+                    ui.label(RichText::new(format!("{} {qs}", sal_ui::mdi::MAGNIFY)).color(ui.visuals().warn_fg_color)).on_hover_text(if qs_anywhere {
                         tr("Quick search: anywhere in name")
                     } else {
                         tr("Quick search: from first letter")
@@ -2672,7 +2678,8 @@ impl App {
                                         );
                                         let refreshable = !c.refresh.is_empty();
                                         let reserve = button_w + 8.0 + if refreshable { refresh_w + 4.0 } else { 0.0 };
-                                        let r = drive_icon::connection_row(ui, &c.label, i == *cursor, reserve).on_hover_text(tip);
+                                        let icon = if c.results { sal_ui::mdi::MAGNIFY } else { sal_ui::mdi::SERVER_NETWORK };
+                                        let r = drive_icon::connection_row(ui, icon, &c.label, i == *cursor, reserve).on_hover_text(tip);
                                         keep_visible(&r, i);
                                         // compact buttons inside the row's right end; they take their clicks
                                         let at = egui::Rect::from_min_max(
@@ -3758,11 +3765,11 @@ impl App {
                         if ui.small_button(tr("Start now")).on_hover_text(tr("Run it now, alongside the running operations")).clicked() {
                             act = Some(JobAct::StartNow(spec.id));
                         }
-                        if ui.add_enabled(i + 1 < jobs.queue.len(), egui::Button::new("⏷").small()).on_hover_text(tr("Move down")).clicked() {
+                        if ui.add_enabled(i + 1 < jobs.queue.len(), egui::Button::new(sal_ui::mdi::CHEVRON_DOWN).small()).on_hover_text(tr("Move down")).clicked() {
                             act = Some(JobAct::Move(spec.id, false));
                         }
                         let up_tip = if i == 0 { tr("To the top: run it now; the running operations pause until it finishes") } else { tr("Move up") };
-                        if ui.small_button("⏶").on_hover_text(up_tip).clicked() {
+                        if ui.small_button(sal_ui::mdi::CHEVRON_UP).on_hover_text(up_tip).clicked() {
                             act = Some(JobAct::Move(spec.id, true));
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -4287,7 +4294,7 @@ fn path_crumbs(path: &Path) -> Vec<(String, PathBuf)> {
     let mut crumbs = location::breadcrumbs(path);
     if let Some(name) = plugins::mount_root_of(path).and_then(|(root, _)| plugins::results_name(&root)) {
         if let Some(first) = crumbs.first_mut() {
-            first.0 = format!("🔍 {name}");
+            first.0 = format!("{} {name}", sal_ui::mdi::MAGNIFY);
         }
     }
     crumbs
@@ -4301,7 +4308,7 @@ fn plugin_banner(plugin: &str, file: &Path) -> String {
         Some((scheme, authority, _)) => format!("{scheme}://{authority}"),
         None => file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
     };
-    format!("🧩 {plugin} · {what}")
+    format!("{} {plugin} · {what}", sal_ui::mdi::PUZZLE_OUTLINE)
 }
 
 /// Background of status strips: the panels' status bar, the operations
@@ -4542,30 +4549,17 @@ pub(crate) fn centered_buttons(ui: &mut egui::Ui, buttons: &[(&str, &str)]) -> O
     hit
 }
 
-/// Small vector icons, so they look the same regardless of installed fonts.
+/// The icons of a panel's items without Windows' own (Material Design Icons).
 fn paint_icon(ui: &mut egui::Ui, kind: EntryKind, hidden: bool) {
     let h = ui.text_style_height(&egui::TextStyle::Body);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(h + 4.0, h), Sense::hover());
-    let r = rect.shrink2(egui::vec2(3.0, 1.0));
     let alpha = if hidden { 0.45 } else { 1.0 };
-    let p = ui.painter();
-    match kind {
-        EntryKind::Dir => {
-            let fill = Color32::from_rgb(232, 182, 64).gamma_multiply(alpha);
-            let tab = egui::Rect::from_min_max(r.min + egui::vec2(0.0, 1.0), egui::pos2(r.left() + r.width() * 0.45, r.top() + 4.0));
-            p.rect_filled(tab, 1.0, fill);
-            p.rect_filled(egui::Rect::from_min_max(egui::pos2(r.left(), r.top() + 3.0), r.max - egui::vec2(0.0, 1.0)), 1.5, fill);
-        }
-        EntryKind::UpDir => {
-            let c = ui.visuals().text_color();
-            p.arrow(egui::pos2(r.center().x, r.bottom() - 1.0), egui::vec2(0.0, -(r.height() - 3.0)), egui::Stroke::new(1.6f32, c));
-        }
-        EntryKind::File => {
-            let c = ui.visuals().weak_text_color().gamma_multiply(alpha);
-            let page = egui::Rect::from_center_size(r.center(), egui::vec2(r.height() * 0.7, r.height() - 1.0));
-            p.rect_stroke(page, 1.0, egui::Stroke::new(1.0f32, c));
-        }
-    }
+    let (glyph, color) = match kind {
+        EntryKind::Dir => (sal_ui::mdi::FOLDER, Color32::from_rgb(232, 182, 64)),
+        EntryKind::UpDir => (sal_ui::mdi::ARROW_UP, ui.visuals().text_color()),
+        EntryKind::File => (sal_ui::mdi::FILE_OUTLINE, ui.visuals().weak_text_color()),
+    };
+    drive_icon::paint_glyph(ui.painter(), rect.shrink2(egui::vec2(2.0, 0.0)), glyph, color.gamma_multiply(alpha));
 }
 
 /// How many typed paths the drive selector remembers.
@@ -4721,7 +4715,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: &str, f
     let mut changed = false;
     let popup = font_popup_id(ui, id);
     let shown = if value.is_empty() { trf("{font} (default)", &[("font", &default)]) } else { value.clone() };
-    let button = ui.add(egui::Button::new(shown).shortcut_text("⏷").min_size(egui::vec2(280.0, 0.0)).wrap_mode(egui::TextWrapMode::Truncate));
+    let button = ui.add(egui::Button::new(shown).shortcut_text(sal_ui::mdi::MENU_DOWN).min_size(egui::vec2(280.0, 0.0)).wrap_mode(egui::TextWrapMode::Truncate));
     let opening = button.clicked() && !ui.memory(|m| m.is_popup_open(popup));
     if button.clicked() {
         ui.memory_mut(|m| m.toggle_popup(popup));
@@ -5694,7 +5688,7 @@ mod tests {
         assert_eq!(ui.app.act().path(), root);
         // the path bar says what it is, not search://1
         let crumbs: Vec<String> = path_crumbs(&root.join("docs")).into_iter().map(|(l, _)| l).collect();
-        assert_eq!(crumbs, ["🔍 *.txt \"hello\" · data (filtered folders)", "docs"]);
+        assert_eq!(crumbs, [format!("{} *.txt \"hello\" · data (filtered folders)", sal_ui::mdi::MAGNIFY), "docs".to_owned()]);
         let names = |ui: &mut Ui| ui.app.act().entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&mut ui), ["docs", "poznámky.txt"], "a connection's root has no ..");
         // the flat list: every file found, without folders
@@ -5867,7 +5861,7 @@ mod tests {
         assert_eq!(display_path(ui.app.panels[0].path()), "mem://test-ui/home");
         assert_eq!(names(&ui, 0), ["..", "docs", "vzdálený.txt"]);
         let a = ui.app.panels[0].archive.as_ref().expect("a plugin view");
-        assert_eq!(plugin_banner(&ui.app.plugins.name_of(a.plugin.id()), &a.file), "🧩 memserver · mem://test-ui");
+        assert_eq!(plugin_banner(&ui.app.plugins.name_of(a.plugin.id()), &a.file), format!("{} memserver · mem://test-ui", sal_ui::mdi::PUZZLE_OUTLINE));
         ui.frames(2);
 
         // copy in (F5 from the other panel), copy out, new folder, delete
@@ -6470,6 +6464,7 @@ mod tests {
         let out_dir = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         for (dark, name) in [(true, "drives_dark.png"), (false, "drives_light.png")] {
             let mut ui = Ui::new(t.path(), t.path());
+            crate::fonts::install(&ui.ctx, "", "");
             ui.ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
             ui.ctx.set_pixels_per_point(1.5);
             let real_c = drives::root_of(t.path());

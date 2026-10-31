@@ -24,25 +24,26 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    /// (Segoe Fluent Icons / MDL2 code point, fallback glyph)
-    fn glyph(self) -> (char, &'static str) {
+    /// Its icon (Material Design Icons).
+    fn glyph(self) -> &'static str {
+        use sal_ui::mdi;
         use MenuAction::*;
         match self {
-            Open => ('\u{E8E5}', "↗"),
-            OpenWith => ('\u{E7AC}', "…"),
-            Cut => ('\u{E8C6}', "✂"),
-            Copy => ('\u{E8C8}', "⧉"),
-            Paste => ('\u{E77F}', "📋"),
-            Rename => ('\u{E8AC}', "✎"),
-            Delete => ('\u{E74D}', "🗑"),
-            CopyPath => ('\u{E71B}', "🔗"),
-            CalcSize => ('\u{E8EF}', "Σ"),
-            Terminal => ('\u{E756}', ">_"),
-            Properties => ('\u{E946}', "ⓘ"),
-            NewFolder => ('\u{E8F4}', "+"),
-            Refresh => ('\u{E72C}', "⟳"),
-            SelectAll => ('\u{E8B3}', "☑"),
-            MoreOptions => ('\u{E712}', "⋯"),
+            Open => mdi::OPEN_IN_NEW,
+            OpenWith => mdi::OPEN_IN_APP,
+            Cut => mdi::CONTENT_CUT,
+            Copy => mdi::CONTENT_COPY,
+            Paste => mdi::CONTENT_PASTE,
+            Rename => mdi::RENAME_OUTLINE,
+            Delete => mdi::TRASH_CAN_OUTLINE,
+            CopyPath => mdi::LINK_VARIANT,
+            CalcSize => mdi::SIGMA,
+            Terminal => mdi::CONSOLE,
+            Properties => mdi::INFORMATION_OUTLINE,
+            NewFolder => mdi::FOLDER_PLUS_OUTLINE,
+            Refresh => mdi::REFRESH,
+            SelectAll => mdi::SELECT_ALL,
+            MoreOptions => mdi::DOTS_HORIZONTAL,
         }
     }
 }
@@ -62,13 +63,9 @@ pub enum Row {
 }
 
 fn paint_glyph(ui: &Ui, rect: Rect, action: MenuAction, icons: &Option<FontFamily>, color: Color32) {
-    let (code, fallback) = action.glyph();
     let size = rect.height() * 0.62;
-    let (text, font) = match icons {
-        Some(f) => (code.to_string(), FontId::new(size, f.clone())),
-        None => (fallback.to_owned(), FontId::proportional(size)),
-    };
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, color);
+    let family = icons.clone().unwrap_or(FontFamily::Proportional);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, action.glyph(), FontId::new(size, family), color);
 }
 
 /// Draws the menu at `pos`. Returns the chosen action and the menu's rect

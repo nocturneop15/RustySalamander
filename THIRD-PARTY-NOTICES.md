@@ -22,6 +22,12 @@ The full terms are in `third_party/7zip-26.05/DOC/License.txt` and `DOC/unRarLic
 
 The SCP plugin (`plugins\scp`) contains russh (Apache-2.0), its key handling (ssh-key, MIT or Apache-2.0), tokio (MIT), and ring for cryptography (ISC-style and Apache-2.0 licenses, with parts from BoringSSL). They are listed in `Cargo.lock` like the program's own crates.
 
+## Material Design Icons (the program's icons)
+
+The icons (drives, connections, searches, the context menu, sort marks, and files and folders when Windows' file icons are off) come from [Material Design Icons](https://pictogrammers.com/library/mdi/) by Pictogrammers, the `@mdi/font` 7.4.47 font (`materialdesignicons-webfont.ttf`), built into the program and the Viewer plugin. The font is distributed under the **Apache License 2.0** (<https://www.apache.org/licenses/LICENSE-2.0>), which is compatible with RustySalamander's license through the GNU GPL version 3. Its license file is `crates/sal-ui/fonts/materialdesignicons-LICENSE.txt` in the source:
+
+> Pictogrammers Free License. This icon collection is released as free, open source, and GPL friendly by the Pictogrammers icon group. Icons: Apache 2.0. Fonts: Apache 2.0. Code: MIT.
+
 ## Rust crates
 
 The program uses Rust crates from crates.io, among them egui/eframe (MIT or Apache-2.0), windows (MIT or Apache-2.0), serde and toml (MIT or Apache-2.0) and chrono (MIT or Apache-2.0). `Cargo.lock` lists every crate and version, and each crate's license is in its package metadata (`cargo metadata`, or a tool such as `cargo about` or `cargo deny` can produce the full list).
