@@ -200,9 +200,11 @@ pub struct Config {
     pub quick_search_arrows: bool,
     /// Solid scrollbars that are always shown (instead of thin ones on hover).
     pub always_show_scrollbars: bool,
-    /// The tint of panels a plugin shows (archives, servers, search
-    /// results), as RGB; `None` for the theme's selection color.
-    pub plugin_tint: Option<[u8; 3]>,
+    /// The accent color, RGB: what is selected or active (the cursor row,
+    /// the active path bar, selected tabs), and the tint of panels a plugin
+    /// shows. `None` for the theme's own. (0.5.3 called it `plugin_tint`.)
+    #[serde(alias = "plugin_tint")]
+    pub accent_color: Option<[u8; 3]>,
     /// The function-key command bar at the bottom of the window.
     pub show_fkey_bar: bool,
     /// Windows file icons by type (otherwise simple drawn icons).
@@ -257,7 +259,7 @@ impl Default for Config {
             language: String::new(),
             disabled_plugins: Vec::new(),
             always_show_scrollbars: false,
-            plugin_tint: None,
+            accent_color: None,
             show_fkey_bar: true,
             system_icons: true,
             context_menu_trigger: ContextMenuTrigger::ShortClick,
@@ -414,10 +416,11 @@ mod tests {
         assert_eq!(suffix_rule(&c2.suffix_rules, "Záloha.TAR.GZ").unwrap().suffix, "tar.gz");
         assert!(suffix_rule(&c2.suffix_rules, "a.gz").is_none() && suffix_rule(&c2.suffix_rules, "md").is_none());
         assert_eq!(SuffixRule::normalize(" *.TXT "), "txt");
-        // the plugin panels' tint: the theme's unless chosen
-        assert_eq!(c.plugin_tint, None);
-        let tinted = Config::parse(&toml::to_string_pretty(&Config { plugin_tint: Some([200, 120, 0]), ..Config::default() }).unwrap());
-        assert_eq!(tinted.plugin_tint, Some([200, 120, 0]));
+        // the accent color: the theme's unless chosen; 0.5.3's plugin_tint becomes it
+        assert_eq!(c.accent_color, None);
+        let tinted = Config::parse(&toml::to_string_pretty(&Config { accent_color: Some([200, 120, 0]), ..Config::default() }).unwrap());
+        assert_eq!(tinted.accent_color, Some([200, 120, 0]));
+        assert_eq!(Config::parse("plugin_tint = [1, 2, 3]").accent_color, Some([1, 2, 3]));
         assert!(!c.always_show_scrollbars && c.show_fkey_bar && c.system_icons);
         let dark: Config = toml::from_str("theme = \"Dark\"").unwrap();
         assert_eq!(dark.theme, ThemeMode::Dark);

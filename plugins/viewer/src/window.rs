@@ -146,6 +146,7 @@ struct Look {
     ui_font: String,
     mono_font: String,
     solid_bars: bool,
+    accent: Option<[u8; 3]>,
     fonts_done: bool,
 }
 
@@ -166,6 +167,8 @@ impl Look {
         });
         self.solid_bars = get("scrollbars") == "solid";
         sal_ui::apply_scrollbars(ctx, self.solid_bars);
+        self.accent = sal_ui::parse_accent(&get("accent"));
+        sal_ui::apply_accent(ctx, self.accent);
     }
 
     /// The theme of the windows' title bars.

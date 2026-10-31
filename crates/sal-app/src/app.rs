@@ -536,6 +536,7 @@ impl App {
             apply_font_size(ctx, cfg.font_size);
             apply_theme(ctx, cfg.theme);
             sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
+            sal_ui::apply_accent(ctx, cfg.accent_color);
         });
         let plugins = time("startup: plugins", || Plugins::load(&cfg.disabled_plugins));
         if crate::debuglog::enabled() {
@@ -902,7 +903,8 @@ impl App {
             ThemeMode::Dark => "dark",
         };
         let scrollbars = if self.cfg.always_show_scrollbars { "solid" } else { "floating" };
-        [("theme", theme), ("ui_font", &self.cfg.ui_font), ("mono_font", &self.cfg.mono_font), ("scrollbars", scrollbars), ("temporary", if temporary { "1" } else { "" })]
+        let accent = sal_ui::accent_text(self.cfg.accent_color);
+        [("theme", theme), ("ui_font", &self.cfg.ui_font), ("mono_font", &self.cfg.mono_font), ("scrollbars", scrollbars), ("accent", &accent), ("temporary", if temporary { "1" } else { "" })]
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect()
@@ -1974,7 +1976,7 @@ impl App {
         // a panel a plugin shows is tinted from the path bar to its banner;
         // the tint goes under what is drawn, once the panel's height is known
         let plugin_panel = self.panels[idx].archive.is_some();
-        let tint = plugin_tint(ui.visuals(), self.cfg.plugin_tint);
+        let tint = plugin_tint(ui.visuals());
         let top = ui.cursor().min;
         let tint_slot = ui.painter().add(egui::Shape::Noop);
 
@@ -2308,7 +2310,7 @@ impl App {
         }
         self.row_hits[idx] = row_hits;
         if let Some(text) = banner {
-            let fill = plugin_tint(ui.visuals(), self.cfg.plugin_tint).gamma_multiply(2.5);
+            let fill = plugin_tint(ui.visuals()).gamma_multiply(2.5);
             egui::Frame::none().fill(fill).inner_margin(egui::Margin::symmetric(6.0, 1.0)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(RichText::new(text).small().strong()).truncate());
@@ -3038,32 +3040,30 @@ impl App {
                                     });
                                     ui.end_row();
 
-                                    ui.label(tr("Plugin panel tint")).on_hover_text(tr("The background of panels a plugin shows: archives, servers, search results"));
+                                    ui.label(tr("Accent color")).on_hover_text(tr("The color of what is selected or active: the cursor, the active path bar, selected tabs and buttons; panels a plugin shows are tinted with it"));
                                     ui.horizontal(|ui| {
-                                        let theme = tint_base(ui.visuals(), None);
-                                        let mut custom = cfg.plugin_tint.is_some();
+                                        let before = cfg.accent_color;
+                                        let own = if ui.visuals().dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() }.selection.bg_fill;
+                                        let mut custom = cfg.accent_color.is_some();
                                         if ui.radio_value(&mut custom, false, tr("From the theme (default)")).changed() {
-                                            cfg.plugin_tint = None;
+                                            cfg.accent_color = None;
                                         }
                                         if ui.radio_value(&mut custom, true, tr("Custom:")).changed() {
-                                            cfg.plugin_tint = Some([theme.r(), theme.g(), theme.b()]);
+                                            cfg.accent_color = Some([own.r(), own.g(), own.b()]);
                                         }
-                                        let base = tint_base(ui.visuals(), cfg.plugin_tint);
-                                        let mut rgb = [base.r(), base.g(), base.b()];
-                                        let picked = ui.add_enabled_ui(custom, |ui| ui.color_edit_button_srgb(&mut rgb)).inner;
-                                        if picked.changed() {
-                                            cfg.plugin_tint = Some(rgb);
+                                        let mut rgb = cfg.accent_color.unwrap_or([own.r(), own.g(), own.b()]);
+                                        if ui.add_enabled_ui(custom, |ui| ui.color_edit_button_srgb(&mut rgb)).inner.changed() {
+                                            cfg.accent_color = Some(rgb);
                                         }
-                                        // how a plugin's panel and its banner look with it
+                                        // how the cursor row looks with it
+                                        let sel = ui.visuals().selection;
                                         let h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                                        let (r, _) = ui.allocate_exact_size(egui::vec2(90.0, h), egui::Sense::hover());
-                                        let tint = plugin_tint(ui.visuals(), cfg.plugin_tint);
-                                        let p = ui.painter();
-                                        p.rect_filled(r, 0.0, ui.visuals().extreme_bg_color);
-                                        p.rect_filled(r, 0.0, tint);
-                                        let banner = egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 5.0), r.max);
-                                        p.rect_filled(banner, 0.0, tint.gamma_multiply(2.5));
-                                        p.rect_stroke(r, 0.0, ui.visuals().widgets.noninteractive.bg_stroke);
+                                        let (r, _) = ui.allocate_exact_size(egui::vec2(110.0, h), egui::Sense::hover());
+                                        ui.painter().rect_filled(r, 0.0, sel.bg_fill);
+                                        ui.painter().text(r.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, tr("Selected"), egui::TextStyle::Body.resolve(ui.style()), sel.stroke.color);
+                                        if cfg.accent_color != before {
+                                            sal_ui::apply_accent(ctx, cfg.accent_color);
+                                        }
                                     });
                                     ui.end_row();
                                 });
@@ -4276,17 +4276,9 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
 }
 
 /// The background tint of a panel a plugin shows: a faint wash of the
-/// color chosen in Settings (`custom`), or of the theme's selection color.
-fn plugin_tint(v: &egui::Visuals, custom: Option<[u8; 3]>) -> Color32 {
-    tint_base(v, custom).gamma_multiply(if v.dark_mode { 0.12 } else { 0.22 })
-}
-
-/// The color the plugin panels' tint is made from.
-fn tint_base(v: &egui::Visuals, custom: Option<[u8; 3]>) -> Color32 {
-    match custom {
-        Some([r, g, b]) => Color32::from_rgb(r, g, b),
-        None => v.selection.bg_fill,
-    }
+/// accent color (the selection color, see `sal_ui::apply_accent`).
+fn plugin_tint(v: &egui::Visuals) -> Color32 {
+    v.selection.bg_fill.gamma_multiply(if v.dark_mode { 0.12 } else { 0.22 })
 }
 
 /// The path bar's segments for `path`: results (a search) start with their
@@ -7564,28 +7556,38 @@ mod tests {
         ui.app.suffix_edit = None;
     }
 
-    /// The plugin panels' tint follows the color chosen in Settings, and the
-    /// setting draws with its color button and preview. SNAPSHOT_DIR set:
-    /// also saved as plugin_tint.png.
+    /// The accent color is the selection color everywhere and tints the
+    /// plugin panels; plugins' windows are told it. The setting draws with
+    /// its color button and preview. SNAPSHOT_DIR set: also saved as
+    /// accent_color.png.
     #[test]
-    fn plugin_panel_tint() {
-        let dark = egui::Visuals::dark();
-        assert_eq!(plugin_tint(&dark, None), dark.selection.bg_fill.gamma_multiply(0.12));
-        let red = plugin_tint(&dark, Some([255, 0, 0]));
-        assert!(red.r() > 0 && red.g() == 0 && red.b() == 0, "{red:?}");
+    fn accent_color() {
         let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a.txt"), "x").unwrap();
         let mut ui = Ui::new(t.path(), t.path());
         crate::fonts::install(&ui.ctx, "", "");
         ui.screen = egui::vec2(1100.0, 1000.0);
-        ui.app.cfg.plugin_tint = Some([220, 120, 30]);
+        ui.app.cfg.accent_color = Some([220, 120, 30]);
+        sal_ui::apply_accent(&ui.ctx, ui.app.cfg.accent_color);
+        ui.frames(2);
+        let v = ui.ctx.style().visuals.clone();
+        assert_eq!(v.selection.bg_fill, Color32::from_rgb(220, 120, 30));
+        let tint = plugin_tint(&v);
+        assert!(tint.r() > tint.g() && tint.g() > tint.b(), "{tint:?}");
+        ui.text("a.t");
+        ui.key(Key::F3);
+        assert_eq!(ui.recorder.opened.lock().unwrap()[0].2["accent"], "#dc781e");
+        ui.key(Key::Escape);
         ui.app.dialog = Dialog::Settings { tab: SettingsTab::General, recording: None };
         ui.frames(10);
         assert!(matches!(ui.app.dialog, Dialog::Settings { .. }));
         if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
             let bg = ui.ctx.style().visuals.panel_fill;
             let out = ui.last.take().unwrap();
-            ui.snap.render(&ui.ctx, out, bg, &dir.join("plugin_tint.png"));
+            ui.snap.render(&ui.ctx, out, bg, &dir.join("accent_color.png"));
         }
+        ui.app.dialog = Dialog::None;
+        sal_ui::apply_accent(&ui.ctx, None);
     }
 
     #[test]
@@ -7684,13 +7686,15 @@ mod tests {
             ui.snap.render(&ui.ctx, out, bg, &out_dir.join(name));
         }
         // a custom tint, on the inactive panel too
-        ui.app.cfg.plugin_tint = Some([220, 120, 30]);
+        ui.app.cfg.accent_color = Some([220, 120, 30]);
+        sal_ui::apply_accent(&ui.ctx, ui.app.cfg.accent_color);
         ui.app.active = 1;
         ui.frames(10);
         let bg = ui.ctx.style().visuals.panel_fill;
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_panel_tint.png"));
-        ui.app.cfg.plugin_tint = None;
+        ui.app.cfg.accent_color = None;
+        sal_ui::apply_accent(&ui.ctx, None);
         ui.app.active = 0;
         // the connection in the other panel's drive selector, in a low window
         ui.app.cfg.theme = ThemeMode::Light;

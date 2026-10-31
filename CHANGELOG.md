@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5-alpha (2026-10-31)
+
+- **Accent color instead of the plugin panel tint:** Settings → General → Appearance → Accent color colors everything selected or active: the cursor row, the active panel's path bar, selected tabs and buttons, text selections; panels a plugin shows are tinted with a faint wash of it, as before. Text on it stays readable (dark on light colors, white on dark ones). A tint chosen in 0.5.3 or 0.5.4 becomes the accent color.
+- **Plugins are told the accent color** (`accent` in the options of `open_file`, `#rrggbb`); the Viewer plugin 0.5.2-alpha, bundled, follows it.
+
 ## 0.5.4-alpha (2026-10-31)
 
 - **The whole plugin panel is tinted:** the tint of a panel a plugin shows now covers its path bar row and column header too, not only the list; the path bar of the inactive panel takes a stronger shade of it.

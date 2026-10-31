@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.2-alpha (2026-10-31)
+
+- **The accent color:** the windows follow the accent color chosen in the program (Settings → General → Appearance), for the selected Text/Hex button, the encoding list and text selections.
+
 ## 0.5.1-alpha (2026-10-31)
 
 - **No changes:** a release to try updating a plugin on its own (Help → Check for updates… → Update now, then Restart now).

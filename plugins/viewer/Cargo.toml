@@ -2,7 +2,7 @@
 name = "sal-plugin-viewer"
 description = "RustySalamander plugin: the text and hex viewer (F3)"
 # the plugin's own version, apart from the program's
-version = "0.5.1-alpha"
+version = "0.5.2-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
