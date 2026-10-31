@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, text::LayoutJob, Align, Color32, Event, Key, Layout, Modifiers, RichText, Sense, TextFormat};
 use egui_extras::{Column, TableBuilder};
-use sal_core::config::{Config, ContextMenuStyle, ContextMenuTrigger, DriveButtons, DriveHotkey, PanelConfig, ThemeMode};
+use sal_core::config::{Config, ContextMenuStyle, ContextMenuTrigger, DriveButtons, DriveHotkey, OpenWith, PanelConfig, SuffixRule, ThemeMode};
 use sal_core::drives::{self, Drive};
 use sal_core::encoding::{display_name, display_path, format_size, format_thousands, visual_order};
 use sal_core::fileops::{self, ConflictAction, ErrorAction, OpKind};
@@ -147,6 +147,7 @@ enum Dialog {
 enum SettingsTab {
     General,
     Keyboard,
+    Programs,
     Plugins,
 }
 
@@ -278,6 +279,8 @@ pub struct App {
     /// The results kept in this session, oldest first: each one's
     /// connections (folders, flat list). At most [`MAX_RESULTS`].
     kept_results: Vec<Vec<PathBuf>>,
+    /// The suffix form open in Settings → Viewers and editors.
+    suffix_edit: Option<SuffixEdit>,
     /// Results being filled again (Refresh): their plugin, connections and
     /// since when; panels showing them follow until the plugin is done.
     refreshing: Vec<(Arc<dyn FolderPlugin>, Vec<PathBuf>, Instant)>,
@@ -553,6 +556,7 @@ impl App {
             update_check,
             results: None,
             kept_results: Vec::new(),
+            suffix_edit: None,
             refreshing: Vec::new(),
             refresh_polled: None,
             panels,
@@ -904,30 +908,48 @@ impl App {
             .collect()
     }
 
-    /// F3 on a file on disk: the viewer chosen in Settings, or the plugin
-    /// registered for it (the Viewer plugin views every file).
-    fn view_file(&self, p: &Path, temporary: bool) -> Result<(), String> {
-        let err = |e: std::io::Error| format!("{}: {e}", display_path(p));
-        if self.cfg.use_custom_viewer && !self.cfg.viewer.trim().is_empty() {
-            return sal_core::shell::open_with_program(&self.cfg.viewer, p).map_err(err);
-        }
-        let Some((plugin, opener)) = self.opener_for(OpenKind::View, p) else {
-            return Err(tr("No viewer is set for this file. Turn on the Viewer plugin in Settings → Plugins, or choose a viewer in Settings → General.").into());
-        };
-        plugin.open_file(&opener.id, p, &self.opener_options(temporary)).map_err(err)
+    /// What F3 (`View`) or F4 (`Edit`) opens `file` with: what its suffix
+    /// has of its own, or the default (Settings → Viewers and editors).
+    fn open_with_for(&self, kind: OpenKind, file: &Path) -> OpenWith {
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let rule = sal_core::config::suffix_rule(&self.cfg.suffix_rules, &name);
+        let own = rule.and_then(|r| if kind == OpenKind::View { r.view.clone() } else { r.edit.clone() });
+        own.unwrap_or_else(|| if kind == OpenKind::View { self.cfg.view_with.clone() } else { self.cfg.edit_with.clone() })
     }
 
-    /// F4 on a file on disk: the editor chosen in Settings, the plugin
-    /// registered for it, or Notepad.
-    fn edit_file(&self, p: &Path, temporary: bool) -> Result<(), String> {
+    /// Open a file on disk for F3 or F4. A chosen plugin that is off or
+    /// missing (or a program left empty) gives way to the first plugin that
+    /// registered for the file, then to Notepad for editing.
+    fn open_for(&self, kind: OpenKind, p: &Path, temporary: bool) -> Result<(), String> {
         let err = |e: std::io::Error| format!("{}: {e}", display_path(p));
-        if !self.cfg.use_custom_editor {
-            if let Some((plugin, opener)) = self.opener_for(OpenKind::Edit, p) {
-                return plugin.open_file(&opener.id, p, &self.opener_options(temporary)).map_err(err);
+        match self.open_with_for(kind, p) {
+            OpenWith::Program { command } if !command.trim().is_empty() => return sal_core::shell::open_with_program(&command, p).map_err(err),
+            OpenWith::Notepad => return sal_core::shell::edit(p, None).map_err(err),
+            OpenWith::Plugin { plugin, opener } => {
+                let chosen = self.plugins.active.iter().find(|x| x.id() == plugin && x.openers().iter().any(|o| o.id == opener && o.kind == kind));
+                if let Some(x) = chosen {
+                    return x.open_file(&opener, p, &self.opener_options(temporary)).map_err(err);
+                }
             }
+            OpenWith::Program { .. } => {}
         }
-        let editor = self.cfg.use_custom_editor.then_some(self.cfg.editor.as_str());
-        sal_core::shell::edit(p, editor).map_err(err)
+        if let Some((plugin, opener)) = self.opener_for(kind, p) {
+            return plugin.open_file(&opener.id, p, &self.opener_options(temporary)).map_err(err);
+        }
+        match kind {
+            OpenKind::Edit => sal_core::shell::edit(p, None).map_err(err),
+            OpenKind::View => Err(tr("No viewer is set for this file. Turn on the Viewer plugin in Settings → Plugins, or choose a viewer in Settings → Viewers and editors.").into()),
+        }
+    }
+
+    /// F3 on a file on disk.
+    fn view_file(&self, p: &Path, temporary: bool) -> Result<(), String> {
+        self.open_for(OpenKind::View, p, temporary)
+    }
+
+    /// F4 on a file on disk.
+    fn edit_file(&self, p: &Path, temporary: bool) -> Result<(), String> {
+        self.open_for(OpenKind::Edit, p, temporary)
     }
 
     /// The file on disk a plugin's item stands for (a search result): the
@@ -1445,19 +1467,26 @@ impl App {
     /// Pick a program with the Windows "Open" dialog and make it the custom choice.
     fn browse_program(&mut self, target: Browse) {
         let title = match target {
-            Browse::Editor => tr("Choose the editor (F4)"),
-            Browse::Viewer => tr("Choose the viewer (F3)"),
+            Browse::Editor | Browse::RuleEditor => tr("Choose the editor (F4)"),
+            Browse::Viewer | Browse::RuleViewer => tr("Choose the viewer (F3)"),
             Browse::Terminal => tr("Choose the terminal"),
         };
         let Some(program) = shellmenu::pick_program(self.hwnd, title) else { return };
         match target {
             Browse::Editor => {
-                self.cfg.editor = program;
-                self.cfg.use_custom_editor = true;
+                self.cfg.editor = program.clone();
+                self.cfg.edit_with = OpenWith::Program { command: program };
             }
             Browse::Viewer => {
-                self.cfg.viewer = program;
-                self.cfg.use_custom_viewer = true;
+                self.cfg.viewer = program.clone();
+                self.cfg.view_with = OpenWith::Program { command: program };
+            }
+            Browse::RuleViewer | Browse::RuleEditor => {
+                if let Some(form) = &mut self.suffix_edit {
+                    let (slot, typed) = if target == Browse::RuleViewer { (&mut form.rule.view, &mut form.view_program) } else { (&mut form.rule.edit, &mut form.edit_program) };
+                    *typed = program.clone();
+                    *slot = Some(OpenWith::Program { command: program });
+                }
             }
             Browse::Terminal => {
                 self.cfg.terminal_custom = program;
@@ -2867,6 +2896,9 @@ impl App {
                 let languages = &self.languages;
                 let mut lang_changed = false;
                 let mut plugins_changed = false;
+                let view_choices = opener_choices(&self.plugins, OpenKind::View);
+                let edit_choices = opener_choices(&self.plugins, OpenKind::Edit);
+                let suffix_edit = &mut self.suffix_edit;
                 let mut check_now = false;
                 // each plugin found: id, name, description, its file and its
                 // state: running (its status) or why it couldn't start
@@ -2919,6 +2951,7 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.selectable_value(tab, SettingsTab::General, tr("General"));
                         ui.selectable_value(tab, SettingsTab::Keyboard, tr("Keyboard shortcuts"));
+                        ui.selectable_value(tab, SettingsTab::Programs, tr("Viewers and editors"));
                         ui.selectable_value(tab, SettingsTab::Plugins, tr("Plugins"));
                     });
                     ui.separator();
@@ -3081,42 +3114,6 @@ impl App {
                                 });
 
                                 section(ui, n_("External programs"), false, &mut |ui| {
-                                    let file_tip = tr("Program and optional arguments. {file} is replaced by the file;\nwithout it the file is added at the end.");
-
-                                    ui.label(tr("Editor (F4)"));
-                                    ui.vertical(|ui| {
-                                        ui.radio_value(&mut cfg.use_custom_editor, false, tr("A plugin's editor, or Notepad (default)"));
-                                        ui.horizontal(|ui| {
-                                            ui.radio_value(&mut cfg.use_custom_editor, true, tr("Custom:"));
-                                            ui.add_enabled(
-                                                cfg.use_custom_editor,
-                                                egui::TextEdit::singleline(&mut cfg.editor).hint_text(r#""C:\Program Files\Notepad++\notepad++.exe""#).desired_width(250.0),
-                                            )
-                                            .on_hover_text(file_tip);
-                                            if ui.button(tr("Browse…")).clicked() {
-                                                browse = Some(Browse::Editor);
-                                            }
-                                        });
-                                    });
-                                    ui.end_row();
-
-                                    ui.label(tr("Viewer (F3)"));
-                                    ui.vertical(|ui| {
-                                        ui.radio_value(&mut cfg.use_custom_viewer, false, tr("The Viewer plugin (default)"));
-                                        ui.horizontal(|ui| {
-                                            ui.radio_value(&mut cfg.use_custom_viewer, true, tr("Custom:"));
-                                            ui.add_enabled(
-                                                cfg.use_custom_viewer,
-                                                egui::TextEdit::singleline(&mut cfg.viewer).hint_text(r#""C:\Program Files\Viewer\viewer.exe""#).desired_width(250.0),
-                                            )
-                                            .on_hover_text(file_tip);
-                                            if ui.button(tr("Browse…")).clicked() {
-                                                browse = Some(Browse::Viewer);
-                                            }
-                                        });
-                                    });
-                                    ui.end_row();
-
                                     ui.label(tr("Command prompt"));
                                     ui.vertical(|ui| {
                                         for kind in TerminalKind::ALL.into_iter().filter(|k| *k != TerminalKind::Custom) {
@@ -3145,6 +3142,127 @@ impl App {
                                     });
                                     ui.end_row();
                                 });
+                            });
+                        }
+                        SettingsTab::Programs => {
+                            let list_h = (main_h - 300.0).max(260.0);
+                            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+                                ui.label(RichText::new(tr("F3 views and F4 edits files with these. A file suffix below can have its own.")).weak());
+                                ui.add_space(6.0);
+                                egui::Grid::new("open_defaults").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                                    ui.label(tr("Viewer (F3)"));
+                                    let mut v = Some(cfg.view_with.clone());
+                                    if open_with_picker(ui, "default_view", &mut v, false, &view_choices, &mut cfg.viewer) {
+                                        browse = Some(Browse::Viewer);
+                                    }
+                                    cfg.view_with = v.unwrap_or_else(OpenWith::viewer_plugin);
+                                    ui.end_row();
+
+                                    ui.label(tr("Editor (F4)"));
+                                    let mut e = Some(cfg.edit_with.clone());
+                                    if open_with_picker(ui, "default_edit", &mut e, false, &edit_choices, &mut cfg.editor) {
+                                        browse = Some(Browse::Editor);
+                                    }
+                                    cfg.edit_with = e.unwrap_or(OpenWith::Notepad);
+                                    ui.end_row();
+                                });
+                                if edit_choices.is_empty() {
+                                    ui.label(RichText::new(tr("No plugin registers as an editor.")).small().weak());
+                                }
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.label(RichText::new(tr("By file suffix")).strong());
+                                ui.label(RichText::new(tr("Files ending with a suffix open with its own viewer or editor; Default uses the ones above.")).weak());
+                                ui.add_space(4.0);
+                                let (mut edit_at, mut remove_at) = (None, None);
+                                if cfg.suffix_rules.is_empty() {
+                                    ui.label(tr("No suffix has its own viewer or editor."));
+                                } else {
+                                    egui::Grid::new("suffix_rules").num_columns(4).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+                                        ui.label(RichText::new(tr("Suffix")).strong());
+                                        ui.label(RichText::new(tr("Viewer (F3)")).strong());
+                                        ui.label(RichText::new(tr("Editor (F4)")).strong());
+                                        ui.label("");
+                                        ui.end_row();
+                                        for (i, r) in cfg.suffix_rules.iter().enumerate() {
+                                            ui.label(format!(".{}", r.suffix));
+                                            ui.label(open_with_label(r.view.as_ref(), &view_choices));
+                                            ui.label(open_with_label(r.edit.as_ref(), &edit_choices));
+                                            ui.horizontal(|ui| {
+                                                if ui.button(tr("Edit…")).clicked() {
+                                                    edit_at = Some(i);
+                                                }
+                                                if ui.button(tr("Remove")).on_hover_text(tr("The suffix goes back to the default viewer and editor")).clicked() {
+                                                    remove_at = Some(i);
+                                                }
+                                            });
+                                            ui.end_row();
+                                        }
+                                    });
+                                }
+                                if let Some(i) = edit_at {
+                                    *suffix_edit = Some(SuffixEdit::of(Some(i), cfg.suffix_rules[i].clone(), &cfg.viewer, &cfg.editor));
+                                }
+                                if let Some(i) = remove_at {
+                                    cfg.suffix_rules.remove(i);
+                                    // the form edits by position
+                                    if suffix_edit.as_ref().is_some_and(|s| s.index.is_some()) {
+                                        *suffix_edit = None;
+                                    }
+                                }
+                                ui.add_space(6.0);
+                                let mut done = false;
+                                match suffix_edit {
+                                    None => {
+                                        if ui.button(tr("Add a suffix…")).clicked() {
+                                            *suffix_edit = Some(SuffixEdit::of(None, SuffixRule::default(), &cfg.viewer, &cfg.editor));
+                                        }
+                                    }
+                                    Some(form) => {
+                                        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+                                            ui.label(RichText::new(if form.index.is_some() { tr("Edit the suffix") } else { tr("A new suffix") }).strong());
+                                            egui::Grid::new("suffix_form").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                                                ui.label(tr("Suffix"));
+                                                ui.add(egui::TextEdit::singleline(&mut form.rule.suffix).hint_text("txt, tar.gz").desired_width(160.0));
+                                                ui.end_row();
+                                                ui.label(tr("Viewer (F3)"));
+                                                if open_with_picker(ui, "rule_view", &mut form.rule.view, true, &view_choices, &mut form.view_program) {
+                                                    browse = Some(Browse::RuleViewer);
+                                                }
+                                                ui.end_row();
+                                                ui.label(tr("Editor (F4)"));
+                                                if open_with_picker(ui, "rule_edit", &mut form.rule.edit, true, &edit_choices, &mut form.edit_program) {
+                                                    browse = Some(Browse::RuleEditor);
+                                                }
+                                                ui.end_row();
+                                            });
+                                            if let Some(e) = &form.error {
+                                                ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                                            }
+                                            ui.horizontal(|ui| {
+                                                if ui.button(tr("Save")).clicked() {
+                                                    match form.check(&cfg.suffix_rules) {
+                                                        Ok(rule) => {
+                                                            match form.index {
+                                                                Some(i) if i < cfg.suffix_rules.len() => cfg.suffix_rules[i] = rule,
+                                                                _ => cfg.suffix_rules.push(rule),
+                                                            }
+                                                            done = true;
+                                                        }
+                                                        Err(e) => form.error = Some(e),
+                                                    }
+                                                }
+                                                if ui.button(tr("Cancel")).clicked() {
+                                                    done = true;
+                                                }
+                                            });
+                                        });
+                                    }
+                                }
+                                if done {
+                                    *suffix_edit = None;
+                                }
                             });
                         }
                         SettingsTab::Plugins => {
@@ -4425,11 +4543,127 @@ const LBL_CONFIRM: &str = n_("Confirm delete");
 const THEMES: [(ThemeMode, &str); 3] = [(ThemeMode::System, n_("System default")), (ThemeMode::Light, n_("Light")), (ThemeMode::Dark, n_("Dark"))];
 
 /// Which program a Settings "Browse…" button chooses.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Browse {
     Editor,
     Viewer,
+    /// A program for the suffix form's viewer or editor.
+    RuleViewer,
+    RuleEditor,
     Terminal,
+}
+
+/// A plugin's viewer or editor offered in Settings: plugin id, opener id,
+/// and how it reads ("Text and hex viewer (Viewer)").
+type OpenerChoice = (String, String, String);
+
+/// The viewers (or editors) the running plugins register.
+fn opener_choices(plugins: &Plugins, kind: OpenKind) -> Vec<OpenerChoice> {
+    let mut out = Vec::new();
+    for p in &plugins.active {
+        let name = plugins.name_of(p.id());
+        for o in p.openers().into_iter().filter(|o| o.kind == kind) {
+            let masks = if o.masks.trim() == "*" { String::new() } else { format!(" · {}", o.masks) };
+            out.push((p.id().to_owned(), o.id.clone(), format!("{} ({name}){masks}", o.label)));
+        }
+    }
+    out
+}
+
+/// How a viewer or editor choice reads in Settings; `None` is a suffix's
+/// "Default".
+fn open_with_label(w: Option<&OpenWith>, choices: &[OpenerChoice]) -> String {
+    match w {
+        None => tr("Default").into(),
+        Some(OpenWith::Notepad) => tr("Notepad").into(),
+        Some(OpenWith::Program { command }) => trf("Program: {command}", &[("command", command)]),
+        Some(OpenWith::Plugin { plugin, opener }) => choices
+            .iter()
+            .find(|(p, o, _)| p == plugin && o == opener)
+            .map(|c| c.2.clone())
+            .unwrap_or_else(|| trf("The {plugin} plugin (off or missing)", &[("plugin", plugin)])),
+    }
+}
+
+/// Radio buttons for a viewer or an editor: "Default" (`None`, when
+/// `allow_default`), the plugins' openers, Notepad, and a program with its
+/// command line (`program` keeps it while another choice is made). Returns
+/// true when Browse… was clicked.
+fn open_with_picker(ui: &mut egui::Ui, id: &str, value: &mut Option<OpenWith>, allow_default: bool, choices: &[OpenerChoice], program: &mut String) -> bool {
+    let mut browse = false;
+    ui.push_id(id, |ui| {
+        ui.vertical(|ui| {
+            if allow_default && ui.radio(value.is_none(), tr("Default")).clicked() {
+                *value = None;
+            }
+            for (plugin, opener, label) in choices {
+                let this = OpenWith::Plugin { plugin: plugin.clone(), opener: opener.clone() };
+                if ui.radio(value.as_ref() == Some(&this), label.as_str()).clicked() {
+                    *value = Some(this);
+                }
+            }
+            // a plugin chosen earlier that is off now stays visible
+            if let Some(w @ OpenWith::Plugin { plugin, opener }) = value.as_ref() {
+                if !choices.iter().any(|(p, o, _)| p == plugin && o == opener) {
+                    let _ = ui.radio(true, open_with_label(Some(w), choices));
+                }
+            }
+            if ui.radio(*value == Some(OpenWith::Notepad), tr("Notepad")).clicked() {
+                *value = Some(OpenWith::Notepad);
+            }
+            ui.horizontal(|ui| {
+                let on = matches!(value, Some(OpenWith::Program { .. }));
+                if ui.radio(on, tr("Program:")).clicked() && !on {
+                    *value = Some(OpenWith::Program { command: program.clone() });
+                }
+                let tip = tr("Program and optional arguments. {file} is replaced by the file;\nwithout it the file is added at the end.");
+                let field = egui::TextEdit::singleline(program).hint_text(r#""C:\Program Files\Notepad++\notepad++.exe""#).desired_width(250.0);
+                if ui.add_enabled(on, field).on_hover_text(tip).changed() {
+                    *value = Some(OpenWith::Program { command: program.clone() });
+                }
+                if ui.button(tr("Browse…")).clicked() {
+                    browse = true;
+                }
+            });
+        });
+    });
+    browse
+}
+
+/// The suffix form in Settings → Viewers and editors: a new rule, or the
+/// one at `index` being changed.
+struct SuffixEdit {
+    index: Option<usize>,
+    rule: SuffixRule,
+    /// The command lines typed for "Program:", kept while another choice is made.
+    view_program: String,
+    edit_program: String,
+    error: Option<String>,
+}
+
+impl SuffixEdit {
+    fn of(index: Option<usize>, rule: SuffixRule, viewer: &str, editor: &str) -> SuffixEdit {
+        let program = |w: &Option<OpenWith>, last: &str| match w {
+            Some(OpenWith::Program { command }) => command.clone(),
+            _ => last.to_owned(),
+        };
+        SuffixEdit { index, view_program: program(&rule.view, viewer), edit_program: program(&rule.edit, editor), rule, error: None }
+    }
+
+    /// The rule to save, or why it can't be.
+    fn check(&self, rules: &[SuffixRule]) -> Result<SuffixRule, String> {
+        let suffix = SuffixRule::normalize(&self.rule.suffix);
+        if suffix.is_empty() {
+            return Err(tr("Type a suffix, such as txt.").into());
+        }
+        if rules.iter().enumerate().any(|(i, r)| Some(i) != self.index && SuffixRule::normalize(&r.suffix) == suffix) {
+            return Err(trf(".{suffix} has its own viewer or editor already.", &[("suffix", &suffix)]));
+        }
+        if self.rule.view.is_none() && self.rule.edit.is_none() {
+            return Err(tr("Choose a viewer or an editor for it.").into());
+        }
+        Ok(SuffixRule { suffix, ..self.rule.clone() })
+    }
 }
 
 /// Popup id of a font picker (tests open it directly).
@@ -5629,8 +5863,10 @@ mod tests {
         // the drive selector lists the connection; choosing it opens where it started
         ui.app.command(&ctx, Cmd::DriveMenu(1));
         let Dialog::Drive { drives, conns, cursor, .. } = &mut ui.app.dialog else { panic!("drive menu not open") };
-        assert_eq!(conns.iter().map(|c| (c.label.as_str(), c.detail.as_str())).collect::<Vec<_>>(), [("mem://test-ui", "memserver")]);
-        *cursor = drives.len();
+        // other tests' connections may be listed too (they share the list)
+        let mine: Vec<(&str, &str)> = conns.iter().map(|c| (c.label.as_str(), c.detail.as_str())).filter(|(l, _)| l.starts_with("mem://")).collect();
+        assert_eq!(mine, [("mem://test-ui", "memserver")]);
+        *cursor = drives.len() + conns.iter().position(|c| c.label == "mem://test-ui").unwrap();
         ui.frames(2);
         ui.key(Key::Enter);
         assert_eq!(ui.app.panels[1].path(), root.join("home"), "the connection's start folder");
@@ -5957,7 +6193,8 @@ mod tests {
             let o = &opened[0].2;
             assert_eq!((o["theme"].as_str(), o["mono_font"].as_str(), o["temporary"].as_str()), ("dark", "Cascadia Mono", ""));
         }
-        // F4: the plugin edits what its masks match
+        // F4: the plugin's editor, when chosen
+        ui.app.cfg.edit_with = OpenWith::Plugin { plugin: "recorder".into(), opener: "edit".into() };
         ui.key(Key::Escape);
         ui.text("nas");
         ui.key(Key::F4);
@@ -7209,17 +7446,71 @@ mod tests {
         ui.key(Key::F3);
         assert_eq!(ui.viewed().len(), 1);
         // a custom viewer is started instead (here one that doesn't exist: an error, no plugin window)
-        ui.app.cfg.use_custom_viewer = true;
         ui.app.cfg.viewer = r#""C:\No Such Dir\viewer.exe""#.into();
+        ui.app.cfg.view_with = OpenWith::Program { command: ui.app.cfg.viewer.clone() };
         ui.key(Key::F3);
         assert_eq!(ui.viewed().len(), 1);
         assert!(matches!(&ui.app.dialog, Dialog::Message { text, .. } if text.contains("viewer.exe")), "reports the program that failed");
         // switching back to the built-in one keeps the custom command for later
         ui.key(Key::Escape);
-        ui.app.cfg.use_custom_viewer = false;
+        ui.app.cfg.view_with = OpenWith::Plugin { plugin: "recorder".into(), opener: "view".into() };
         ui.key(Key::F3);
         assert_eq!(ui.viewed().len(), 2);
         assert!(!ui.app.cfg.viewer.is_empty());
+    }
+
+    /// A suffix with its own viewer and editor overrides the defaults; the
+    /// Settings form adds, checks and changes such suffixes.
+    #[test]
+    fn suffixes_with_their_own_viewer_and_editor() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a.txt"), "x").unwrap();
+        fs::write(t.path().join("Poznámky.MD"), "x").unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let recorder = |opener: &str| OpenWith::Plugin { plugin: "recorder".into(), opener: opener.into() };
+        // by default nothing opens .md specially; the default viewer is a missing program here
+        ui.app.cfg.view_with = OpenWith::Program { command: r#""C:\No Such Dir\view.exe""#.into() };
+        ui.app.cfg.suffix_rules = vec![SuffixRule { suffix: "md".into(), view: Some(recorder("view")), edit: Some(recorder("edit")) }];
+        assert_eq!(ui.app.open_with_for(OpenKind::View, &t.path().join("Poznámky.MD")), recorder("view"));
+        assert_eq!(ui.app.open_with_for(OpenKind::Edit, &t.path().join("Poznámky.MD")), recorder("edit"));
+        assert_eq!(ui.app.open_with_for(OpenKind::View, &t.path().join("a.txt")), ui.app.cfg.view_with);
+        ui.text("Pozn");
+        ui.key(Key::F3);
+        ui.key(Key::F4);
+        let opened: Vec<String> = ui.recorder.opened.lock().unwrap().iter().map(|(o, _, _)| o.clone()).collect();
+        assert_eq!(opened, ["view", "edit"]);
+        assert!(matches!(ui.app.dialog, Dialog::None));
+        // a rule's "Default" uses the default
+        ui.app.cfg.suffix_rules[0].view = None;
+        assert_eq!(ui.app.open_with_for(OpenKind::View, &t.path().join("x.md")), ui.app.cfg.view_with);
+        // a chosen plugin that is gone gives way to one that views the file
+        ui.app.cfg.suffix_rules[0].view = Some(OpenWith::Plugin { plugin: "gone".into(), opener: "x".into() });
+        ui.key(Key::F3);
+        assert_eq!(ui.viewed().len(), 2);
+
+        // the form: checks, then saves
+        let rules = ui.app.cfg.suffix_rules.clone();
+        let mut form = SuffixEdit::of(None, SuffixRule { suffix: " *.MD ".into(), view: None, edit: Some(OpenWith::Notepad) }, "", "");
+        assert!(form.check(&rules).unwrap_err().contains(".md"), "taken");
+        form.rule.suffix = "".into();
+        assert!(form.check(&rules).is_err(), "empty");
+        form.rule.suffix = ".Log".into();
+        form.rule.edit = None;
+        assert!(form.check(&rules).is_err(), "neither");
+        form.rule.view = Some(OpenWith::Notepad);
+        assert_eq!(form.check(&rules).unwrap().suffix, "log");
+        // the same suffix may be saved over itself
+        let again = SuffixEdit::of(Some(0), rules[0].clone(), "", "");
+        assert!(again.check(&rules).is_ok());
+
+        // the tab draws, with the table and the form open
+        ui.key(Key::Escape);
+        ui.app.suffix_edit = Some(form);
+        ui.app.dialog = Dialog::Settings { tab: SettingsTab::Programs, recording: None };
+        ui.frames(6);
+        assert!(matches!(ui.app.dialog, Dialog::Settings { .. }));
+        ui.app.dialog = Dialog::None;
+        ui.app.suffix_edit = None;
     }
 
     #[test]
@@ -7242,13 +7533,19 @@ mod tests {
         crate::fonts::install(&ui.ctx, "", "");
         ui.ctx.set_pixels_per_point(1.5);
         ui.screen = egui::vec2(1100.0, 1400.0);
-        ui.app.cfg.use_custom_editor = true;
         ui.app.cfg.editor = r#""C:\Program Files\Notepad++\notepad++.exe""#.into();
-        ui.app.dialog = Dialog::Settings { tab: SettingsTab::General, recording: None };
+        ui.app.cfg.edit_with = OpenWith::Program { command: ui.app.cfg.editor.clone() };
+        ui.app.cfg.view_with = OpenWith::Plugin { plugin: "recorder".into(), opener: "view".into() };
+        ui.app.cfg.suffix_rules = vec![
+            SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into() }), edit: None },
+            SuffixRule { suffix: "ini".into(), view: None, edit: Some(OpenWith::Notepad) },
+        ];
+        ui.app.suffix_edit = Some(SuffixEdit::of(Some(0), ui.app.cfg.suffix_rules[0].clone(), "", ""));
+        ui.app.dialog = Dialog::Settings { tab: SettingsTab::Programs, recording: None };
         ui.frames(25);
         let bg = ui.ctx.style().visuals.panel_fill;
         let out = ui.last.take().unwrap();
-        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("external_programs.png"));
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("viewers_and_editors.png"));
     }
 
     /// Main window, Settings and the keyboard table in Czech:

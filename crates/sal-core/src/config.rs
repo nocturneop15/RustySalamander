@@ -11,6 +11,56 @@ use serde::{Deserialize, Serialize};
 use crate::shell::TerminalKind;
 use crate::sort::SortSpec;
 
+/// What F3 or F4 opens a file with (Settings → Viewers and editors).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OpenWith {
+    /// A plugin's viewer or editor: the plugin's id and its opener's id.
+    Plugin { plugin: String, opener: String },
+    /// Notepad.
+    Notepad,
+    /// A program's command line; `{file}` is replaced by the file, without
+    /// it the file is added at the end.
+    Program { command: String },
+}
+
+impl OpenWith {
+    /// The default viewer: the Viewer plugin.
+    pub fn viewer_plugin() -> OpenWith {
+        OpenWith::Plugin { plugin: "viewer".into(), opener: "text".into() }
+    }
+}
+
+/// Files whose names end with `.<suffix>` open with a viewer or editor of
+/// their own instead of the default (`None`: the default).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SuffixRule {
+    /// Without the dot, any case: `txt`, `tar.gz`.
+    pub suffix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<OpenWith>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit: Option<OpenWith>,
+}
+
+impl SuffixRule {
+    /// A suffix as typed (`.TXT`, `*.txt`, ` txt `) as it is kept: `txt`.
+    pub fn normalize(suffix: &str) -> String {
+        suffix.trim().trim_start_matches(['*', '.']).trim().to_lowercase()
+    }
+
+    /// Whether a file with this name (no folder) has the suffix.
+    pub fn matches(&self, name: &str) -> bool {
+        let suffix = SuffixRule::normalize(&self.suffix);
+        !suffix.is_empty() && name.to_lowercase().ends_with(&format!(".{suffix}"))
+    }
+}
+
+/// The rule for a file name: the one with the longest matching suffix
+/// (`tar.gz` before `gz`).
+pub fn suffix_rule<'a>(rules: &'a [SuffixRule], name: &str) -> Option<&'a SuffixRule> {
+    rules.iter().filter(|r| r.matches(name)).max_by_key(|r| SuffixRule::normalize(&r.suffix).len())
+}
+
 /// Drive buttons in each panel's path bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DriveButtons {
@@ -104,13 +154,23 @@ pub struct Config {
     pub show_system: bool,
     pub use_recycle_bin: bool,
     pub confirm_delete: bool,
-    /// F4 uses `editor` instead of Notepad.
+    /// What F3 opens files with, unless their suffix has its own.
+    pub view_with: OpenWith,
+    /// What F4 opens files with, unless their suffix has its own.
+    pub edit_with: OpenWith,
+    /// Suffixes with a viewer or editor of their own.
+    pub suffix_rules: Vec<SuffixRule>,
+    /// Older configs: F4 used `editor` instead of Notepad (read, never
+    /// written; see `edit_with`).
+    #[serde(skip_serializing)]
     pub use_custom_editor: bool,
-    /// Custom editor command line ({file} = the file; otherwise appended).
+    /// The last custom editor command line, offered again when "Program" is
+    /// chosen ({file} = the file; otherwise appended).
     pub editor: String,
-    /// F3 uses `viewer` instead of the built-in viewer.
+    /// Older configs: F3 used `viewer` (read, never written).
+    #[serde(skip_serializing)]
     pub use_custom_viewer: bool,
-    /// Custom viewer command line, like `editor`.
+    /// The last custom viewer command line, like `editor`.
     pub viewer: String,
     pub font_size: f32,
     /// UI font family (installed font name; empty = Segoe UI).
@@ -171,6 +231,9 @@ impl Default for Config {
             show_system: true,
             use_recycle_bin: true,
             confirm_delete: true,
+            view_with: OpenWith::viewer_plugin(),
+            edit_with: OpenWith::Notepad,
+            suffix_rules: Vec::new(),
             use_custom_editor: false,
             editor: String::new(),
             use_custom_viewer: false,
@@ -260,6 +323,13 @@ impl Config {
         if !text.contains("use_custom_editor") {
             c.use_custom_editor = !c.editor.trim().is_empty();
         }
+        // before the viewer and editor could be chosen from plugins
+        if !text.contains("view_with") && c.use_custom_viewer && !c.viewer.trim().is_empty() {
+            c.view_with = OpenWith::Program { command: c.viewer.clone() };
+        }
+        if !text.contains("edit_with") && c.use_custom_editor && !c.editor.trim().is_empty() {
+            c.edit_with = OpenWith::Program { command: c.editor.clone() };
+        }
         c
     }
 
@@ -317,12 +387,29 @@ mod tests {
         assert_eq!((c.drive_buttons, c.drive_hotkey), (DriveButtons::Current, DriveHotkey::Shift));
         assert!(c.shortcuts.is_empty());
         assert_eq!(c.theme, ThemeMode::System);
-        assert!(!c.use_custom_editor && !c.use_custom_viewer);
-        // older configs: a set editor keeps being used
+        assert_eq!((c.view_with.clone(), c.edit_with.clone()), (OpenWith::viewer_plugin(), OpenWith::Notepad));
+        // older configs: a set editor or viewer keeps being used
         let old = Config::parse("editor = 'C:/Tools/ed.exe'");
-        assert!(old.use_custom_editor);
+        assert_eq!(old.edit_with, OpenWith::Program { command: "C:/Tools/ed.exe".into() });
         let off = Config::parse("editor = 'C:/Tools/ed.exe'\nuse_custom_editor = false");
-        assert!(!off.use_custom_editor);
+        assert_eq!(off.edit_with, OpenWith::Notepad);
+        let viewer = Config::parse("viewer = 'v.exe {file}'\nuse_custom_viewer = true");
+        assert_eq!(viewer.view_with, OpenWith::Program { command: "v.exe {file}".into() });
+        // and the new settings survive saving
+        let mut c2 = Config::default();
+        c2.suffix_rules = vec![
+            SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into() }), edit: None },
+            SuffixRule { suffix: "tar.gz".into(), view: None, edit: Some(OpenWith::Notepad) },
+        ];
+        c2.edit_with = OpenWith::Plugin { plugin: "x".into(), opener: "ini".into() };
+        let text = toml::to_string_pretty(&c2).unwrap();
+        assert!(!text.contains("use_custom"), "{text}");
+        let back = Config::parse(&text);
+        assert_eq!((back.suffix_rules, back.edit_with, back.view_with), (c2.suffix_rules.clone(), c2.edit_with.clone(), c2.view_with.clone()));
+        // the longest suffix wins, in any case
+        assert_eq!(suffix_rule(&c2.suffix_rules, "Záloha.TAR.GZ").unwrap().suffix, "tar.gz");
+        assert!(suffix_rule(&c2.suffix_rules, "a.gz").is_none() && suffix_rule(&c2.suffix_rules, "md").is_none());
+        assert_eq!(SuffixRule::normalize(" *.TXT "), "txt");
         assert!(!c.always_show_scrollbars && c.show_fkey_bar && c.system_icons);
         let dark: Config = toml::from_str("theme = \"Dark\"").unwrap();
         assert_eq!(dark.theme, ThemeMode::Dark);

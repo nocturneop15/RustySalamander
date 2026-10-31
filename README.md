@@ -193,7 +193,7 @@ Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each 
 **The Plugins menu** lists the commands of the plugins that are on, under each plugin's name, plus *Disconnect* for a panel showing a connection and *Plugin settings…*. A panel that a plugin shows (an archive, a server) has a tinted background and a banner with the plugin's name below the list.
 
 - **Folder plugins:** a *folder plugin* makes certain files, or connections it opens, browsable as folders. The panel lists them, and copy, move, delete, rename and new folder work inside them through the plugin. Plugins can add menu commands and ask for input in forms the program draws.
-- **Viewers and editors:** any plugin can register as the viewer (F3) or editor (F4) of files whose names match its masks (`*.txt;*.log`, or `*` for all). F3 and F4 use the first plugin, in the order of Settings → Plugins, that registered for the file, unless Settings → General → External programs names a program of your own; without an editor plugin F4 opens Notepad. Settings → Plugins shows what each plugin views or edits.
+- **Viewers and editors:** any plugin can register as the viewer (F3) or editor (F4) of files whose names match its masks (`*.txt;*.log`, or `*` for all). Settings → Viewers and editors offers them as the default viewer or editor, or for a file suffix (see [Viewers and editors](#viewers-and-editors)). Settings → Plugins shows what each plugin views or edits.
 - **Versions of their own:** each plugin has its own version (Settings → Plugins shows it, with the interface it was built for) and its own releases, so a plugin is updated without a new program (see [Updates](#updates)). The program runs plugins built for its interface version or an older one it still supports.
 - **Interface:** the program and a plugin talk only through a C interface (`crates/sal-plugin-api`), so each plugin is built on its own. Each plugin brings its own language files in its `lang` folder (`plugins\7zip\lang\cs.toml`).
 - **Shipped:** the 7-Zip archive plugin, the SCP plugin, the search plugin and the Viewer plugin (the F3 viewer). `plugins/example-filelist` is a small example for plugin authors and isn't installed.
@@ -349,15 +349,19 @@ These are stored in `config.toml` as `drive_buttons`, `drive_hotkey` and `drive_
 
 The drive selector (Alt+F1 / Alt+F2, or the drive button) opens as a dropdown right under its panel. It lists local drives, then network drives, then **Recent paths**: up to 12 paths you typed into the path bar, newest first. Choosing a path opens it. **Settings → General → Drives → Remember typed paths in the drive selector** turns this on or off; turning it off deletes the remembered paths. They're stored in `config.toml` as `typed_paths`.
 
+## Viewers and editors
+
+**Settings → Viewers and editors** sets what F3 views and F4 edits files with:
+
+- **Viewer (F3)** and **Editor (F4)**: any viewer or editor a running plugin registers (the Viewer plugin by default for F3), **Notepad** (the default for F4), or **Program:** a command line of your own, with **Browse…** to pick it. The command line may contain `{file}`, which is replaced by the quoted file path; without it the path is added at the end, e.g. `code.cmd --reuse-window`. Choosing something else keeps the command for later.
+- **By file suffix:** a table of suffixes with a viewer or editor of their own, overriding the defaults: `.md` with Typora, `.ini` in Notepad. **Add a suffix…** and **Edit…** open a form with the suffix (`md`, `tar.gz`; any case, with or without the dot) and the same choices plus **Default**, which keeps the default for that key. **Remove** gives the suffix back to the defaults. When suffixes overlap, the longest wins (`tar.gz` before `gz`).
+- **A plugin that is off or missing:** F3/F4 then use the first running plugin registered for the file, and F4 falls back to Notepad. With no viewer at all, F3 says how to get one.
+
+Config keys: `view_with`, `edit_with`, `suffix_rules` (and `viewer`/`editor`, the last command lines typed). A custom viewer or editor from an older config stays in use.
+
 ## External programs
 
-**Settings → General → External programs**:
-
-- **Editor (F4)**: *A plugin's editor, or Notepad (default)* or *Custom*.
-- **Viewer (F3)**: *The Viewer plugin (default)* or *Custom*. With the default, F3 goes to the plugin registered as the file's viewer (the Viewer plugin views every file); with the Viewer plugin turned off and no other viewer, F3 says so.
-- **Command prompt**: the terminal choice described below.
-
-Each *Custom* entry has a **Browse…** button that opens the Windows *Open* dialog to pick a program. A custom editor/viewer command line may contain `{file}`, which is replaced by the quoted file path; without it the path is added at the end, e.g. `code.cmd --reuse-window`. Switching back to the default keeps the custom command for later. Config keys: `use_custom_editor`/`editor`, `use_custom_viewer`/`viewer`. An editor set in an older config stays in use.
+**Settings → General → External programs** has the **Command prompt**, the terminal choice described below.
 
 ## Terminal ("Open command prompt here")
 

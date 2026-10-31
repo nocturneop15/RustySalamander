@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1-alpha (2026-10-31)
+
+- **Settings → Viewers and editors (new tab):** the default viewer (F3) and editor (F4), moved out of General → External programs. Each can be any viewer or editor a running plugin registers, Notepad, or a program of your own (with Browse…). A custom viewer or editor from an older config stays in use.
+- **A viewer or editor per file suffix:** a table of suffixes with their own viewer or editor (or Default for either), overriding the defaults; Add a suffix…, Edit… and Remove. The longest matching suffix wins (`tar.gz` before `gz`).
+- **The Viewer plugin 0.5.1-alpha** is bundled (no changes; it was released on its own to try plugin updates).
+
 ## 0.5.0-alpha (2026-10-31)
 
 ### Plugins
