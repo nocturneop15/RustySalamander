@@ -2924,7 +2924,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sal-app"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 dependencies = [
  "chrono",
  "eframe",
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "sal-core"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 dependencies = [
  "encoding_rs",
  "serde",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-7zip"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 dependencies = [
  "sal-plugin-api",
  "tempfile",
@@ -2963,11 +2963,11 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-api"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 
 [[package]]
 name = "sal-plugin-filelist"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 dependencies = [
  "sal-plugin-api",
  "tempfile",
@@ -2975,7 +2975,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-scp"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 dependencies = [
  "russh",
  "sal-plugin-api",
@@ -2985,7 +2985,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-search"
-version = "0.4.0-alpha"
+version = "0.4.1-alpha"
 dependencies = [
  "regex",
  "sal-plugin-api",

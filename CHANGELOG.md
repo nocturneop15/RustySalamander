@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1-alpha (2026-10-31)
+
+- **New search replaces the old one:** New search… in the results window (or Find files again) no longer adds both views of the previous search to Searches in the drive selector. The previous results go as if their window was closed; a view stays only if a panel shows it.
+
 ## 0.4.0-alpha (2026-10-30)
 
 ### Search plugin (new)

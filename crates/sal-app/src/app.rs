@@ -694,9 +694,11 @@ impl App {
     }
 
     /// Show a plugin's results (a connection it fills, such as a search) in
-    /// the results window. The results shown before stay (in the drive
-    /// selector's Searches) until there are more than [`MAX_RESULTS`].
+    /// the results window. The results it showed before go as if the window
+    /// was closed: they stay (in the drive selector's Searches) only where a
+    /// panel shows them, until there are more than [`MAX_RESULTS`].
     fn open_results(&mut self, plugin: Arc<dyn FolderPlugin>, r: plugins::Results) {
+        self.close_results();
         let root = r.mount.root();
         let start = if r.mount.folder.is_empty() { root.clone() } else { root.join(&r.mount.folder) };
         let name = if r.name.is_empty() { r.title.clone() } else { r.name.clone() };
@@ -5125,6 +5127,8 @@ mod tests {
                 refresh: String::new(),
             };
             ui.app.open_results(plugin.clone(), r);
+            // as if a panel showed it, so the next search keeps it
+            ui.app.results = None;
         }
         let open: Vec<PathBuf> = plugins::mounts().into_iter().map(|(r, _)| r).filter(|r| r.to_string_lossy().starts_with(r"\\?\limit\")).collect();
         for n in 1..=12 {
@@ -5136,6 +5140,47 @@ mod tests {
         for n in 3..=12 {
             ui.app.close_connection(&root(n, false));
             ui.app.close_connection(&root(n, true));
+        }
+    }
+
+    /// A new search from the results window replaces the one shown there:
+    /// its connections go unless a panel shows them.
+    #[test]
+    fn new_search_closes_the_previous_one() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let plugin: Arc<dyn FolderPlugin> = Arc::new(MemServer { files: Default::default(), closed: Default::default() });
+        ui.app.plugins.active.push(plugin.clone());
+        for p in &mut ui.app.panels {
+            p.plugins = ui.app.plugins.active.clone();
+        }
+        let root = |n: usize, list: bool| sal_plugin_api::mount_root("again", &if list { format!("{n}-list") } else { n.to_string() });
+        let search = |n: usize| plugins::Results {
+            title: format!("search {n}"),
+            name: format!("search {n}"),
+            mount: plugins::Mount { scheme: "again".into(), authority: n.to_string(), folder: String::new() },
+            flat: format!("{n}-list"),
+            again: String::new(),
+            refresh: String::new(),
+        };
+        let open = || plugins::mounts().into_iter().map(|(r, _)| r).filter(|r| r.to_string_lossy().starts_with(r"\\?\again\")).collect::<Vec<_>>();
+        ui.app.open_results(plugin.clone(), search(1));
+        ui.app.open_results(plugin.clone(), search(2));
+        assert_eq!(open(), [root(2, false), root(2, true)], "the first search is gone, both its views");
+        // a panel shows the second search's list: only that one stays
+        let hidden = ui.app.vis();
+        ui.app.act().load(&root(2, true), hidden, None).unwrap();
+        ui.app.open_results(plugin.clone(), search(3));
+        let mut now = open();
+        now.sort();
+        let mut want = vec![root(2, true), root(3, false), root(3, true)];
+        want.sort();
+        assert_eq!(now, want);
+        assert_eq!(ui.app.kept_results.len(), 2);
+        let home = t.path().to_path_buf();
+        ui.app.act().load(&home, hidden, None).unwrap();
+        for r in [root(2, true), root(3, false), root(3, true)] {
+            ui.app.close_connection(&r);
         }
     }
 
