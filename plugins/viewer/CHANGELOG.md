@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.1-alpha (2026-10-31)
+
+- **No changes:** a release to try updating a plugin on its own (Help → Check for updates… → Update now, then Restart now).
+
 ## 0.5.0-alpha (2026-10-31)
 
 - **The text and hex viewer as a plugin:** the viewer F3 opens, until now built into the program, is this plugin (`plugins\viewer\viewer.spl`). It registers itself as the viewer of every file and opens its windows on a thread of its own; they look like the program's (theme, fonts, scroll bars).

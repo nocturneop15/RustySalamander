@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-viewer"
-version = "0.5.0-alpha"
+version = "0.5.1-alpha"
 dependencies = [
  "eframe",
  "sal-core",
