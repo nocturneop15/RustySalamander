@@ -200,6 +200,9 @@ pub struct Config {
     pub quick_search_arrows: bool,
     /// Solid scrollbars that are always shown (instead of thin ones on hover).
     pub always_show_scrollbars: bool,
+    /// The tint of panels a plugin shows (archives, servers, search
+    /// results), as RGB; `None` for the theme's selection color.
+    pub plugin_tint: Option<[u8; 3]>,
     /// The function-key command bar at the bottom of the window.
     pub show_fkey_bar: bool,
     /// Windows file icons by type (otherwise simple drawn icons).
@@ -254,6 +257,7 @@ impl Default for Config {
             language: String::new(),
             disabled_plugins: Vec::new(),
             always_show_scrollbars: false,
+            plugin_tint: None,
             show_fkey_bar: true,
             system_icons: true,
             context_menu_trigger: ContextMenuTrigger::ShortClick,
@@ -410,6 +414,10 @@ mod tests {
         assert_eq!(suffix_rule(&c2.suffix_rules, "Záloha.TAR.GZ").unwrap().suffix, "tar.gz");
         assert!(suffix_rule(&c2.suffix_rules, "a.gz").is_none() && suffix_rule(&c2.suffix_rules, "md").is_none());
         assert_eq!(SuffixRule::normalize(" *.TXT "), "txt");
+        // the plugin panels' tint: the theme's unless chosen
+        assert_eq!(c.plugin_tint, None);
+        let tinted = Config::parse(&toml::to_string_pretty(&Config { plugin_tint: Some([200, 120, 0]), ..Config::default() }).unwrap());
+        assert_eq!(tinted.plugin_tint, Some([200, 120, 0]));
         assert!(!c.always_show_scrollbars && c.show_fkey_bar && c.system_icons);
         let dark: Config = toml::from_str("theme = \"Dark\"").unwrap();
         assert_eq!(dark.theme, ThemeMode::Dark);

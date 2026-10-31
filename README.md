@@ -265,6 +265,8 @@ Copy/Move, Create directory, Rename, Delete, Select by mask and messages are mod
 
 **View → Theme** offers *System default* (follows Windows), *Light* and *Dark*; the same choice is in **Settings → General**. A *Switch dark/light mode* command is available in the keyboard shortcuts table. It has no default key; `Ctrl+Shift+D` is offered as a preset. The theme covers the panels, the window title bar and the native context menus.
 
+**Plugin panel tint** (Settings → General → Appearance) colors the background of panels a plugin shows (archives, servers, search results) and their banner: *From the theme* uses a faint wash of the theme's selection color, *Custom* one of a color you pick, with a preview next to it. Stored in `config.toml` as `plugin_tint` (RGB).
+
 ## Fonts
 
 **Settings → General → Appearance** has **Font** (the whole UI) and **Viewer font** (F3 text and hex view). Both list every installed TrueType/OpenType family, machine-wide and per-user, with a search box, and apply immediately. The defaults are Segoe UI and Consolas. Whatever you pick, the Unicode fallback chain stays behind it, so CJK, Indic, Arabic, symbols and emoji still render if the chosen font lacks them. Stored in `config.toml` as `ui_font` / `mono_font`.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3-alpha (2026-10-31)
+
+- **Plugin panel tint:** Settings → General → Appearance chooses the color of panels a plugin shows (archives, servers, search results) and of their banner: from the theme, as before, or a custom color picked with a color picker, with a preview. Applies at once.
+
 ## 0.5.2-alpha (2026-10-31)
 
 - **Plugins named as such:** in Settings → Viewers and editors, a viewer or editor that a plugin provides reads "Plugin Viewer: Text and hex viewer", so it is clear it comes from a plugin; one whose plugin is off or missing reads "Plugin …: off or missing".
