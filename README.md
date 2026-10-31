@@ -21,7 +21,7 @@ Documentation:
 - **Bidi:** Hebrew and Arabic names are reordered with the Unicode Bidirectional Algorithm.
 - **Characters Windows forbids:** names from Macs, Samba/NAS shares or WSL may contain `* : ? | < > " \`. Windows stores these as private-use stand-ins (U+F020–F029 or U+F000+char) that no font can draw, so they're shown as the original characters. This is display only; operations use the exact name.
 - **Fonts:** a fallback chain over the Windows system fonts covers CJK, Korean, Indic, Thai, symbols and emoji.
-- **Viewer:** detects UTF-8, UTF-16 LE/BE (with or without a BOM) and the system ANSI code page. You can switch to Windows-125x, ISO-8859-2, KOI8-R, CP866, Shift-JIS, EUC-JP, GBK, Big5 or EUC-KR.
+- **Viewer** (the Viewer plugin): detects UTF-8, UTF-16 LE/BE (with or without a BOM) and the system ANSI code page. You can switch to Windows-125x, ISO-8859-2, KOI8-R, CP866, Shift-JIS, EUC-JP, GBK, Big5 or EUC-KR.
 - **Config:** stored as UTF-8 TOML in `config.toml` next to `rustysalamander.exe` (portable mode) instead of the registry. See [Portable mode](#portable-mode).
 
 ## Layout
@@ -42,16 +42,17 @@ crates/sal-app    GUI (egui/eframe)
   app.rs          main window, keyboard model, dialogs, progress, headless UI tests
   panel.rs        file panel state (cursor, selection, history, quick search)
   worker.rs       background file operations
-  viewer.rs       F3 viewer (text/hex, encodings) in its own window
-  fonts.rs        Unicode font fallback
   i18n.rs         translations (tr / trf / trn), language switching
   plugins/        finding and loading plugin DLLs, virtual paths through their files
     mod.rs        the plugins folder, Settings → Plugins state, the program's side of the interface
     ops.rs        operations inside a plugin's files, run by the worker (extract, add, delete, rename)
   lang/*.toml     language files: en.toml (all UI strings), cs.toml; build.rs copies them next to the exe
+  update.rs       updates of the program and of the plugins from GitHub, changelogs
   build.rs        copies the languages and builds the plugins into target\<profile>\plugins
+crates/sal-ui     what the program's and the plugins' windows share: fonts (Unicode fallback), scroll bars
 crates/sal-plugin-api   what the program and plugins share (no GUI)
-  lib.rs          FolderPlugin / Plugin traits, Item, Index
+  lib.rs          FolderPlugin / Plugin traits, Item, Index, Updates (where a plugin is published)
+  ui.rs           commands, forms, replies, openers (viewers and editors), as text across the interface
   abi.rs          the C interface between the program and a plugin DLL
   export.rs       the plugin's side: export_plugin!, tr / trf through the program
   host.rs         the program's side: a plugin DLL wrapped back into a FolderPlugin
@@ -63,6 +64,11 @@ plugins/scp       the SCP plugin (plugins\scp\scp.spl): SSH servers in a panel
   lib.rs          the plugin: the Plugins menu command, forms, file operations
   ssh.rs          the SSH connection (russh): host keys, sign-in, the SCP protocol
   remote.rs       server paths, shell quoting, reading ls output
+plugins/search    the search plugin (plugins\search\search.spl): Find files, results windows
+plugins/viewer    the Viewer plugin (plugins\viewer\viewer.spl): F3 text/hex viewer in windows of its own
+  doc.rs          a file as text in an encoding, or as hex
+  window.rs       the viewer windows, on a thread and event loop of the plugin's own
+plugins/*/CHANGELOG.md   each plugin's own changelog (its own versions)
 plugins/example-filelist   a small example plugin for plugin authors (not installed)
 docs/             plugin guide, development guide, analysis of the original
 third_party/7zip-26.05/   7-Zip source (LGPL): built into 7z.dll
@@ -187,8 +193,10 @@ Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each 
 **The Plugins menu** lists the commands of the plugins that are on, under each plugin's name, plus *Disconnect* for a panel showing a connection and *Plugin settings…*. A panel that a plugin shows (an archive, a server) has a tinted background and a banner with the plugin's name below the list.
 
 - **Folder plugins:** a *folder plugin* makes certain files, or connections it opens, browsable as folders. The panel lists them, and copy, move, delete, rename and new folder work inside them through the plugin. Plugins can add menu commands and ask for input in forms the program draws.
+- **Viewers and editors:** any plugin can register as the viewer (F3) or editor (F4) of files whose names match its masks (`*.txt;*.log`, or `*` for all). F3 and F4 use the first plugin, in the order of Settings → Plugins, that registered for the file, unless Settings → General → External programs names a program of your own; without an editor plugin F4 opens Notepad. Settings → Plugins shows what each plugin views or edits.
+- **Versions of their own:** each plugin has its own version (Settings → Plugins shows it, with the interface it was built for) and its own releases, so a plugin is updated without a new program (see [Updates](#updates)). The program runs plugins built for its interface version or an older one it still supports.
 - **Interface:** the program and a plugin talk only through a C interface (`crates/sal-plugin-api`), so each plugin is built on its own. Each plugin brings its own language files in its `lang` folder (`plugins\7zip\lang\cs.toml`).
-- **Shipped:** the 7-Zip archive plugin and the SCP plugin. `plugins/example-filelist` is a small example for plugin authors and isn't installed.
+- **Shipped:** the 7-Zip archive plugin, the SCP plugin, the search plugin and the Viewer plugin (the F3 viewer). `plugins/example-filelist` is a small example for plugin authors and isn't installed.
 - **Writing a plugin:** see [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ## Portable mode
@@ -202,6 +210,9 @@ lang\en.toml       English UI strings (the template for translations)
 lang\cs.toml       Czech
 plugins\7zip\      the 7-Zip plugin: 7zip.spl and 7z.dll, 7-Zip's archive library
 plugins\scp\       the SCP plugin: scp.spl; known_hosts and the last connection's details
+plugins\search\    the search plugin
+plugins\viewer\    the Viewer plugin (F3)
+plugins\.updates\  plugin updates downloaded and waiting for the next start
 ```
 
 - **First start:** when the folder has no `config.toml` yet, the settings are read from `%APPDATA%\RustySalamander\config.toml` (the location used before) and saved next to the program on exit. The old file is left untouched.
@@ -211,7 +222,11 @@ plugins\scp\       the SCP plugin: scp.spl; known_hosts and the last connection'
 
 ## Updates
 
-At start-up the program asks GitHub whether a newer release exists. If one does, a window shows the new version and a link to its release page. **Update now** downloads it and unpacks it into a folder named by the version, next to the folder the program runs from (`…\RustySalamander\0.2.1-alpha` → `…\RustySalamander\0.3.0-alpha`), then copies the settings there: `config.toml` and the files plugins saved in their folders (such as the SCP plugin's `known_hosts`). **Start the new version** opens it and closes the old one. The old version stays as it was, so you can go back to it.
+At start-up the program asks GitHub whether newer releases exist, of the program and of each plugin (plugins are released on their own, with their own versions). If any do, a window lists them, each with the version you have, the new one, a link to its release page and **Show changelog**, which shows what changed between the two (read from the changelog at the new release) before anything is installed.
+
+**The program:** **Update now** downloads it and unpacks it into a folder named by the version, next to the folder the program runs from (`…\RustySalamander\0.2.1-alpha` → `…\RustySalamander\0.3.0-alpha`), then copies the settings there: `config.toml` and the files plugins saved in their folders (such as the SCP plugin's `known_hosts`). **Start the new version** opens it and closes the old one. The old version stays as it was, so you can go back to it.
+
+**A plugin:** **Update now** downloads it into `plugins\.updates`; it replaces the plugin's files when the program starts again (**Restart now** does that at once). What the plugin saved in its folder stays. A plugin is only offered in a build for an interface version this program has.
 
 **Help → Check for updates…** checks at any time. **Settings → General → Updates** turns the start-up check off (`check_updates` in `config.toml`).
 
@@ -338,8 +353,8 @@ The drive selector (Alt+F1 / Alt+F2, or the drive button) opens as a dropdown ri
 
 **Settings → General → External programs**:
 
-- **Editor (F4)**: *Notepad (default)* or *Custom*.
-- **Viewer (F3)**: *Built-in viewer (default)* or *Custom*.
+- **Editor (F4)**: *A plugin's editor, or Notepad (default)* or *Custom*.
+- **Viewer (F3)**: *The Viewer plugin (default)* or *Custom*. With the default, F3 goes to the plugin registered as the file's viewer (the Viewer plugin views every file); with the Viewer plugin turned off and no other viewer, F3 says so.
 - **Command prompt**: the terminal choice described below.
 
 Each *Custom* entry has a **Browse…** button that opens the Windows *Open* dialog to pick a program. A custom editor/viewer command line may contain `{file}`, which is replaced by the quoted file path; without it the path is added at the end, e.g. `code.cmd --reuse-window`. Switching back to the default keeps the custom command for later. Config keys: `use_custom_editor`/`editor`, `use_custom_viewer`/`viewer`. An editor set in an older config stays in use.

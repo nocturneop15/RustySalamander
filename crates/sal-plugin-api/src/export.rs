@@ -72,11 +72,24 @@ pub const fn vtable<T: Plugin>() -> VTable {
         activity: activity::<T>,
         stop: stop::<T>,
         real_path: real_path::<T>,
+        openers: openers::<T>,
+        open_file: open_file::<T>,
     }
 }
 
 pub const fn descriptor<T: Plugin>(vtable: &'static VTable) -> Descriptor {
-    Descriptor { version: VERSION, id: Str::new(T::ID), name: Str::new(T::NAME), description: Str::new(T::DESCRIPTION), start: start::<T>, vtable }
+    Descriptor {
+        version: VERSION,
+        id: Str::new(T::ID),
+        name: Str::new(T::NAME),
+        description: Str::new(T::DESCRIPTION),
+        start: start::<T>,
+        vtable,
+        plugin_version: Str::new(T::VERSION),
+        update_repo: Str::new(T::UPDATES.repo),
+        update_tag: Str::new(T::UPDATES.tag),
+        changelog: Str::new(T::UPDATES.changelog),
+    }
 }
 
 fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
@@ -220,6 +233,15 @@ unsafe extern "C" fn activity<T: Plugin>(this: *mut c_void, root: Wide, out: *co
 
 unsafe extern "C" fn stop<T: Plugin>(this: *mut c_void, root: Wide) {
     let _ = catch_unwind(|| me::<T>(this).stop(&root.path()));
+}
+
+unsafe extern "C" fn openers<T: Plugin>(this: *mut c_void, out: *const StrOut) {
+    let list = catch_unwind(|| me::<T>(this).openers()).unwrap_or_default();
+    (*out).send(&crate::ui::encode_openers(&list));
+}
+
+unsafe extern "C" fn open_file<T: Plugin>(this: *mut c_void, opener: Str, file: Wide, options: Str, error: *const StrOut) -> i32 {
+    run(error, || me::<T>(this).open_file(opener.get(), &file.path(), &crate::ui::decode_values(options.get())))
 }
 
 unsafe extern "C" fn real_path<T: Plugin>(this: *mut c_void, file: Wide, inner: Str, out: *const PathOut) {

@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sal_plugin_api::{
-    export_plugin, join_inner, mount_of, n_, tr, trf, under, Activity, Command, Field, FieldKind, FolderPlugin, Form, Index, Item, Mount, Plugin, Progress, Reply, Results, Values,
+    export_plugin, join_inner, mount_of, n_, tr, trf, under, Activity, Command, Field, FieldKind, FolderPlugin, Form, Index, Item, Mount, Plugin, Progress, Reply, Results, Updates, Values,
 };
 
 use find::{attributes, search, Found, Names, Query, State, Text};
@@ -70,6 +70,8 @@ export_plugin!(Search);
 
 impl Plugin for Search {
     const ID: &'static str = "search";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    const UPDATES: Updates = Updates { repo: "nocturneop15/RustySalamander", tag: "search-v", changelog: "plugins/search/CHANGELOG.md" };
     const NAME: &'static str = n_("Search");
     const DESCRIPTION: &'static str = n_("Finds files and folders by name (wildcards or regular expressions) and by the text inside files. Start with Plugins → Find files…");
 

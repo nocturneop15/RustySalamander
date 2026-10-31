@@ -2,9 +2,11 @@
 //! lead to: a form the program shows, a message, or a connection opened in
 //! the panel.
 //!
-//! A plugin never shows windows itself. It *describes* a form ([`Form`]);
+//! A plugin doesn't show dialogs itself. It *describes* a form ([`Form`]);
 //! the program draws it like its own dialogs, with its Enter/Esc keys and
-//! theme, and runs the form's command with what the user entered.
+//! theme, and runs the form's command with what the user entered. (Viewers
+//! and editors, [`Opener`], are the exception: their windows are the
+//! plugin's own.)
 //!
 //! These types cross the DLL boundary as text (see [`encode`]/[`decode`]),
 //! so they can grow without changing the C interface.
@@ -20,6 +22,67 @@ pub struct Command {
     /// The menu label, translated (use [`crate::tr`]). End it with `…` when
     /// it opens a form.
     pub label: String,
+}
+
+/// A way a plugin opens files: as their viewer (F3) or their editor (F4).
+/// The program picks the first opener of the right kind whose `masks`
+/// match the file's name, unless the user chose a program of their own in
+/// Settings, and calls [`crate::FolderPlugin::open_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opener {
+    /// The plugin's own id for it, passed to `open_file`.
+    pub id: String,
+    /// Viewer or editor.
+    pub kind: OpenKind,
+    /// Its name in Settings, translated ("Text and hex viewer").
+    pub label: String,
+    /// The file names it opens: masks separated by `;`, `*.txt;*.log`, or
+    /// `*` for any file. Case does not matter.
+    pub masks: String,
+}
+
+/// The kinds of [`Opener`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenKind {
+    /// Shows a file (F3).
+    View,
+    /// Changes a file (F4).
+    Edit,
+}
+
+impl Opener {
+    /// Whether it opens a file with this name (no folder).
+    pub fn matches(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        self.masks.split(';').map(str::trim).filter(|m| !m.is_empty()).any(|m| wildcard(&m.to_lowercase(), &name))
+    }
+}
+
+/// `*` (any text) and `?` (one character) matching; `*.*` also matches
+/// names without a dot, as in Windows.
+fn wildcard(mask: &str, name: &str) -> bool {
+    if mask == "*.*" || mask == "*" {
+        return true;
+    }
+    let (m, n): (Vec<char>, Vec<char>) = (mask.chars().collect(), name.chars().collect());
+    let (mut mi, mut ni, mut star, mut mark) = (0, 0, None, 0);
+    while ni < n.len() {
+        if mi < m.len() && (m[mi] == '?' || m[mi] == n[ni]) {
+            mi += 1;
+            ni += 1;
+        } else if mi < m.len() && m[mi] == '*' {
+            star = Some(mi);
+            mark = ni;
+            mi += 1;
+        } else if let Some(s) = star {
+            mi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    m[mi..].iter().all(|&c| c == '*')
 }
 
 /// The values of a form's fields by [`Field::id`], plus what the program
@@ -181,6 +244,28 @@ pub(crate) fn decode_commands(s: &str) -> Vec<Command> {
     decode(s).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| Command { id: c[0].clone(), label: c[1].clone() }).collect()
 }
 
+pub(crate) fn encode_openers(openers: &[Opener]) -> String {
+    let kind = |k: OpenKind| if k == OpenKind::View { "view" } else { "edit" };
+    encode(&openers.iter().flat_map(|o| [o.id.as_str(), kind(o.kind), o.label.as_str(), o.masks.as_str()]).collect::<Vec<_>>())
+}
+
+pub(crate) fn decode_openers(s: &str) -> Vec<Opener> {
+    let parts = decode(s).unwrap_or_default();
+    parts
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter_map(|c| {
+            let kind = match c[1].as_str() {
+                "view" => OpenKind::View,
+                "edit" => OpenKind::Edit,
+                _ => return None,
+            };
+            Some(Opener { id: c[0].clone(), kind, label: c[2].clone(), masks: c[3].clone() })
+        })
+        .collect()
+}
+
 pub(crate) fn encode_values(values: &Values) -> String {
     encode(&values.iter().flat_map(|(k, v)| [k.as_str(), v.as_str()]).collect::<Vec<_>>())
 }
@@ -325,5 +410,20 @@ mod tests {
         assert_eq!(decode_commands(&encode_commands(&commands)), commands);
         let values: Values = [("a".to_owned(), "1".to_owned()), ("heslo".to_owned(), "p:ss,".to_owned())].into();
         assert_eq!(decode_values(&encode_values(&values)), values);
+        let openers = vec![
+            Opener { id: "text".into(), kind: OpenKind::View, label: "Prohlížeč 🦎".into(), masks: "*".into() },
+            Opener { id: "ini".into(), kind: OpenKind::Edit, label: "INI".into(), masks: "*.ini; *.inf".into() },
+        ];
+        assert_eq!(decode_openers(&encode_openers(&openers)), openers);
+    }
+
+    #[test]
+    fn opener_masks() {
+        let o = |masks: &str| Opener { id: String::new(), kind: OpenKind::View, label: String::new(), masks: masks.into() };
+        assert!(o("*").matches("cokoli") && o("*.*").matches("bez tečky"));
+        assert!(o("*.txt;*.LOG").matches("Zpráva 🦎.TXT") && o("*.txt; *.log").matches("a.log"));
+        assert!(!o("*.txt").matches("a.txt.bak") && !o("").matches("a"));
+        assert!(o("read?e.*").matches("readme.md") && !o("read?e.*").matches("reade.md"));
+        assert!(o("*.tar.gz").matches("a.b.tar.gz"));
     }
 }

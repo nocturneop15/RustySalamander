@@ -9,12 +9,15 @@
 //! - `panel`: one file panel (listing, cursor, selection, history)
 //! - `worker`: background file operations and their queue
 //! - `plugins`: finding and loading plugin DLLs, paths through their files
-//! - `viewer`: the F3 text/hex viewer
 //! - `dialogwin`: dialogs in their own native windows
 //! - `i18n`: translations
 //! - `update`: new releases on GitHub, and installing them
 //! - `results`: the results window of a plugin's connection (search results)
-//! - the rest: icons, fonts, context menus, shortcuts, folder sizes
+//! - the rest: icons, context menus, shortcuts, folder sizes
+//!
+//! Viewing (F3) and editing (F4) go to the plugins registered for it (the
+//! viewer is the Viewer plugin); fonts and scroll bars, which the plugins'
+//! windows share, are in `sal-ui`.
 
 // a release build has no console window; debug builds keep one for logs
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -25,7 +28,6 @@ mod debuglog;
 mod dialogwin;
 mod dirsize;
 mod drive_icon;
-mod fonts;
 mod freespace;
 mod i18n;
 mod icons;
@@ -38,10 +40,10 @@ mod shortcut;
 #[cfg(test)]
 mod snapshot;
 mod update;
-mod viewer;
 mod worker;
 
 use eframe::egui;
+use sal_ui::fonts;
 
 fn main() -> eframe::Result<()> {
     debuglog::init();

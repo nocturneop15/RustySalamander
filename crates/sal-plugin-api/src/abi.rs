@@ -10,7 +10,8 @@
 //! 1. The program loads every `plugins\*.spl` and `plugins\<folder>\*.spl`
 //!    and calls the exported function [`ENTRY`] (no arguments), which
 //!    returns a pointer to the plugin's static [`Descriptor`].
-//! 2. If [`Descriptor::version`] isn't [`VERSION`], the plugin is skipped.
+//! 2. If [`Descriptor::version`] isn't between [`MIN_VERSION`] and
+//!    [`VERSION`], the plugin is skipped.
 //! 3. When the plugin is turned on, the program calls [`Descriptor::start`]
 //!    once, with a [`HostApi`] of its own for this plugin and the plugin's
 //!    folder. The returned pointer (the plugin's state, opaque to the
@@ -32,14 +33,30 @@
 //!   plugin's state must be thread-safe.
 //! - **Panics** must not cross the boundary: the generated functions catch
 //!   them and turn them into errors.
+//!
+//! # Versions
+//!
+//! The interface grows without leaving plugins behind: a new version only
+//! *adds* fields at the end of [`Descriptor`] and [`VTable`], and the
+//! program keeps accepting plugins built for any version from
+//! [`MIN_VERSION`] on. It reads a field, or calls a function, only when the
+//! plugin's [`Descriptor::version`] has it (each is marked with the version
+//! that added it); for older plugins it uses the default the trait in the
+//! crate root documents. A plugin built for a newer interface than the
+//! program's is skipped, and the update check only offers a plugin built
+//! for an interface the program has.
 
 use std::ffi::{c_void, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
-/// changes; the program skips plugins built for another version.
-pub const VERSION: u32 = 4;
+/// changes (see the module's "Versions").
+pub const VERSION: u32 = 5;
+
+/// The oldest interface version the program still runs plugins of. Version
+/// 5 is the first that tells the plugin's own version.
+pub const MIN_VERSION: u32 = 5;
 
 /// The name of the function every plugin exports:
 /// `extern "C" fn rustysalamander_plugin() -> *const Descriptor`.
@@ -252,6 +269,14 @@ pub struct Descriptor {
     pub start: unsafe extern "C" fn(host: *const HostApi, dir: Wide, error: *const StrOut) -> *mut c_void,
     /// The functions of a started plugin; each takes what `start` returned.
     pub vtable: *const VTable,
+    /// Version 5: the plugin's own version ([`crate::Plugin::VERSION`]).
+    pub plugin_version: Str,
+    /// Version 5: [`crate::Updates::repo`].
+    pub update_repo: Str,
+    /// Version 5: [`crate::Updates::tag`].
+    pub update_tag: Str,
+    /// Version 5: [`crate::Updates::changelog`].
+    pub changelog: Str,
 }
 
 /// The functions of a started plugin; see [`crate::FolderPlugin`] for what
@@ -296,6 +321,12 @@ pub struct VTable {
     /// [`crate::FolderPlugin::real_path`]: the path goes to `out`, which isn't
     /// called for `None`.
     pub real_path: unsafe extern "C" fn(this: *mut c_void, file: Wide, inner: Str, out: *const PathOut),
+    /// Version 5: [`crate::FolderPlugin::openers`], sent to `out` encoded by
+    /// [`crate::ui`] (id, kind, label and masks of each).
+    pub openers: unsafe extern "C" fn(this: *mut c_void, out: *const StrOut),
+    /// Version 5: [`crate::FolderPlugin::open_file`]; `options` encoded by
+    /// [`crate::ui`].
+    pub open_file: unsafe extern "C" fn(this: *mut c_void, opener: Str, file: Wide, options: Str, error: *const StrOut) -> i32,
 }
 
 // Only pointers to static data and functions, or to data the program keeps

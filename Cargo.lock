@@ -2924,7 +2924,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sal-app"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 dependencies = [
  "chrono",
  "eframe",
@@ -2933,6 +2933,7 @@ dependencies = [
  "raw-window-handle",
  "sal-core",
  "sal-plugin-api",
+ "sal-ui",
  "semver",
  "serde",
  "serde_json",
@@ -2943,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "sal-core"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 dependencies = [
  "encoding_rs",
  "serde",
@@ -2955,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-7zip"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 dependencies = [
  "sal-plugin-api",
  "tempfile",
@@ -2963,11 +2964,11 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-api"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 
 [[package]]
 name = "sal-plugin-filelist"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 dependencies = [
  "sal-plugin-api",
  "tempfile",
@@ -2975,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-scp"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 dependencies = [
  "russh",
  "sal-plugin-api",
@@ -2985,11 +2986,32 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-search"
-version = "0.4.1-alpha"
+version = "0.5.0-alpha"
 dependencies = [
  "regex",
  "sal-plugin-api",
  "tempfile",
+ "windows 0.58.0",
+]
+
+[[package]]
+name = "sal-plugin-viewer"
+version = "0.5.0-alpha"
+dependencies = [
+ "eframe",
+ "sal-core",
+ "sal-plugin-api",
+ "sal-ui",
+ "tempfile",
+ "windows 0.58.0",
+ "winit",
+]
+
+[[package]]
+name = "sal-ui"
+version = "0.5.0-alpha"
+dependencies = [
+ "egui",
  "windows 0.58.0",
 ]
 

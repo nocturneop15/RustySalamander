@@ -1,43 +1,108 @@
-//! Updates: looking for a newer release on GitHub, and installing one next
-//! to this version.
+//! Updates: looking for newer releases of the program and of its plugins on
+//! GitHub, showing what changed, and installing them.
 //!
-//! The check asks the GitHub API for the repository's releases (alpha
-//! releases are pre-releases, so those count too) and picks the newest one
-//! whose version is higher than this program's and which has a Windows zip.
+//! The check asks the GitHub API for the releases of each repository that
+//! publishes something installed (alpha releases are pre-releases, so those
+//! count too):
 //!
-//! Installing never touches the running version: the zip is downloaded,
-//! unpacked into a new folder named by the version, next to this program's
-//! folder (`…\RustySalamander\0.2.1-alpha` → `…\RustySalamander\0.3.0-alpha`),
-//! and the settings are copied there: `config.toml` and the files plugins
-//! keep in their folders (such as the SCP plugin's `known_hosts`).
+//! - **the program**: tags `v<version>` with a `RustySalamander-…-win64.zip`;
+//! - **each plugin** that says where it is published
+//!   ([`sal_plugin_api::Updates`]): tags `<prefix><version>` with a zip
+//!   `<id>-<version>-api<interface>.zip`, offered only for an interface
+//!   version this program has.
+//!
+//! The changelog of an update is read from the repository at the release's
+//! tag: the sections between the installed version and the new one.
+//!
+//! Installing the program never touches the running version: the zip is
+//! downloaded, unpacked into a new folder named by the version, next to this
+//! program's folder (`…\RustySalamander\0.2.1-alpha` →
+//! `…\RustySalamander\0.3.0-alpha`), and the settings are copied there:
+//! `config.toml` and the files plugins keep in their folders (such as the
+//! SCP plugin's `known_hosts`).
+//!
+//! A plugin is updated in place, but its DLL is in use while the program
+//! runs: its zip is unpacked into `plugins\.updates\<folder>`, and the next
+//! start copies it over the plugin's folder before loading the plugins
+//! ([`apply_staged`]). What the plugin saved in its folder stays.
 //!
 //! Downloads go through WinHTTP, so the system's proxy settings and
 //! certificates apply.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
+use sal_plugin_api::abi;
 
-/// The GitHub repository releases come from.
+/// The GitHub repository the program's releases come from.
 pub const REPO: &str = "nocturneop15/RustySalamander";
 
-/// A release newer than this program.
+/// The folder in `plugins` where downloaded plugin updates wait for the
+/// next start.
+pub const STAGED: &str = ".updates";
+
+/// A release newer than what is installed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Release {
-    /// "0.3.0-alpha" (the tag without its "v").
+    /// "0.3.0-alpha" (the tag without its prefix).
     pub version: String,
+    /// The tag ("v0.3.0-alpha", "viewer-v0.6.0").
+    pub tag: String,
     /// The release's page on GitHub.
     pub page: String,
-    /// The Windows zip: its name, download address and size.
+    /// The zip: its name, download address and size.
     pub asset: String,
     pub asset_url: String,
     pub asset_size: u64,
 }
 
-pub type CheckResult = Result<Option<Release>, String>;
+/// What an update is for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Target {
+    /// RustySalamander itself.
+    Program,
+    /// A plugin: its id, its name as shown, and its folder.
+    Plugin { id: String, name: String, dir: PathBuf },
+}
+
+/// Something installed that has a newer release.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Update {
+    pub target: Target,
+    /// The version installed.
+    pub current: String,
+    pub release: Release,
+    /// The repository, and the changelog's path in it ("" for none).
+    pub repo: String,
+    pub changelog: String,
+}
+
+impl Update {
+    /// "RustySalamander", or the plugin's name.
+    pub fn name(&self) -> &str {
+        match &self.target {
+            Target::Program => "RustySalamander",
+            Target::Plugin { name, .. } => name,
+        }
+    }
+}
+
+/// A plugin as the check sees it.
+#[derive(Debug, Clone)]
+pub struct PluginSource {
+    pub id: String,
+    pub name: String,
+    pub dir: PathBuf,
+    pub version: String,
+    pub source: sal_plugin_api::host::Source,
+}
+
+/// The updates found (empty when everything is up to date).
+pub type CheckResult = Result<Vec<Update>, String>;
 
 /// A check running in the background; `manual` when asked for from the menu
 /// (then "no update" and errors are shown too).
@@ -47,11 +112,11 @@ pub struct Check {
 }
 
 impl Check {
-    pub fn start(ctx: &egui::Context, manual: bool) -> Check {
+    pub fn start(ctx: &egui::Context, manual: bool, plugins: Vec<PluginSource>) -> Check {
         let result = Arc::new(Mutex::new(None));
         let (out, ctx) = (result.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let r = check();
+            let r = check(&plugins, &mut |repo| releases(repo));
             crate::debuglog::write(format!("update check: {r:?}"));
             *out.lock().unwrap() = Some(r);
             ctx.request_repaint();
@@ -65,21 +130,79 @@ impl Check {
     }
 }
 
-/// Ask GitHub for a release newer than this program.
-pub fn check() -> CheckResult {
-    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=30");
+/// The release list of a repository, as the GitHub API sends it.
+fn releases(repo: &str) -> Result<String, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
     let mut body = Vec::new();
     http_get(&url, "application/vnd.github+json", &mut |chunk, _| {
         body.extend_from_slice(chunk);
         Ok(())
     })?;
-    newest(&String::from_utf8_lossy(&body), env!("CARGO_PKG_VERSION"))
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-/// The newest release in a GitHub API releases list that is newer than
-/// `current` and has a Windows zip (drafts are skipped).
-pub fn newest(json: &str, current: &str) -> CheckResult {
-    let current = semver::Version::parse(current).map_err(|e| e.to_string())?;
+/// Look for updates of the program and of `plugins`; `list` fetches the
+/// release list of a repository (once per repository). A repository that
+/// can't be read leaves its plugins out; only when nothing could be checked
+/// is that an error.
+pub fn check(plugins: &[PluginSource], list: &mut dyn FnMut(&str) -> Result<String, String>) -> CheckResult {
+    let mut lists: BTreeMap<String, Result<String, String>> = BTreeMap::new();
+    let mut get = |repo: &str| lists.entry(repo.to_owned()).or_insert_with(|| list(repo)).clone();
+    let mut found = Vec::new();
+    let program = get(REPO).and_then(|json| newest(&json, "v", env!("CARGO_PKG_VERSION"), &|name| program_zip(name)));
+    let mut error = None;
+    match program {
+        Ok(Some(release)) => found.push(Update { target: Target::Program, current: env!("CARGO_PKG_VERSION").into(), release, repo: REPO.into(), changelog: "CHANGELOG.md".into() }),
+        Ok(None) => {}
+        Err(e) => error = Some(e),
+    }
+    let mut checked_any = error.is_none();
+    for p in plugins {
+        let id = p.id.clone();
+        let r = get(&p.source.repo).and_then(|json| newest(&json, &p.source.tag, &p.version, &|name| plugin_zip(&id, name)));
+        match r {
+            Ok(Some(release)) => {
+                checked_any = true;
+                found.push(Update {
+                    target: Target::Plugin { id: p.id.clone(), name: p.name.clone(), dir: p.dir.clone() },
+                    current: p.version.clone(),
+                    release,
+                    repo: p.source.repo.clone(),
+                    changelog: p.source.changelog.clone(),
+                });
+            }
+            Ok(None) => checked_any = true,
+            Err(e) => {
+                crate::debuglog::write(format!("update check of {}: {e}", p.id));
+                error.get_or_insert(e);
+            }
+        }
+    }
+    match error {
+        Some(e) if !checked_any => Err(e),
+        _ => Ok(found),
+    }
+}
+
+/// Whether `name` is the program's Windows zip.
+fn program_zip(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.starts_with("rustysalamander-") && n.ends_with("-win64.zip")
+}
+
+/// Whether `name` is a zip of the plugin `id` built for an interface this
+/// program has: `<id>-<version>-api<n>.zip`.
+fn plugin_zip(id: &str, name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(&format!("{id}-")).and_then(|r| r.strip_suffix(".zip")) else { return false };
+    let Some((_, api)) = rest.rsplit_once("-api") else { return false };
+    api.parse::<u32>().is_ok_and(|n| (abi::MIN_VERSION..=abi::VERSION).contains(&n))
+}
+
+/// The newest release in a GitHub API releases list whose tag is `prefix`
+/// and a version higher than `current`, with a zip `accept` takes (drafts
+/// are skipped).
+pub fn newest(json: &str, prefix: &str, current: &str, accept: &dyn Fn(&str) -> bool) -> Result<Option<Release>, String> {
+    let current = semver::Version::parse(current).map_err(|e| format!("{current}: {e}"))?;
     let list: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("GitHub: {e}"))?;
     let Some(list) = list.as_array() else {
         let msg = list.get("message").and_then(|m| m.as_str()).unwrap_or("unexpected answer");
@@ -91,14 +214,16 @@ pub fn newest(json: &str, current: &str) -> CheckResult {
             continue;
         }
         let tag = r["tag_name"].as_str().unwrap_or_default();
-        let Ok(v) = semver::Version::parse(tag.trim_start_matches('v')) else { continue };
+        let Some(version) = tag.strip_prefix(prefix) else { continue };
+        let Ok(v) = semver::Version::parse(version) else { continue };
         if v <= current || best.as_ref().is_some_and(|(b, _)| v <= *b) {
             continue;
         }
         let assets = r["assets"].as_array().map(Vec::as_slice).unwrap_or_default();
-        let Some(zip) = assets.iter().find(|a| a["name"].as_str().is_some_and(|n| n.to_ascii_lowercase().ends_with("-win64.zip"))) else { continue };
+        let Some(zip) = assets.iter().find(|a| a["name"].as_str().is_some_and(accept)) else { continue };
         let release = Release {
-            version: tag.trim_start_matches('v').to_owned(),
+            version: version.to_owned(),
+            tag: tag.to_owned(),
             page: r["html_url"].as_str().unwrap_or_default().to_owned(),
             asset: zip["name"].as_str().unwrap_or_default().to_owned(),
             asset_url: zip["browser_download_url"].as_str().unwrap_or_default().to_owned(),
@@ -109,11 +234,58 @@ pub fn newest(json: &str, current: &str) -> CheckResult {
     Ok(best.map(|(_, r)| r))
 }
 
-/// Where a release is installed: a folder named by its version, next to the
-/// folder this program runs from.
+/// Where a program release is installed: a folder named by its version,
+/// next to the folder this program runs from.
 pub fn target_dir(release: &Release) -> Option<PathBuf> {
     let app = sal_core::config::app_dir()?;
     Some(app.parent()?.join(&release.version))
+}
+
+// ---------------------------------------------------------------- changelog
+
+/// A changelog being read in the background.
+pub type Changelog = Arc<Mutex<Option<Result<String, String>>>>;
+
+/// Read what changed from `update.current` to the new version, from the
+/// changelog at the release's tag.
+pub fn changelog(ctx: &egui::Context, update: &Update) -> Changelog {
+    let out: Changelog = Arc::new(Mutex::new(None));
+    let (slot, ctx, u) = (out.clone(), ctx.clone(), update.clone());
+    std::thread::spawn(move || {
+        let r = if u.changelog.is_empty() {
+            Err("there is no changelog".to_owned())
+        } else {
+            let url = format!("https://raw.githubusercontent.com/{}/{}/{}", u.repo, u.release.tag, u.changelog);
+            let mut body = Vec::new();
+            http_get(&url, "text/plain", &mut |c, _| {
+                body.extend_from_slice(c);
+                Ok(())
+            })
+            .map(|()| changes_between(&String::from_utf8_lossy(&body), &u.current, &u.release.version))
+        };
+        *slot.lock().unwrap() = Some(r);
+        ctx.request_repaint();
+    });
+    out
+}
+
+/// The sections of a changelog (`## <version> …` headings) for versions
+/// after `current` up to `new`, newest first as written.
+pub fn changes_between(text: &str, current: &str, new: &str) -> String {
+    let (Ok(current), Ok(new)) = (semver::Version::parse(current), semver::Version::parse(new)) else { return String::new() };
+    let mut out = String::new();
+    let mut keep = false;
+    for line in text.lines() {
+        if let Some(head) = line.strip_prefix("## ") {
+            let v = head.split_whitespace().next().unwrap_or_default().trim_start_matches('v');
+            keep = semver::Version::parse(v).is_ok_and(|v| v > current && v <= new);
+        }
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.trim_end().to_owned()
 }
 
 // ---------------------------------------------------------------- installing
@@ -125,19 +297,24 @@ pub enum Progress {
         total: u64,
     },
     Unpacking,
-    /// Installed in `folder`; `copied` are the settings files taken over.
+    /// The program installed in `folder`; `copied` are the settings files
+    /// taken over.
     Done {
         folder: PathBuf,
         copied: Vec<String>,
     },
+    /// A plugin's update waits for the next start.
+    Staged,
     Failed(String),
 }
 
 pub type Install = Arc<Mutex<Progress>>;
 
-/// Download `release`, unpack it next to this version and copy the settings
-/// over, on a background thread.
-pub fn install(ctx: &egui::Context, release: Release) -> Install {
+/// Download and install `update` on a background thread: the program next
+/// to this version (with the settings copied over), a plugin staged for
+/// the next start.
+pub fn install(ctx: &egui::Context, update: Update) -> Install {
+    let release = update.release.clone();
     let state = Arc::new(Mutex::new(Progress::Downloading { done: 0, total: release.asset_size }));
     let (out, ctx) = (state.clone(), ctx.clone());
     std::thread::spawn(move || {
@@ -146,11 +323,16 @@ pub fn install(ctx: &egui::Context, release: Release) -> Install {
             ctx.request_repaint();
         };
         let r = (|| -> Result<Progress, String> {
-            let app = sal_core::config::app_dir().ok_or("the program's folder is unknown")?;
-            let target = target_dir(&release).ok_or("the program's folder has no parent folder")?;
-            if target.exists() {
-                return Err(format!("{} already exists.", target.display()));
-            }
+            let target = match &update.target {
+                Target::Program => {
+                    let target = target_dir(&release).ok_or("the program's folder has no parent folder")?;
+                    if target.exists() {
+                        return Err(format!("{} already exists.", target.display()));
+                    }
+                    target
+                }
+                Target::Plugin { dir, .. } => staged_dir(dir).ok_or("the plugin's folder is unknown")?,
+            };
             let mut zip = Vec::with_capacity(release.asset_size as usize);
             let mut last = 0;
             http_get(&release.asset_url, "application/octet-stream", &mut |chunk, total| {
@@ -166,14 +348,78 @@ pub fn install(ctx: &egui::Context, release: Release) -> Install {
                 return Err(format!("the download is incomplete ({} of {} bytes)", zip.len(), release.asset_size));
             }
             set(Progress::Unpacking);
-            unpack_release(&zip, &target)?;
-            let copied = migrate(&app, &target).map_err(|e| format!("copying the settings: {e}"))?;
-            Ok(Progress::Done { folder: target, copied })
+            match &update.target {
+                Target::Program => {
+                    unpack_release(&zip, &target)?;
+                    let app = sal_core::config::app_dir().ok_or("the program's folder is unknown")?;
+                    let copied = migrate(&app, &target).map_err(|e| format!("copying the settings: {e}"))?;
+                    Ok(Progress::Done { folder: target, copied })
+                }
+                Target::Plugin { .. } => {
+                    let _ = fs::remove_dir_all(&target);
+                    if let Some(dir) = target.parent() {
+                        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                    }
+                    unpack_plugin(&zip, &target)?;
+                    Ok(Progress::Staged)
+                }
+            }
         })();
-        crate::debuglog::write(format!("update install: {r:?}"));
+        crate::debuglog::write(format!("update install of {}: {r:?}", update.name()));
         set(r.unwrap_or_else(Progress::Failed));
     });
     state
+}
+
+/// Where the update of the plugin in `dir` waits: `plugins\.updates\<folder>`.
+pub fn staged_dir(dir: &Path) -> Option<PathBuf> {
+    Some(dir.parent()?.join(STAGED).join(dir.file_name()?))
+}
+
+/// Copy the plugin updates waiting in `plugins\.updates` over their
+/// folders, before the plugins are loaded. A plugin's DLL goes first, so a
+/// plugin still in use elsewhere (another running copy of the program)
+/// keeps its update for the next start, unchanged. Returns what was
+/// updated, and what failed.
+pub fn apply_staged(plugins: &Path) -> (Vec<String>, Vec<String>) {
+    let (mut done, mut failed) = (Vec::new(), Vec::new());
+    let Ok(dirs) = fs::read_dir(plugins.join(STAGED)) else { return (done, failed) };
+    for d in dirs.flatten().filter(|d| d.path().is_dir()) {
+        let name = d.file_name().to_string_lossy().into_owned();
+        let target = plugins.join(&name);
+        let mut files = Vec::new();
+        list_files(&d.path(), Path::new(""), &mut files);
+        // programs first: the one that is in use fails before anything changed
+        files.sort_by_key(|f| !matches!(f.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("spl" | "dll" | "exe")));
+        let r = files.iter().try_for_each(|rel| {
+            let to = target.join(rel);
+            if let Some(dir) = to.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            fs::copy(d.path().join(rel), &to).map(|_| ())
+        });
+        match r {
+            Ok(()) => {
+                let _ = fs::remove_dir_all(d.path());
+                done.push(name);
+            }
+            Err(e) => failed.push(format!("{name}: {e}")),
+        }
+    }
+    let _ = fs::remove_dir(plugins.join(STAGED));
+    (done, failed)
+}
+
+fn list_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(dir) = fs::read_dir(root.join(rel)) else { return };
+    for e in dir.flatten() {
+        let rel = rel.join(e.file_name());
+        if e.path().is_dir() {
+            list_files(root, &rel, out);
+        } else {
+            out.push(rel);
+        }
+    }
 }
 
 /// Unpack a release zip into `target` (which must not exist yet): into a
@@ -181,6 +427,19 @@ pub fn install(ctx: &egui::Context, release: Release) -> Install {
 /// leaves no half-installed version behind. The zip's single top folder
 /// (`RustySalamander-<version>-win64`) is left out.
 pub fn unpack_release(zip: &[u8], target: &Path) -> Result<(), String> {
+    unpack(zip, target, &|stage| stage.join("rustysalamander.exe").is_file(), "the zip has no rustysalamander.exe")
+}
+
+/// Unpack a plugin's zip into `target` (a staging folder that must not
+/// exist yet); it must hold the plugin (`*.spl`).
+pub fn unpack_plugin(zip: &[u8], target: &Path) -> Result<(), String> {
+    let has_plugin = |stage: &Path| {
+        fs::read_dir(stage).is_ok_and(|d| d.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case(abi::EXTENSION))))
+    };
+    unpack(zip, target, &has_plugin, "the zip has no plugin")
+}
+
+fn unpack(zip: &[u8], target: &Path, complete: &dyn Fn(&Path) -> bool, incomplete: &str) -> Result<(), String> {
     let entries = zip_entries(zip)?;
     let name = target.file_name().ok_or("no folder name")?.to_string_lossy();
     let stage = target.with_file_name(format!(".{name}.partial"));
@@ -207,8 +466,8 @@ pub fn unpack_release(zip: &[u8], target: &Path) -> Result<(), String> {
             let data = zip_read(zip, e)?;
             fs::write(&path, data).map_err(|err| format!("{}: {err}", path.display()))?;
         }
-        if !stage.join("rustysalamander.exe").is_file() {
-            return Err("the zip has no rustysalamander.exe".into());
+        if !complete(&stage) {
+            return Err(incomplete.into());
         }
         fs::rename(&stage, target).map_err(|err| format!("{}: {err}", target.display()))
     })();
@@ -233,8 +492,9 @@ pub fn migrate(old: &Path, new: &Path) -> io::Result<Vec<String>> {
         for de in dir.flatten() {
             let rel = rel.join(de.file_name());
             if de.file_type()?.is_dir() {
-                // translations come with the program
-                if de.file_name() != "lang" {
+                // translations come with the program; updates waiting for
+                // the next start (plugins\.updates) belong to this version
+                if de.file_name() != "lang" && !de.file_name().to_string_lossy().starts_with('.') {
                     walk(old, new, &rel, copied)?;
                 }
                 continue;
@@ -431,17 +691,108 @@ mod tests {
         {"tag_name": "nightly", "draft": false, "html_url": "q", "assets": []}
     ]"#;
 
+    fn program(json: &str, current: &str) -> Result<Option<Release>, String> {
+        newest(json, "v", current, &program_zip)
+    }
+
     #[test]
     fn newest_release_is_picked() {
         // drafts and releases without a zip are skipped
-        let r = newest(LIST, "0.2.1-alpha").unwrap().unwrap();
-        assert_eq!(r.version, "0.2.2-alpha");
+        let r = program(LIST, "0.2.1-alpha").unwrap().unwrap();
+        assert_eq!((r.version.as_str(), r.tag.as_str()), ("0.2.2-alpha", "v0.2.2-alpha"));
         assert_eq!(r.page, "https://github.com/r/releases/tag/v0.2.2-alpha");
         assert_eq!((r.asset_url.as_str(), r.asset_size), ("https://github.com/r/z.zip", 7126108));
         // nothing newer
-        assert_eq!(newest(LIST, "0.2.2-alpha").unwrap(), None);
-        assert_eq!(newest(LIST, "0.2.2").unwrap(), None, "a final release is newer than its alphas");
-        assert!(newest(r#"{"message": "API rate limit exceeded"}"#, "0.1.0").unwrap_err().contains("rate limit"));
+        assert_eq!(program(LIST, "0.2.2-alpha").unwrap(), None);
+        assert_eq!(program(LIST, "0.2.2").unwrap(), None, "a final release is newer than its alphas");
+        assert!(program(r#"{"message": "API rate limit exceeded"}"#, "0.1.0").unwrap_err().contains("rate limit"));
+    }
+
+    /// Plugin releases live beside the program's, told apart by their tags;
+    /// a zip for an interface this program lacks is not offered.
+    #[test]
+    fn plugin_releases() {
+        let json = format!(
+            r#"[
+            {{"tag_name": "viewer-v0.7.0", "draft": false, "html_url": "p7", "assets": [{{"name": "viewer-0.7.0-api{newer}.zip", "browser_download_url": "x7", "size": 3}}]}},
+            {{"tag_name": "viewer-v0.6.0", "draft": false, "html_url": "p6", "assets": [{{"name": "viewer-0.6.0-api{now}.zip", "browser_download_url": "x6", "size": 2}}]}},
+            {{"tag_name": "search-v9.0.0", "draft": false, "html_url": "s", "assets": [{{"name": "search-9.0.0-api{now}.zip", "browser_download_url": "s", "size": 1}}]}},
+            {{"tag_name": "v9.0.0", "draft": false, "html_url": "v", "assets": [{{"name": "RustySalamander-9.0.0-win64.zip", "browser_download_url": "v", "size": 1}}]}}
+        ]"#,
+            now = abi::VERSION,
+            newer = abi::VERSION + 1
+        );
+        let source = |tag: &str| sal_plugin_api::host::Source { repo: "me/rs".into(), tag: tag.into(), changelog: "plugins/x/CHANGELOG.md".into() };
+        let plugins = [
+            PluginSource { id: "viewer".into(), name: "Prohlížeč".into(), dir: PathBuf::from(r"C:\rs\plugins\viewer"), version: "0.5.0".into(), source: source("viewer-v") },
+            PluginSource { id: "search".into(), name: "Hledání".into(), dir: PathBuf::from(r"C:\rs\plugins\search"), version: "9.0.0".into(), source: source("search-v") },
+        ];
+        let mut asked = Vec::new();
+        let found = check(&plugins, &mut |repo| {
+            asked.push(repo.to_owned());
+            if repo == REPO {
+                Err("offline".into())
+            } else {
+                Ok(json.clone())
+            }
+        })
+        .unwrap();
+        assert_eq!(asked, [REPO, "me/rs"], "each repository once");
+        assert_eq!(found.len(), 1, "the program's list failed, the search plugin is up to date");
+        let u = &found[0];
+        assert_eq!((u.name(), u.current.as_str(), u.release.version.as_str(), u.release.tag.as_str()), ("Prohlížeč", "0.5.0", "0.6.0", "viewer-v0.6.0"));
+        assert_eq!(u.release.asset, format!("viewer-0.6.0-api{}.zip", abi::VERSION), "not the zip for a newer interface");
+        // nothing could be read: an error
+        assert_eq!(check(&plugins, &mut |_| Err("offline".into())).unwrap_err(), "offline");
+        assert!(!plugin_zip("viewer", "viewer-0.6.0.zip") && !plugin_zip("viewer", "viewerx-0.6.0-api5.zip"));
+    }
+
+    #[test]
+    fn changes_since_the_installed_version() {
+        let log = "# Changelog\n\n## 0.6.0 (2026-11-02)\n\n- **Search** in the viewer.\n\n## 0.5.1\n\n- Fix.\n\n## 0.5.0-alpha (2026-10-31)\n\n- First.\n";
+        assert_eq!(changes_between(log, "0.5.0-alpha", "0.6.0"), "## 0.6.0 (2026-11-02)\n\n- **Search** in the viewer.\n\n## 0.5.1\n\n- Fix.");
+        assert_eq!(changes_between(log, "0.5.1", "0.5.1"), "");
+        assert_eq!(changes_between(log, "0.4.0", "0.5.0-alpha"), "## 0.5.0-alpha (2026-10-31)\n\n- First.");
+    }
+
+    /// A plugin's update waits in plugins\.updates and replaces its files at
+    /// the next start; what the plugin saved stays.
+    #[cfg(windows)]
+    #[test]
+    fn plugin_updates_wait_for_the_next_start() {
+        let t = tempfile::tempdir().unwrap();
+        let plugins = t.path().join("plugins");
+        let dir = plugins.join("scp");
+        fs::create_dir_all(dir.join("lang")).unwrap();
+        fs::write(dir.join("scp.spl"), "old").unwrap();
+        fs::write(dir.join("lang").join("cs.toml"), "old").unwrap();
+        fs::write(dir.join("known_hosts"), "keys").unwrap();
+        // the plugin's zip, as released: its folder
+        let src = t.path().join("zip").join("scp");
+        fs::create_dir_all(src.join("lang")).unwrap();
+        fs::write(src.join("scp.spl"), "new").unwrap();
+        fs::write(src.join("lang").join("cs.toml"), "nové").unwrap();
+        let zip = t.path().join("scp-0.6.0-api5.zip");
+        let ok = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("Compress-Archive -Path '{}' -DestinationPath '{}'", src.display(), zip.display())])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let staged = staged_dir(&dir).unwrap();
+        assert_eq!(staged, plugins.join(".updates").join("scp"));
+        fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        unpack_plugin(&fs::read(&zip).unwrap(), &staged).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("scp.spl")).unwrap(), "old", "nothing changes before the next start");
+        assert!(unpack_plugin(&fs::read(&zip).unwrap()[..100], &plugins.join(".updates").join("x")).is_err());
+
+        let (done, failed) = apply_staged(&plugins);
+        assert_eq!((done, failed), (vec!["scp".to_owned()], Vec::<String>::new()));
+        assert_eq!(fs::read_to_string(dir.join("scp.spl")).unwrap(), "new");
+        assert_eq!(fs::read_to_string(dir.join("lang").join("cs.toml")).unwrap(), "nové");
+        assert_eq!(fs::read_to_string(dir.join("known_hosts")).unwrap(), "keys", "the plugin's own files stay");
+        assert!(!plugins.join(".updates").exists());
+        assert_eq!(apply_staged(&plugins), (vec![], vec![]));
     }
 
     /// A zip in the release's layout, written by a real zip writer
@@ -494,6 +845,8 @@ mod tests {
         fs::write(old.join("plugins").join("scp").join("last-connection"), "server").unwrap();
         fs::write(old.join("plugins").join("scp").join("scp.spl"), "old plugin").unwrap();
         fs::write(old.join("plugins").join("scp").join("lang").join("cs.toml"), "old").unwrap();
+        fs::create_dir_all(old.join("plugins").join(".updates").join("scp")).unwrap();
+        fs::write(old.join("plugins").join(".updates").join("scp").join("CHANGELOG.md"), "staged").unwrap();
         let mut copied = migrate(&old, &target).unwrap();
         copied.sort();
         assert_eq!(copied, ["config.toml", r"plugins\scp\known_hosts", r"plugins\scp\last-connection"]);
@@ -526,7 +879,7 @@ mod tests {
             .unwrap();
             String::from_utf8(body).unwrap()
         };
-        let r = newest(&list, "0.0.1").unwrap().expect("a release with a zip");
+        let r = newest(&list, "v", "0.0.1", &program_zip).unwrap().expect("a release with a zip");
         assert!(r.asset_size > 1_000_000, "{r:?}");
         let mut got = 0u64;
         http_get(&r.asset_url, "application/octet-stream", &mut |c, _| {

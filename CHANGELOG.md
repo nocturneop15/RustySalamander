@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0-alpha (2026-10-31)
+
+### Plugins
+
+- **The viewer is a plugin:** the F3 text and hex viewer moved out of the program into the Viewer plugin (`plugins\viewer\viewer.spl`), with the same encodings, hex view, word wrap and limits. Its windows are its own and follow the program's theme, fonts and scroll bars; several files open in several windows. Turned off, F3 says how to get a viewer back.
+- **Any plugin can view or edit files:** plugins register as the viewer (F3) or editor (F4) of the files their masks match; F3 and F4 use the first one, unless Settings names a program of your own. Without an editor plugin F4 opens Notepad, as before. Settings → Plugins shows what each plugin views or edits.
+- **Plugins have their own versions:** each plugin has a version of its own and its own changelog, shown in Settings → Plugins with the interface it was built for. The 7-Zip, SCP, search and Viewer plugins start at 0.5.0-alpha.
+- **Plugin interface version 5:** the descriptor tells the plugin's version and where it is published; `openers` and `open_file` are new. From now on the interface only grows and the program keeps running plugins built for older versions it supports; plugins built for 0.4 must be rebuilt once more.
+
+### Updates
+
+- **Plugins are updated too:** the update check also looks for newer releases of each plugin (tagged `<plugin>-v<version>`, with a zip for the plugin interface this program has). A plugin's update is downloaded into `plugins\.updates` and installed at the next start (**Restart now**), keeping what the plugin saved in its folder.
+- **Show changelog:** each update in the update window can show what changed between your version and the new one before you install it, read from the changelog at the new release.
+- **One window for all:** the update window lists the program and the plugins with updates, each with its versions, its release page, its changelog and its own Update now.
+
 ## 0.4.1-alpha (2026-10-31)
 
 - **New search replaces the old one:** New search… in the results window (or Find files again) no longer adds both views of the previous search to Searches in the drive selector. The previous results go as if their window was closed; a view stays only if a panel shows it.

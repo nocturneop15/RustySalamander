@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use sal_plugin_api::{export_plugin, join_inner, n_, trf, under, FolderPlugin, Index, Item, Plugin, Progress, ATTR_DIRECTORY};
+use sal_plugin_api::{export_plugin, join_inner, n_, trf, under, FolderPlugin, Index, Item, Plugin, Progress, Updates, ATTR_DIRECTORY};
 
 use self::library::{Library, OpenArchive, UpdateItem};
 
@@ -111,6 +111,8 @@ impl SevenZip {
 
 impl Plugin for SevenZip {
     const ID: &'static str = "7zip";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    const UPDATES: Updates = Updates { repo: "nocturneop15/RustySalamander", tag: "7zip-v", changelog: "plugins/sevenzip/CHANGELOG.md" };
     const NAME: &'static str = n_("7-Zip archives");
     const DESCRIPTION: &'static str =
         n_("Opens zip, 7z, rar, tar, gz, iso, cab and other archives as folders, through 7-Zip's library (7z.dll); 7z, zip, tar and wim archives can also be changed.");

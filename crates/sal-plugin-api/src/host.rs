@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::abi::*;
-use crate::{Activity, Command, FolderPlugin, Index, Item, Progress, Reply, Values};
+use crate::{Activity, Command, FolderPlugin, Index, Item, Opener, Progress, Reply, Values};
 
 /// Who a plugin is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,21 +19,49 @@ pub struct Info {
     pub name: String,
     /// What it does, in English as the plugin gives it.
     pub description: String,
+    /// Its own version ([`crate::Plugin::VERSION`]).
+    pub version: String,
+    /// The interface version it was built for ([`Descriptor::version`]).
+    pub interface: u32,
+    /// Where newer versions are published, if anywhere.
+    pub updates: Option<Source>,
 }
 
-/// What `desc` says about its plugin; an error for another version.
+/// [`crate::Updates`] of a plugin, as the program keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    /// `owner/name` of the GitHub repository.
+    pub repo: String,
+    /// What the tags of the plugin's releases start with.
+    pub tag: String,
+    /// The changelog's path in the repository; empty for none.
+    pub changelog: String,
+}
+
+/// What `desc` says about its plugin; an error for an interface version the
+/// program doesn't have.
 ///
 /// # Safety
 /// `desc` must be a plugin's descriptor (from its [`ENTRY`]).
 pub unsafe fn info(desc: &'static Descriptor) -> Result<Info, String> {
-    if desc.version != VERSION {
-        return Err(format!("made for another version of the program (interface {}, this one has {VERSION})", desc.version));
+    if !(MIN_VERSION..=VERSION).contains(&desc.version) {
+        let range = if MIN_VERSION == VERSION { VERSION.to_string() } else { format!("{MIN_VERSION} to {VERSION}") };
+        return Err(format!("made for another version of the program (interface {}, this one has {range})", desc.version));
     }
     let id = desc.id.get().to_owned();
     if id.is_empty() {
         return Err("the plugin has no id".into());
     }
-    Ok(Info { id, name: desc.name.get().to_owned(), description: desc.description.get().to_owned() })
+    let repo = desc.update_repo.get().to_owned();
+    let updates = (!repo.is_empty()).then(|| Source { repo, tag: desc.update_tag.get().to_owned(), changelog: desc.changelog.get().to_owned() });
+    Ok(Info {
+        id,
+        name: desc.name.get().to_owned(),
+        description: desc.description.get().to_owned(),
+        version: desc.plugin_version.get().to_owned(),
+        interface: desc.version,
+        updates,
+    })
 }
 
 /// Start the plugin of `desc`; `dir` is its folder.
@@ -41,21 +69,31 @@ pub unsafe fn info(desc: &'static Descriptor) -> Result<Info, String> {
 /// # Safety
 /// `desc` must be a plugin's descriptor that [`info`] accepted.
 pub unsafe fn start(desc: &'static Descriptor, host: &'static HostApi, dir: &Path) -> Result<Arc<dyn FolderPlugin>, String> {
-    let id = info(desc)?.id;
+    let Info { id, interface, .. } = info(desc)?;
     let dir = Wide::encode(dir);
     let mut error = String::new();
     let this = (desc.start)(host, Wide::of(&dir), &StrOut::new(&mut error));
     if this.is_null() {
         return Err(if error.is_empty() { "the plugin didn't start".into() } else { error });
     }
-    Ok(Arc::new(Remote { id, this, vt: &*desc.vtable }))
+    Ok(Arc::new(Remote { id, interface, this, vt: &*desc.vtable }))
 }
 
 /// A started plugin in a DLL.
 struct Remote {
     id: String,
+    /// The interface version it was built for: functions added later aren't
+    /// in its [`VTable`].
+    interface: u32,
     this: *mut c_void,
     vt: &'static VTable,
+}
+
+impl Remote {
+    /// Whether its [`VTable`] has the functions added in `version`.
+    fn has(&self, version: u32) -> bool {
+        self.interface >= version
+    }
 }
 
 // The plugin is a FolderPlugin on its side, which is Send + Sync.
@@ -191,6 +229,24 @@ impl FolderPlugin for Remote {
         unsafe { (self.vt.real_path)(self.this, Wide::of(&file), Str::new(inner), &PathOut::new(&mut out)) };
         out
     }
+
+    fn openers(&self) -> Vec<Opener> {
+        if !self.has(5) {
+            return Vec::new();
+        }
+        let mut s = String::new();
+        unsafe { (self.vt.openers)(self.this, &StrOut::new(&mut s)) };
+        crate::ui::decode_openers(&s)
+    }
+
+    fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {
+        if !self.has(5) {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let file = Wide::encode(file);
+        let options = crate::ui::encode_values(options);
+        call(|e| unsafe { (self.vt.open_file)(self.this, Str::new(opener), Wide::of(&file), Str::new(&options), e) })
+    }
 }
 
 #[cfg(test)]
@@ -285,12 +341,24 @@ mod tests {
         fn real_path(&self, _: &Path, inner: &str) -> Option<PathBuf> {
             (!inner.is_empty()).then(|| PathBuf::from(r"D:\data").join(inner))
         }
+        fn openers(&self) -> Vec<Opener> {
+            vec![Opener { id: "mem".into(), kind: crate::OpenKind::View, label: "Paměť".into(), masks: "*.mem".into() }]
+        }
+        fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {
+            if opener != "mem" {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "no such opener"));
+            }
+            self.closed.lock().unwrap().push(file.join(&options["theme"]));
+            Ok(())
+        }
     }
 
     impl Plugin for Mem {
         const ID: &'static str = "mem";
         const NAME: &'static str = "Memory";
         const DESCRIPTION: &'static str = "Files in memory.";
+        const VERSION: &'static str = "1.2.3-beta";
+        const UPDATES: crate::Updates = crate::Updates { repo: "me/mem", tag: "mem-v", changelog: "CHANGELOG.md" };
         fn start(dir: &Path) -> Result<Self, String> {
             if dir.ends_with("bad") {
                 return Err(format!("{} is bad", dir.display()));
@@ -313,7 +381,17 @@ mod tests {
     #[test]
     fn through_the_c_interface() {
         let info = unsafe { info(&DESCRIPTOR) }.unwrap();
-        assert_eq!(info, Info { id: "mem".into(), name: "Memory".into(), description: "Files in memory.".into() });
+        assert_eq!(
+            info,
+            Info {
+                id: "mem".into(),
+                name: "Memory".into(),
+                description: "Files in memory.".into(),
+                version: "1.2.3-beta".into(),
+                interface: VERSION,
+                updates: Some(Source { repo: "me/mem".into(), tag: "mem-v".into(), changelog: "CHANGELOG.md".into() }),
+            }
+        );
         assert_eq!(unsafe { start(&DESCRIPTOR, &HOST, Path::new("C:\\x\\bad")) }.err().unwrap(), "C:\\x\\bad is bad");
         let p = unsafe { start(&DESCRIPTOR, &HOST, Path::new("C:\\plugins\\mem")) }.unwrap();
         let t = std::env::temp_dir().join(format!("sal-plugin-api-{}", std::process::id()));
@@ -368,6 +446,10 @@ mod tests {
         assert!(!p.activity(&root).running);
         assert_eq!(p.real_path(&root, "složka\\日本.txt"), Some(PathBuf::from(r"D:\data\složka\日本.txt")));
         assert_eq!(p.real_path(&root, ""), None);
+        // viewers and editors
+        assert_eq!(p.openers()[0].masks, "*.mem");
+        p.open_file("mem", Path::new(r"C:\x\a 🦎.mem"), &[("theme".to_owned(), "dark".to_owned())].into()).unwrap();
+        assert!(p.open_file("other", file, &Values::new()).is_err());
         p.close(&m.root());
         drop(p);
         std::fs::remove_dir_all(&t).unwrap();
@@ -375,7 +457,9 @@ mod tests {
 
     #[test]
     fn other_versions_are_refused() {
-        static OLD: Descriptor = Descriptor { version: VERSION + 1, ..crate::export::descriptor::<Mem>(&VTABLE) };
-        assert!(unsafe { info(&OLD) }.unwrap_err().contains("another version"));
+        static NEWER: Descriptor = Descriptor { version: VERSION + 1, ..crate::export::descriptor::<Mem>(&VTABLE) };
+        assert!(unsafe { info(&NEWER) }.unwrap_err().contains("another version"));
+        static OLDER: Descriptor = Descriptor { version: MIN_VERSION - 1, ..crate::export::descriptor::<Mem>(&VTABLE) };
+        assert!(unsafe { info(&OLDER) }.unwrap_err().contains("another version"));
     }
 }

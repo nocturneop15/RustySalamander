@@ -18,6 +18,13 @@
 //! - **connections** it opens from a command in the Plugins menu, such as a
 //!   server: a [`Mount`] with a virtual root, shown as `scp://user@host/dir`.
 //!
+//! Any plugin can also be a **viewer or editor** of files ([`Opener`]): F3
+//! and F4 then open matching files with it, in a window of its own.
+//!
+//! Each plugin has its own **version** ([`Plugin::VERSION`]) and may say
+//! where newer ones are published ([`Plugin::UPDATES`]); the program's
+//! update check looks there too.
+//!
 //! The guide for plugin authors, with complete examples, is
 //! `docs/PLUGINS.md` in the repository.
 
@@ -36,7 +43,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::SystemTime;
 
 pub use export::{n_, tr, trf};
-pub use ui::{Command, Field, FieldKind, Form, Mount, Reply, Results, Values};
+pub use ui::{Command, Field, FieldKind, Form, Mount, OpenKind, Opener, Reply, Results, Values};
 
 /// The attribute bit of folders (`FILE_ATTRIBUTE_DIRECTORY`).
 pub const ATTR_DIRECTORY: u32 = 0x10;
@@ -124,6 +131,43 @@ pub trait FolderPlugin: Send + Sync {
         let _ = (file, inner);
         None
     }
+
+    /// The plugin's viewers and editors of files; the default is none.
+    fn openers(&self) -> Vec<Opener> {
+        Vec::new()
+    }
+    /// Show `file` (a file on disk) with the opener `opener`, in a window of
+    /// the plugin's own; return as soon as it is on its way, without waiting
+    /// for the window to close. `options` says how the program looks, so
+    /// the window can match it: `theme` (`system`, `light` or `dark`),
+    /// `ui_font` and `mono_font` (font names, empty for the default),
+    /// `scrollbars` (`solid` or `floating`); and `temporary` (`1` when the
+    /// file is a temporary copy, from an archive or a server: changes to it
+    /// are not saved back).
+    fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {
+        let _ = (file, options);
+        Err(io::Error::new(io::ErrorKind::Unsupported, format!("unknown opener \"{opener}\"")))
+    }
+}
+
+/// Where newer versions of a plugin are published ([`Plugin::UPDATES`]):
+/// releases of a GitHub repository. A release is one of the plugin's when
+/// its tag is `tag` followed by a version (`viewer-v0.6.0`); its zip, named
+/// `<id>-<version>-api<interface>.zip`, holds the plugin's folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Updates {
+    /// `owner/name` of the repository; empty for no updates.
+    pub repo: &'static str,
+    /// What the tags of the plugin's releases start with (`viewer-v`).
+    pub tag: &'static str,
+    /// The changelog's path in the repository (`plugins/viewer/CHANGELOG.md`),
+    /// with a `## <version>` heading per version; empty for none.
+    pub changelog: &'static str,
+}
+
+impl Updates {
+    /// No updates are published.
+    pub const NONE: Updates = Updates { repo: "", tag: "", changelog: "" };
 }
 
 /// What a plugin is doing for one of its connections
@@ -147,6 +191,11 @@ pub trait Plugin: FolderPlugin + Sized + 'static {
     /// One or two sentences about what the plugin does, in English, marked
     /// with [`n_`].
     const DESCRIPTION: &'static str;
+    /// The plugin's own version, a semantic version
+    /// (`env!("CARGO_PKG_VERSION")`). It is independent of the program's.
+    const VERSION: &'static str;
+    /// Where newer versions are published; the default is nowhere.
+    const UPDATES: Updates = Updates::NONE;
     /// Start it; `dir` is the plugin's folder. The error says why it can't run.
     fn start(dir: &Path) -> Result<Self, String>;
 }

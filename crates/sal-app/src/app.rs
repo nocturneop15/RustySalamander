@@ -29,8 +29,9 @@ use crate::plugins::ops::{FolderOp, OpenAs};
 use crate::plugins::{self, FolderPlugin, Plugins};
 use crate::shellmenu::{self, Picked};
 use crate::shortcut::{key_letter, Shortcut};
-use crate::viewer::Viewer;
 use crate::worker::{format_duration, Job, JobKind, Jobs, Placement, PluginRef, Prompt, Reply};
+use sal_plugin_api::{OpenKind, Opener};
+use sal_ui::scroll_bar_visibility;
 
 const SELECTED_COLOR: Color32 = Color32::from_rgb(230, 40, 40);
 
@@ -131,10 +132,9 @@ enum Dialog {
         text: String,
     },
     Help,
-    /// A newer release; `install` while (or after) it is being installed.
+    /// Newer releases of the program and of plugins.
     Update {
-        release: crate::update::Release,
-        install: Option<crate::update::Install>,
+        rows: Vec<UpdateRow>,
     },
     /// `recording`: the next key combination is added to that action.
     Settings {
@@ -150,12 +150,31 @@ enum SettingsTab {
     Plugins,
 }
 
+/// An update in the update window: `install` while (or after) it is being
+/// installed, its changelog once asked for.
+struct UpdateRow {
+    update: crate::update::Update,
+    install: Option<crate::update::Install>,
+    changelog: Option<crate::update::Changelog>,
+    show_log: bool,
+}
+
+impl UpdateRow {
+    fn new(update: crate::update::Update) -> UpdateRow {
+        UpdateRow { update, install: None, changelog: None, show_log: false }
+    }
+}
+
 /// A plugin as Settings shows it.
 struct PluginRow {
     id: String,
     name: String,
     description: String,
     file: String,
+    /// Its own version and the interface it was built for.
+    version: String,
+    /// The viewers and editors it registers, one line each.
+    openers: Vec<String>,
     /// Running (its status) or why it couldn't start.
     state: Result<String, String>,
 }
@@ -277,8 +296,6 @@ pub struct App {
     plugin_task: Option<PluginTask>,
     /// Where the next operation goes (set by the Copy/Move dialog's queue buttons).
     queue_place: Placement,
-    viewers: Vec<Viewer>,
-    viewer_serial: u64,
     status: String,
     drives: Vec<Drive>,
     drives_loaded: Option<Instant>,
@@ -515,7 +532,7 @@ impl App {
         time("startup: font size, theme, scrollbars", || {
             apply_font_size(ctx, cfg.font_size);
             apply_theme(ctx, cfg.theme);
-            apply_scrollbars(ctx, cfg.always_show_scrollbars);
+            sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
         });
         let plugins = time("startup: plugins", || Plugins::load(&cfg.disabled_plugins));
         if crate::debuglog::enabled() {
@@ -530,7 +547,7 @@ impl App {
         let languages = time("startup: language list", crate::i18n::available);
         let active = usize::from(cfg.right_active);
         // the headless tests never go online
-        let update_check = (cfg.check_updates && !cfg!(test)).then(|| crate::update::Check::start(ctx, false));
+        let update_check = (cfg.check_updates && !cfg!(test)).then(|| crate::update::Check::start(ctx, false, update_sources(&plugins)));
         App {
             cfg,
             update_check,
@@ -547,8 +564,6 @@ impl App {
             plugins,
             plugin_task: None,
             queue_place: Placement::Now,
-            viewers: Vec::new(),
-            viewer_serial: 0,
             status: String::new(),
             drives: Vec::new(),
             drives_loaded: None,
@@ -833,8 +848,8 @@ impl App {
                 }
                 Some(real) => {
                     let r = match act {
-                        Act::View(_) => self.view_disk_file(real),
-                        Act::Edit(_) => self.edit_disk_file(&real),
+                        Act::View(_) => self.view_file(&real, false),
+                        Act::Edit(_) => self.edit_file(&real, false),
                         _ => shell_open(&real).map_err(|e| format!("{}: {e}", display_path(&real))),
                     };
                     if let Err(e) = r {
@@ -867,20 +882,52 @@ impl App {
         }
     }
 
-    /// F3 on a file on disk: the built-in viewer, or the one chosen in Settings.
-    fn view_disk_file(&mut self, p: PathBuf) -> Result<(), String> {
-        if self.cfg.use_custom_viewer && !self.cfg.viewer.trim().is_empty() {
-            return sal_core::shell::open_with_program(&self.cfg.viewer, &p).map_err(|e| format!("{}: {e}", display_path(&p)));
-        }
-        self.viewer_serial += 1;
-        self.viewers.push(Viewer::open(p, self.viewer_serial));
-        Ok(())
+    /// The first viewer or editor a plugin registered for `file`'s name, in
+    /// the order the plugins are listed.
+    fn opener_for(&self, kind: OpenKind, file: &Path) -> Option<(Arc<dyn FolderPlugin>, Opener)> {
+        let name = file.file_name()?.to_string_lossy().into_owned();
+        self.plugins.active.iter().find_map(|p| p.openers().into_iter().find(|o| o.kind == kind && o.matches(&name)).map(|o| (p.clone(), o)))
     }
 
-    /// F4 on a file on disk: Notepad, or the editor chosen in Settings.
-    fn edit_disk_file(&self, p: &Path) -> Result<(), String> {
+    /// What a plugin's viewer or editor is told about the program's look, so
+    /// its window matches; `temporary` when the file is a temporary copy.
+    fn opener_options(&self, temporary: bool) -> plugins::Values {
+        let theme = match self.cfg.theme {
+            ThemeMode::System => "system",
+            ThemeMode::Light => "light",
+            ThemeMode::Dark => "dark",
+        };
+        let scrollbars = if self.cfg.always_show_scrollbars { "solid" } else { "floating" };
+        [("theme", theme), ("ui_font", &self.cfg.ui_font), ("mono_font", &self.cfg.mono_font), ("scrollbars", scrollbars), ("temporary", if temporary { "1" } else { "" })]
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
+    }
+
+    /// F3 on a file on disk: the viewer chosen in Settings, or the plugin
+    /// registered for it (the Viewer plugin views every file).
+    fn view_file(&self, p: &Path, temporary: bool) -> Result<(), String> {
+        let err = |e: std::io::Error| format!("{}: {e}", display_path(p));
+        if self.cfg.use_custom_viewer && !self.cfg.viewer.trim().is_empty() {
+            return sal_core::shell::open_with_program(&self.cfg.viewer, p).map_err(err);
+        }
+        let Some((plugin, opener)) = self.opener_for(OpenKind::View, p) else {
+            return Err(tr("No viewer is set for this file. Turn on the Viewer plugin in Settings → Plugins, or choose a viewer in Settings → General.").into());
+        };
+        plugin.open_file(&opener.id, p, &self.opener_options(temporary)).map_err(err)
+    }
+
+    /// F4 on a file on disk: the editor chosen in Settings, the plugin
+    /// registered for it, or Notepad.
+    fn edit_file(&self, p: &Path, temporary: bool) -> Result<(), String> {
+        let err = |e: std::io::Error| format!("{}: {e}", display_path(p));
+        if !self.cfg.use_custom_editor {
+            if let Some((plugin, opener)) = self.opener_for(OpenKind::Edit, p) {
+                return plugin.open_file(&opener.id, p, &self.opener_options(temporary)).map_err(err);
+            }
+        }
         let editor = self.cfg.use_custom_editor.then_some(self.cfg.editor.as_str());
-        sal_core::shell::edit(p, editor).map_err(|e| format!("{}: {e}", display_path(p)))
+        sal_core::shell::edit(p, editor).map_err(err)
     }
 
     /// The file on disk a plugin's item stands for (a search result): the
@@ -954,8 +1001,8 @@ impl App {
         let manual = check.manual;
         self.update_check = None;
         match result {
-            Ok(Some(release)) => self.open_dialog(Dialog::Update { release, install: None }),
-            Ok(None) if manual => self.open_dialog(Dialog::Message {
+            Ok(updates) if !updates.is_empty() => self.open_dialog(Dialog::Update { rows: updates.into_iter().map(UpdateRow::new).collect() }),
+            Ok(_) if manual => self.open_dialog(Dialog::Message {
                 title: tr("Check for updates").into(),
                 text: trf("You have the newest version ({version}).", &[("version", &env!("CARGO_PKG_VERSION"))]),
             }),
@@ -1462,7 +1509,7 @@ impl App {
                 Ok(())
             }
             Cmd::CheckUpdates => {
-                self.update_check = Some(crate::update::Check::start(ctx, true));
+                self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins)));
                 Ok(())
             }
             Cmd::Find => match self.plugins.get("search").cloned() {
@@ -1516,12 +1563,12 @@ impl App {
             }
             Cmd::View => match self.act().current().filter(|e| e.kind == EntryKind::File).map(|e| e.path.clone()).map(|p| self.real_file(&p).unwrap_or(p)) {
                 Some(p) if self.in_archive(&p).is_some() => self.open_from_archive(ctx, p, OpenAs::View),
-                Some(p) => self.view_disk_file(p),
+                Some(p) => self.view_file(&p, false),
                 None => Ok(()),
             },
             Cmd::Edit => match self.act().current().filter(|e| e.kind == EntryKind::File).map(|e| e.path.clone()).map(|p| self.real_file(&p).unwrap_or(p)) {
                 Some(p) if self.in_archive(&p).is_some() => self.open_from_archive(ctx, p, OpenAs::Edit),
-                Some(p) => self.edit_disk_file(&p),
+                Some(p) => self.edit_file(&p, false),
                 None => Ok(()),
             },
             Cmd::Copy | Cmd::Move => {
@@ -1607,7 +1654,7 @@ impl App {
             }
             Cmd::ToggleScrollbars => {
                 self.cfg.always_show_scrollbars = !self.cfg.always_show_scrollbars;
-                apply_scrollbars(ctx, self.cfg.always_show_scrollbars);
+                sal_ui::apply_scrollbars(ctx, self.cfg.always_show_scrollbars);
                 Ok(())
             }
             Cmd::ToggleQuickSearchMode => {
@@ -2646,85 +2693,162 @@ impl App {
                     outcome = 2;
                 }
             }
-            Dialog::Update { release, install } => {
-                use crate::update::Progress;
-                let state = install.as_ref().map(|i| i.lock().unwrap().clone());
-                let running = matches!(state, Some(Progress::Downloading { .. } | Progress::Unpacking));
-                let (mut open_page, mut start, mut run_new) = (false, false, None);
-                dw.modal().show(ctx, &mut self.dialog_places, "update", tr("Update available"), 480.0, &mut enter, &mut escape, &mut |ui| {
-                    ui.label(trf("RustySalamander {new} is available. You have {current}.", &[("new", &release.version), ("current", &env!("CARGO_PKG_VERSION"))]));
-                    ui.add_space(2.0);
-                    open_page = ui.link(release.page.as_str()).on_hover_text(tr("Open the release page in the browser")).clicked();
-                    ui.add_space(6.0);
-                    match &state {
-                        None => {
-                            let folder = crate::update::target_dir(release).map(|p| display_path(&p)).unwrap_or_default();
-                            ui.label(trf(
-                                "Update now downloads the new version, unpacks it to {folder} and copies your settings there. This version stays as it is.",
-                                &[("folder", &folder)],
-                            ));
-                            ui.add_space(6.0);
-                            match centered_buttons(ui, &[(tr("Update now"), ""), (tr("Close"), "")]) {
-                                Some(0) => start = true,
-                                Some(_) => outcome = 2,
-                                None => {}
-                            }
-                        }
-                        Some(Progress::Downloading { done, total }) => {
-                            ui.label(trf("Downloading… {done} of {total}", &[("done", &format_size(*done)), ("total", &format_size(*total))]));
-                            ui.add(progress_bar(if *total > 0 { *done as f32 / *total as f32 } else { 0.0 }));
-                        }
-                        Some(Progress::Unpacking) => {
+            Dialog::Update { rows } => {
+                use crate::update::{Progress, Target};
+                let states: Vec<Option<Progress>> = rows.iter().map(|r| r.install.as_ref().map(|i| i.lock().unwrap().clone())).collect();
+                let running = states.iter().any(|s| matches!(s, Some(Progress::Downloading { .. } | Progress::Unpacking)));
+                let staged = states.iter().any(|s| matches!(s, Some(Progress::Staged)));
+                let (mut open_page, mut start, mut toggle_log, mut run_new, mut restart) = (None, None, None, None, false);
+                let title = if rows.len() == 1 { tr("Update available") } else { tr("Updates available") };
+                dw.modal().show(ctx, &mut self.dialog_places, "update", title, 560.0, &mut enter, &mut escape, &mut |ui| {
+                    for (i, (row, state)) in rows.iter().zip(&states).enumerate() {
+                        let u = &row.update;
+                        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8.0)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label(tr("Unpacking…"));
+                                ui.label(RichText::new(u.name()).strong());
+                                ui.label(trf("{current} → {new}", &[("current", &u.current), ("new", &u.release.version)]));
+                                if ui.link(tr("Release page")).on_hover_text(u.release.page.as_str()).clicked() {
+                                    open_page = Some(u.release.page.clone());
+                                }
                             });
-                        }
-                        Some(Progress::Done { folder, copied }) => {
-                            ui.label(trf("RustySalamander {new} is installed in {folder}.", &[("new", &release.version), ("folder", &display_path(folder))]));
-                            ui.label(if copied.is_empty() {
-                                tr("There were no settings to copy.").to_owned()
-                            } else {
-                                trf("Settings copied: {files}", &[("files", &copied.join(", "))])
-                            });
-                            ui.add_space(6.0);
-                            match centered_buttons(ui, &[(tr("Start the new version"), tr("Closes this version")), (tr("Close"), "")]) {
-                                Some(0) => run_new = Some(folder.clone()),
-                                Some(_) => outcome = 2,
-                                None => {}
+                            let plugin = matches!(u.target, Target::Plugin { .. });
+                            let mut offer = |ui: &mut egui::Ui, action: Option<&str>| {
+                                ui.horizontal(|ui| {
+                                    let log = if row.show_log { tr("Hide changelog") } else { tr("Show changelog") };
+                                    if ui.button(log).clicked() {
+                                        toggle_log = Some(i);
+                                    }
+                                    if let Some(action) = action {
+                                        if ui.add_enabled(!running, egui::Button::new(action)).clicked() {
+                                            start = Some(i);
+                                        }
+                                    }
+                                });
+                            };
+                            match state {
+                                None => {
+                                    if plugin {
+                                        ui.label(tr("Update now downloads it; it is installed when RustySalamander starts again. What the plugin saved stays."));
+                                    } else {
+                                        let folder = crate::update::target_dir(&u.release).map(|p| display_path(&p)).unwrap_or_default();
+                                        ui.label(trf(
+                                            "Update now downloads the new version, unpacks it to {folder} and copies your settings there. This version stays as it is.",
+                                            &[("folder", &folder)],
+                                        ));
+                                    }
+                                    offer(ui, Some(tr("Update now")));
+                                }
+                                Some(Progress::Downloading { done, total }) => {
+                                    ui.label(trf("Downloading… {done} of {total}", &[("done", &format_size(*done)), ("total", &format_size(*total))]));
+                                    ui.add(progress_bar(if *total > 0 { *done as f32 / *total as f32 } else { 0.0 }));
+                                }
+                                Some(Progress::Unpacking) => {
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label(tr("Unpacking…"));
+                                    });
+                                }
+                                Some(Progress::Done { folder, copied }) => {
+                                    ui.label(trf("RustySalamander {new} is installed in {folder}.", &[("new", &u.release.version), ("folder", &display_path(folder))]));
+                                    ui.label(if copied.is_empty() {
+                                        tr("There were no settings to copy.").to_owned()
+                                    } else {
+                                        trf("Settings copied: {files}", &[("files", &copied.join(", "))])
+                                    });
+                                    ui.horizontal(|ui| {
+                                        if ui.button(tr("Start the new version")).on_hover_text(tr("Closes this version")).clicked() {
+                                            run_new = Some(folder.clone());
+                                        }
+                                    });
+                                }
+                                Some(Progress::Staged) => {
+                                    ui.label(tr("Downloaded. It is installed when RustySalamander starts again."));
+                                    offer(ui, None);
+                                }
+                                Some(Progress::Failed(e)) => {
+                                    ui.colored_label(ui.visuals().error_fg_color, trf("The update failed: {error}", &[("error", e)]));
+                                    offer(ui, Some(tr("Try again")));
+                                }
                             }
-                        }
-                        Some(Progress::Failed(e)) => {
-                            ui.label(trf("The update failed: {error}", &[("error", e)]));
-                            ui.add_space(6.0);
-                            match centered_buttons(ui, &[(tr("Try again"), ""), (tr("Close"), "")]) {
-                                Some(0) => start = true,
-                                Some(_) => outcome = 2,
-                                None => {}
+                            if row.show_log {
+                                ui.add_space(4.0);
+                                let log = row.changelog.as_ref().and_then(|c| c.lock().unwrap().clone());
+                                match log {
+                                    None => {
+                                        ui.horizontal(|ui| {
+                                            ui.spinner();
+                                            ui.label(tr("Reading the changelog…"));
+                                        });
+                                    }
+                                    Some(Ok(text)) if text.is_empty() => {
+                                        ui.label(RichText::new(tr("The changelog says nothing about these versions.")).weak());
+                                    }
+                                    Some(Ok(text)) => {
+                                        egui::Frame::none().fill(ui.visuals().extreme_bg_color).inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
+                                            egui::ScrollArea::vertical().id_salt(("changelog", i)).max_height(240.0).auto_shrink([false, true]).show(ui, |ui| markdown(ui, &text));
+                                        });
+                                    }
+                                    Some(Err(e)) => {
+                                        ui.colored_label(ui.visuals().error_fg_color, trf("Could not read the changelog: {error}", &[("error", &e)]));
+                                    }
+                                }
                             }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    ui.add_space(4.0);
+                    if staged {
+                        ui.label(tr("Plugin updates are installed when RustySalamander starts again."));
+                        ui.add_space(4.0);
+                        match centered_buttons(ui, &[(tr("Restart now"), tr("Closes and starts RustySalamander again")), (tr("Close"), "")]) {
+                            Some(0) => restart = true,
+                            Some(_) => outcome = 2,
+                            None => {}
                         }
+                    } else if centered_buttons(ui, &[(tr("Close"), "")]).is_some() {
+                        outcome = 2;
                     }
                 });
-                // the window stays while the download runs
+                // the window stays while a download runs
                 if running {
                     enter = false;
                     escape = false;
-                }
-                if open_page {
-                    if let Err(e) = shell_open(Path::new(&release.page)) {
-                        self.error(format!("{}: {e}", release.page));
+                    if outcome == 2 {
+                        outcome = 0;
                     }
                 }
-                if start {
-                    // the settings as they are now go to the new version
-                    self.save_config();
-                    *install = Some(crate::update::install(ctx, release.clone()));
+                if let Some(page) = open_page {
+                    if let Err(e) = shell_open(Path::new(&page)) {
+                        self.error(format!("{page}: {e}"));
+                    }
+                }
+                if let Some(i) = toggle_log {
+                    let row = &mut rows[i];
+                    row.show_log = !row.show_log;
+                    if row.changelog.is_none() {
+                        row.changelog = Some(crate::update::changelog(ctx, &row.update));
+                    }
+                }
+                if let Some(i) = start {
+                    if rows[i].update.target == Target::Program {
+                        // the settings as they are now go to the new version
+                        self.save_config();
+                    }
+                    rows[i].install = Some(crate::update::install(ctx, rows[i].update.clone()));
                 }
                 if let Some(folder) = run_new {
                     let exe = folder.join("rustysalamander.exe");
                     match std::process::Command::new(&exe).current_dir(&folder).spawn() {
                         Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                         Err(e) => self.error(format!("{}: {e}", display_path(&exe))),
+                    }
+                }
+                if restart {
+                    self.save_config();
+                    match std::env::current_exe().and_then(|exe| std::process::Command::new(&exe).current_dir(exe.parent().unwrap_or(Path::new("."))).spawn()) {
+                        Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                        Err(e) => self.error(format!("RustySalamander: {e}")),
                     }
                 }
             }
@@ -2757,7 +2881,16 @@ impl App {
                             (None, Some((_, e))) => Err(e.clone()),
                             (None, None) => Ok(String::new()),
                         };
-                        PluginRow { id: id.clone(), name: f.tr(&f.info.name), description: f.tr(&f.info.description), file: display_path(&f.file), state }
+                        let openers = self.plugins.get(id).map(|p| p.openers()).unwrap_or_default();
+                        let openers = openers
+                            .iter()
+                            .map(|o| {
+                                let what = if o.kind == OpenKind::View { tr("Views (F3)") } else { tr("Edits (F4)") };
+                                format!("{what}: {} · {}", o.label, o.masks)
+                            })
+                            .collect();
+                        let version = trf("Version {version} · interface {interface}", &[("version", &f.info.version), ("interface", &f.info.interface)]);
+                        PluginRow { id: id.clone(), name: f.tr(&f.info.name), description: f.tr(&f.info.description), file: display_path(&f.file), version, openers, state }
                     })
                     .collect();
                 let broken_plugins: Vec<(String, String)> = self.plugins.broken.iter().map(|(f, e)| (display_path(f), e.clone())).collect();
@@ -2854,7 +2987,7 @@ impl App {
                                     ui.label(tr("Layout"));
                                     ui.vertical(|ui| {
                                         if ui.checkbox(&mut cfg.always_show_scrollbars, tr(LBL_SCROLLBARS)).changed() {
-                                            apply_scrollbars(ctx, cfg.always_show_scrollbars);
+                                            sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
                                         }
                                         ui.checkbox(&mut cfg.show_fkey_bar, tr(LBL_FKEYS));
                                     });
@@ -2952,7 +3085,7 @@ impl App {
 
                                     ui.label(tr("Editor (F4)"));
                                     ui.vertical(|ui| {
-                                        ui.radio_value(&mut cfg.use_custom_editor, false, tr("Notepad (default)"));
+                                        ui.radio_value(&mut cfg.use_custom_editor, false, tr("A plugin's editor, or Notepad (default)"));
                                         ui.horizontal(|ui| {
                                             ui.radio_value(&mut cfg.use_custom_editor, true, tr("Custom:"));
                                             ui.add_enabled(
@@ -2969,7 +3102,7 @@ impl App {
 
                                     ui.label(tr("Viewer (F3)"));
                                     ui.vertical(|ui| {
-                                        ui.radio_value(&mut cfg.use_custom_viewer, false, tr("Built-in viewer (default)"));
+                                        ui.radio_value(&mut cfg.use_custom_viewer, false, tr("The Viewer plugin (default)"));
                                         ui.horizontal(|ui| {
                                             ui.radio_value(&mut cfg.use_custom_viewer, true, tr("Custom:"));
                                             ui.add_enabled(
@@ -3034,6 +3167,12 @@ impl App {
                                         plugins_changed = true;
                                     }
                                     ui.label(k.description.as_str());
+                                    ui.label(RichText::new(k.version.as_str()).small().weak());
+                                    if on {
+                                        for o in &k.openers {
+                                            ui.label(RichText::new(o.as_str()).small().weak());
+                                        }
+                                    }
                                     match &k.state {
                                         _ if !on => {}
                                         Ok(status) if !status.is_empty() => {
@@ -3188,7 +3327,7 @@ impl App {
                     self.apply_plugins();
                 }
                 if check_now {
-                    self.update_check = Some(crate::update::Check::start(ctx, true));
+                    self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins)));
                 }
                 if fonts_changed {
                     crate::fonts::install(ctx, &self.cfg.ui_font, &self.cfg.mono_font);
@@ -3624,14 +3763,9 @@ impl App {
         let err = |e: std::io::Error| format!("{}: {e}", display_path(&file));
         match how {
             OpenAs::Default => shell_open(&file).map_err(err)?,
-            OpenAs::View if self.cfg.use_custom_viewer && !self.cfg.viewer.trim().is_empty() => sal_core::shell::open_with_program(&self.cfg.viewer, &file).map_err(err)?,
-            OpenAs::View => {
-                self.viewer_serial += 1;
-                self.viewers.push(Viewer::open(file.clone(), self.viewer_serial));
-            }
+            OpenAs::View => self.view_file(&file, true)?,
             OpenAs::Edit => {
-                let editor = self.cfg.use_custom_editor.then_some(self.cfg.editor.as_str());
-                sal_core::shell::edit(&file, editor).map_err(err)?;
+                self.edit_file(&file, true)?;
                 self.status = tr("A temporary copy is open; changes to it are not saved back.").into();
             }
         }
@@ -4023,6 +4157,88 @@ fn strip_color(v: &egui::Visuals) -> Color32 {
 /// How many search results a session keeps; the oldest are closed.
 const MAX_RESULTS: usize = 10;
 
+/// What the update check looks at for the plugins found: those that say
+/// where they are published.
+fn update_sources(plugins: &Plugins) -> Vec<crate::update::PluginSource> {
+    plugins
+        .found
+        .iter()
+        .filter_map(|f| {
+            Some(crate::update::PluginSource {
+                id: f.info.id.clone(),
+                name: f.tr(&f.info.name),
+                dir: f.dir().to_path_buf(),
+                version: f.info.version.clone(),
+                source: f.info.updates.clone()?,
+            })
+        })
+        .collect()
+}
+
+/// A changelog's Markdown, simply: `##` and `###` headings, `-` bullets,
+/// **bold** and `code`.
+fn markdown(ui: &mut egui::Ui, text: &str) {
+    let body = ui.text_style_height(&egui::TextStyle::Body);
+    for line in text.lines().map(str::trim_end) {
+        if let Some(h) = line.strip_prefix("## ") {
+            ui.add_space(4.0);
+            ui.label(RichText::new(h).strong().size(body * 1.15));
+        } else if let Some(h) = line.strip_prefix("### ") {
+            ui.add_space(2.0);
+            ui.label(RichText::new(h).strong());
+        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            ui.horizontal_top(|ui| {
+                ui.add_space(6.0);
+                ui.label("•");
+                let job = inline_markdown(ui, item);
+                ui.label(job);
+            });
+        } else if line.trim().is_empty() {
+            ui.add_space(2.0);
+        } else if !line.starts_with("# ") {
+            let job = inline_markdown(ui, line.trim_start());
+            ui.label(job);
+        }
+    }
+}
+
+/// A line with **bold** and `code` as a wrapped layout.
+fn inline_markdown(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
+    use egui::text::{LayoutJob, TextFormat};
+    let v = ui.visuals();
+    let normal = TextFormat { font_id: egui::TextStyle::Body.resolve(ui.style()), color: v.text_color(), ..Default::default() };
+    let strong = TextFormat { color: v.strong_text_color(), ..normal.clone() };
+    let code = TextFormat { font_id: egui::TextStyle::Monospace.resolve(ui.style()), color: v.text_color(), background: v.code_bg_color, ..Default::default() };
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    let mut bold = false;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let star = rest.find("**");
+        let tick = rest.find('`');
+        let fmt = if bold { strong.clone() } else { normal.clone() };
+        match (star, tick) {
+            (Some(s), t) if t.is_none_or(|t| s < t) => {
+                job.append(&rest[..s], 0.0, fmt);
+                bold = !bold;
+                rest = &rest[s + 2..];
+            }
+            (_, Some(t)) => {
+                job.append(&rest[..t], 0.0, fmt);
+                let after = &rest[t + 1..];
+                let end = after.find('`').unwrap_or(after.len());
+                job.append(&after[..end], 0.0, code.clone());
+                rest = after.get(end + 1..).unwrap_or("");
+            }
+            _ => {
+                job.append(rest, 0.0, fmt);
+                rest = "";
+            }
+        }
+    }
+    job
+}
+
 /// A progress bar with square corners.
 fn progress_bar(frac: f32) -> egui::ProgressBar {
     egui::ProgressBar::new(frac).rounding(0.0)
@@ -4287,34 +4503,6 @@ fn paint_divider(ui: &egui::Ui, r: egui::Rect) {
     p.vline(r.center().x, r.y_range(), egui::Stroke::new(2.0f32, line));
 }
 
-/// Solid always-visible scrollbars, or egui's thin ones that appear on hover.
-fn apply_scrollbars(ctx: &egui::Context, always: bool) {
-    let style = if always {
-        // egui's "solid" bars are invisible until hovered; keep track and
-        // handle drawn, a bit wider, like classic Windows scrollbars
-        egui::style::ScrollStyle {
-            bar_width: 10.0,
-            dormant_background_opacity: 0.6,
-            active_background_opacity: 0.8,
-            dormant_handle_opacity: 0.75,
-            active_handle_opacity: 0.9,
-            ..egui::style::ScrollStyle::solid()
-        }
-    } else {
-        egui::style::ScrollStyle::floating()
-    };
-    ctx.all_styles_mut(|s| s.spacing.scroll = style);
-}
-
-/// Scroll areas follow the scroll style chosen in [`apply_scrollbars`].
-pub fn scroll_bar_visibility(ui: &egui::Ui) -> egui::scroll_area::ScrollBarVisibility {
-    if ui.style().spacing.scroll.floating {
-        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
-    } else {
-        egui::scroll_area::ScrollBarVisibility::AlwaysVisible
-    }
-}
-
 /// Theme for the panels, the window title bar and the native menus.
 fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
     let (pref, menus) = match mode {
@@ -4557,11 +4745,6 @@ impl App {
         self.results_ui(ctx);
         timing.mark("operations");
 
-        for v in &mut self.viewers {
-            v.show(ctx);
-        }
-        self.viewers.retain(|v| v.open);
-        timing.mark("viewers");
         timing.finish();
 
         // poll directories for external changes
@@ -4580,9 +4763,62 @@ mod tests {
         pub static OPENED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
+    /// Stands in for the Viewer plugin, whose windows tests never open: it
+    /// views every file, edits `*.edit` files, and remembers each request
+    /// (opener, file, options).
+    #[derive(Default)]
+    struct Recorder {
+        opened: std::sync::Mutex<Vec<(String, PathBuf, plugins::Values)>>,
+    }
+
+    impl FolderPlugin for Recorder {
+        fn id(&self) -> &str {
+            "recorder"
+        }
+        fn handles(&self, _: &str) -> bool {
+            false
+        }
+        fn can_write(&self, _: &Path) -> bool {
+            false
+        }
+        fn status(&self) -> String {
+            String::new()
+        }
+        fn list(&self, _: &Path, _: &str) -> std::io::Result<plugins::Index> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn extract(&self, _: &Path, _: &[String], _: &Path, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn add(&self, _: &Path, _: &[(PathBuf, String)], _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn delete(&self, _: &Path, _: &[String], _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn rename(&self, _: &Path, _: &str, _: &str, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn mkdir(&self, _: &Path, _: &str, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn openers(&self) -> Vec<Opener> {
+            vec![
+                Opener { id: "view".into(), kind: OpenKind::View, label: "Recorder".into(), masks: "*".into() },
+                Opener { id: "edit".into(), kind: OpenKind::Edit, label: "Recorder".into(), masks: "*.edit".into() },
+            ]
+        }
+        fn open_file(&self, opener: &str, file: &Path, options: &plugins::Values) -> std::io::Result<()> {
+            self.opened.lock().unwrap().push((opener.to_owned(), file.to_path_buf(), options.clone()));
+            Ok(())
+        }
+    }
+
     struct Ui {
         ctx: egui::Context,
         app: App,
+        /// What F3 and F4 asked the plugins to open.
+        recorder: Arc<Recorder>,
         snap: crate::snapshot::Snapshot,
         last: Option<egui::FullOutput>,
         /// Screen size in points (taller for some snapshots).
@@ -4596,9 +4832,12 @@ mod tests {
     impl Ui {
         fn new(left: &Path, right: &Path) -> Ui {
             let ctx = egui::Context::default();
-            let cfg = Config { use_recycle_bin: false, language: "en".into(), ..Config::default() };
-            let app = App::with_config(&ctx, cfg, vec![left.to_string_lossy().into(), right.to_string_lossy().into()]);
-            let mut ui = Ui { ctx, app, snap: Default::default(), last: None, screen: egui::vec2(1200.0, 800.0) };
+            // the real Viewer plugin would open windows: the recorder views instead
+            let cfg = Config { use_recycle_bin: false, language: "en".into(), disabled_plugins: vec!["viewer".into()], ..Config::default() };
+            let mut app = App::with_config(&ctx, cfg, vec![left.to_string_lossy().into(), right.to_string_lossy().into()]);
+            let recorder = Arc::new(Recorder::default());
+            app.plugins.active.insert(0, recorder.clone());
+            let mut ui = Ui { ctx, app, recorder, snap: Default::default(), last: None, screen: egui::vec2(1200.0, 800.0) };
             ui.frames(2);
             ui
         }
@@ -4642,6 +4881,17 @@ mod tests {
             panic!("job did not finish");
         }
 
+        /// Put the recorder back first after a test changed the plugins.
+        fn keep_recorder(&mut self) {
+            self.app.plugins.active.retain(|p| p.id() != "recorder");
+            self.app.plugins.active.insert(0, self.recorder.clone());
+        }
+
+        /// The files F3 showed, in order.
+        fn viewed(&self) -> Vec<PathBuf> {
+            self.recorder.opened.lock().unwrap().iter().filter(|(o, _, _)| o == "view").map(|(_, f, _)| f.clone()).collect()
+        }
+
         fn cursor_name(&self) -> String {
             self.app.panels[self.app.active].current().map(|e| e.name.clone()).unwrap_or_default()
         }
@@ -4664,6 +4914,104 @@ mod tests {
     fn built_library() -> Option<PathBuf> {
         let dir = std::env::current_exe().ok()?.parent()?.parent()?.join("plugins");
         dir.join("7zip").join("7z.dll").is_file().then_some(dir)
+    }
+
+    /// The real Viewer plugin, as built: its own version, where it is
+    /// published, and that it views every file. (Its windows are never
+    /// opened in tests.)
+    #[test]
+    fn viewer_plugin_as_built() {
+        let Some(dir) = built_library() else { return };
+        let mut p = Plugins::scan(Some(&dir));
+        let found = p.found.iter().find(|f| f.info.id == "viewer").expect("plugins\\viewer\\viewer.spl");
+        assert_eq!(found.info.interface, sal_plugin_api::abi::VERSION);
+        assert!(semver::Version::parse(&found.info.version).is_ok(), "{}", found.info.version);
+        let src = found.info.updates.clone().expect("published");
+        assert_eq!((src.tag.as_str(), src.changelog.as_str()), ("viewer-v", "plugins/viewer/CHANGELOG.md"));
+        assert!(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(&src.changelog).is_file(), "the changelog it names exists");
+        // every plugin of the program says its version and where it is published
+        for f in p.found.iter().filter(|f| f.info.id != "filelist") {
+            assert!(f.info.updates.is_some(), "{}", f.info.id);
+        }
+        p.start(&[]);
+        let viewer = p.get("viewer").unwrap_or_else(|| panic!("{:?}", p.errors));
+        let openers = viewer.openers();
+        assert_eq!(openers.len(), 1);
+        assert!(openers[0].kind == OpenKind::View && openers[0].matches("cokoli 🦎.bin"));
+    }
+
+    /// The Viewer plugin's real windows: they open, a second file opens a
+    /// second window, closing the first window keeps the second one (the
+    /// loop's main window takes it over), and the loop starts again for a
+    /// file after all were closed. Opens windows on the desktop for a moment
+    /// and closes them itself (no keys are sent):
+    /// `cargo test -p sal-app viewer_windows_live -- --ignored`
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn viewer_windows_live() {
+        use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, InternalGetWindowText, IsWindowVisible, PostMessageW, WM_CLOSE};
+
+        /// The visible top-level windows of this process whose title holds `part`.
+        fn windows_with(part: &str) -> Vec<(HWND, String)> {
+            unsafe extern "system" fn each(hwnd: HWND, out: LPARAM) -> BOOL {
+                let out = &mut *(out.0 as *mut Vec<(HWND, String)>);
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                if pid == std::process::id() && IsWindowVisible(hwnd).as_bool() {
+                    let mut buf = [0u16; 512];
+                    // not GetWindowTextW: it waits for the window's thread
+                    let n = InternalGetWindowText(hwnd, &mut buf);
+                    out.push((hwnd, String::from_utf16_lossy(&buf[..n as usize])));
+                }
+                BOOL(1)
+            }
+            let mut all: Vec<(HWND, String)> = Vec::new();
+            unsafe {
+                let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
+            }
+            all.into_iter().filter(|(_, t)| t.contains(part)).collect()
+        }
+        fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+            for _ in 0..300 {
+                if f() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("timed out: {what}; windows: {:?}", windows_with("").iter().map(|(_, t)| t.clone()).collect::<Vec<_>>());
+        }
+
+        let Some(dir) = built_library() else { panic!("plugins not built") };
+        let mut p = Plugins::scan(Some(&dir));
+        p.start(&[]);
+        let viewer = p.get("viewer").unwrap_or_else(|| panic!("{:?}", p.errors)).clone();
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("první 🦎.txt"), t.path().join("druhý.bin"));
+        fs::write(&a, "Příliš žluťoučký kůň\n日本語").unwrap();
+        fs::write(&b, [0u8, 1, 2, 3, 255]).unwrap();
+        let options: plugins::Values = [("theme".to_owned(), "dark".to_owned())].into();
+
+        viewer.open_file("text", &a, &options).unwrap();
+        wait_for("the first window", || windows_with("první 🦎.txt").len() == 1);
+        viewer.open_file("text", &b, &options).unwrap();
+        wait_for("the second window", || windows_with("druhý.bin").len() == 1);
+        // closing the first (the loop's main window) keeps the second
+        let (first, _) = windows_with("první 🦎.txt")[0];
+        unsafe { PostMessageW(first, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
+        wait_for("the first file's window gone", || windows_with("první 🦎.txt").is_empty());
+        wait_for("the second file stays open, in one window", || windows_with("druhý.bin").len() == 1);
+        let (second, _) = windows_with("druhý.bin")[0];
+        unsafe { PostMessageW(second, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
+        wait_for("all closed", || windows_with(" - Viewer").is_empty());
+        // the loop starts again for the next file
+        viewer.open_file("text", &a, &options).unwrap();
+        wait_for("a window again", || windows_with("první 🦎.txt").len() == 1);
+        // turning the plugin off closes its windows
+        drop(viewer);
+        p.start(&["viewer".to_owned()]);
+        wait_for("closed with the plugin", || windows_with(" - Viewer").is_empty());
     }
 
     fn arc_ui(left: &Path, right: &Path) -> Option<Ui> {
@@ -4853,8 +5201,11 @@ mod tests {
         cursor_to(&mut ui, "zpráva 🦎.txt");
         ui.key(Key::F3);
         ui.wait_job();
-        assert_eq!(ui.app.viewers.len(), 1, "extracted, then shown in the viewer");
-        assert!(ui.app.viewers[0].title.contains("zpráva 🦎.txt"), "{}", ui.app.viewers[0].title);
+        let viewed = ui.viewed();
+        assert_eq!(viewed.len(), 1, "extracted, then shown in the viewer");
+        assert!(viewed[0].ends_with(Path::new("docs").join("zpráva 🦎.txt")), "{viewed:?}");
+        let opened = ui.recorder.opened.lock().unwrap();
+        assert_eq!(opened[0].2["temporary"], "1", "the viewer is told it is a temporary copy");
     }
 
     /// A plugins folder for one test, `target\<profile>\test-plugins\<name>`:
@@ -4995,6 +5346,7 @@ mod tests {
 
         let mut ui = Ui::new(&data, &data);
         ui.app.plugins = found;
+        ui.keep_recorder();
         for p in &mut ui.app.panels {
             p.plugins = ui.app.plugins.active.clone();
         }
@@ -5052,9 +5404,8 @@ mod tests {
         // Open (Enter, double-click) opens the file itself; F3 views it
         ui.app.results_act(&ctx, Act::Open("poznámky.txt".into()));
         assert_eq!(tests::OPENED.with(|o| o.borrow().last().cloned()), Some(data.join("poznámky.txt")));
-        let viewers = ui.app.viewers.len();
         ui.app.results_act(&ctx, Act::View("poznámky.txt".into()));
-        assert_eq!(ui.app.viewers.len(), viewers + 1);
+        assert_eq!(ui.viewed().last(), Some(&data.join("poznámky.txt")), "the file itself");
 
         // Go to file: its folder in the active panel, on the file
         ui.app.results_act(&ctx, Act::GoTo("docs\\staré\\dopis 🦎.txt".into()));
@@ -5370,6 +5721,7 @@ mod tests {
             ui.frames(3);
             ui.key(Key::Escape);
             assert!(matches!(ui.app.dialog, Dialog::None), "{case}: settings closed");
+            ui.keep_recorder();
 
             // a panel remembered inside the archive opens the archive's folder
             let panel = Panel::new(&arc.join("docs").to_string_lossy(), ui.app.panels[0].sort, ui.app.vis(), ui.app.plugins.active.clone());
@@ -5391,8 +5743,7 @@ mod tests {
             assert_eq!(ui.app.panels[1].path(), t.path(), "{case}: not opened as a folder");
             // F3 shows the archive file itself
             ui.key(Key::F3);
-            assert_eq!(ui.app.viewers.len(), 1, "{case}");
-            assert!(ui.app.viewers[0].title.contains("archiv ž.zip"), "{case}: {}", ui.app.viewers[0].title);
+            assert_eq!(ui.viewed(), std::slice::from_ref(&arc), "{case}");
 
             // copying "into" it is refused with a message; the archive stays as it was
             ui.app.active = 0;
@@ -5588,14 +5939,37 @@ mod tests {
         assert_eq!(ui.app.panels[0].path(), d.as_path());
     }
 
+    /// F3 and F4 go to the plugins registered as viewers and editors, with
+    /// the program's look; without a viewer F3 says what to do.
     #[test]
-    fn viewer_opens_in_embedded_viewport() {
+    fn plugins_view_and_edit_files() {
         let t = tempfile::tempdir().unwrap();
         fs::write(t.path().join("ж.txt"), "Příliš 日本 😀").unwrap();
+        fs::write(t.path().join("nastavení.edit"), "x").unwrap();
         let mut ui = Ui::new(t.path(), t.path());
+        ui.app.cfg.theme = ThemeMode::Dark;
+        ui.app.cfg.mono_font = "Cascadia Mono".into();
         ui.text("ж");
         ui.key(Key::F3);
-        assert_eq!(ui.app.viewers.len(), 1);
+        assert_eq!(ui.viewed(), [t.path().join("ж.txt")]);
+        {
+            let opened = ui.recorder.opened.lock().unwrap();
+            let o = &opened[0].2;
+            assert_eq!((o["theme"].as_str(), o["mono_font"].as_str(), o["temporary"].as_str()), ("dark", "Cascadia Mono", ""));
+        }
+        // F4: the plugin edits what its masks match
+        ui.key(Key::Escape);
+        ui.text("nas");
+        ui.key(Key::F4);
+        let last = ui.recorder.opened.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((last.0.as_str(), last.1), ("edit", t.path().join("nastavení.edit")));
+
+        // no viewer: F3 explains
+        ui.app.plugins.active.retain(|p| p.id() != "recorder");
+        ui.key(Key::Escape);
+        ui.text("ж");
+        ui.key(Key::F3);
+        assert!(matches!(&ui.app.dialog, Dialog::Message { text, .. } if text.contains("Viewer plugin")), "{:?}", ui.app.status);
     }
 
     /// Press `key` with modifiers, plus the text a real keyboard would type.
@@ -6493,37 +6867,60 @@ mod tests {
         assert!(!ui.app.cfg.system_icons);
     }
 
-    /// The update window in each state; Escape closes it except while the
-    /// download runs. SNAPSHOT_DIR set: also saved as update_*.png.
+    /// The update window in each state, with the program and a plugin; a
+    /// changelog shown. Escape closes it except while a download runs.
+    /// SNAPSHOT_DIR set: also saved as update_*.png.
     #[test]
     fn update_dialog_states() {
-        use crate::update::{Progress, Release};
+        use crate::update::{Progress, Release, Target, Update};
         use std::sync::{Arc, Mutex};
         let t = tempfile::tempdir().unwrap();
         let mut ui = Ui::new(t.path(), t.path());
         crate::fonts::install(&ui.ctx, "", "");
-        let release = Release {
-            version: "0.3.0-alpha".into(),
-            page: "https://github.com/nocturneop15/RustySalamander/releases/tag/v0.3.0-alpha".into(),
-            asset: "RustySalamander-0.3.0-alpha-win64.zip".into(),
+        let release = |version: &str, tag: &str, asset: &str| Release {
+            version: version.into(),
+            tag: tag.into(),
+            page: format!("https://github.com/nocturneop15/RustySalamander/releases/tag/{tag}"),
+            asset: asset.into(),
             asset_url: String::new(),
             asset_size: 7_126_108,
         };
+        let program = Update {
+            target: Target::Program,
+            current: "0.4.1-alpha".into(),
+            release: release("0.5.0-alpha", "v0.5.0-alpha", "RustySalamander-0.5.0-alpha-win64.zip"),
+            repo: crate::update::REPO.into(),
+            changelog: "CHANGELOG.md".into(),
+        };
+        let plugin = Update {
+            target: Target::Plugin { id: "viewer".into(), name: "Viewer".into(), dir: t.path().join("plugins").join("viewer") },
+            current: "0.5.0-alpha".into(),
+            release: release("0.6.0-alpha", "viewer-v0.6.0-alpha", "viewer-0.6.0-alpha-api5.zip"),
+            repo: crate::update::REPO.into(),
+            changelog: "plugins/viewer/CHANGELOG.md".into(),
+        };
+        let log = "## 0.6.0-alpha (2026-11-02)\n\n### Viewer\n\n- **Find** in the text (`Ctrl+F`), with the next match on F3.\n- Opens big files at once.";
         let states = [
-            ("offer", None),
-            ("downloading", Some(Progress::Downloading { done: 3_100_000, total: 7_126_108 })),
+            ("offer", None, None),
+            ("downloading", Some(Progress::Downloading { done: 3_100_000, total: 7_126_108 }), None),
             (
                 "done",
                 Some(Progress::Done {
-                    folder: PathBuf::from(r"D:\Applications\RustySalamander\0.3.0-alpha"),
+                    folder: PathBuf::from(r"D:\Applications\RustySalamander\0.5.0-alpha"),
                     copied: vec!["config.toml".into(), r"plugins\scp\known_hosts".into()],
                 }),
+                Some(Progress::Staged),
             ),
-            ("failed", Some(Progress::Failed("https://github.com/…: the server answered 404".into()))),
+            ("failed", Some(Progress::Failed("https://github.com/…: the server answered 404".into())), Some(Progress::Failed("offline".into()))),
         ];
-        for (name, state) in states {
+        for (name, state, plugin_state) in states {
             let running = matches!(state, Some(Progress::Downloading { .. }));
-            ui.app.dialog = Dialog::Update { release: release.clone(), install: state.map(|p| Arc::new(Mutex::new(p))) };
+            let mut rows = vec![UpdateRow::new(program.clone()), UpdateRow::new(plugin.clone())];
+            rows[0].install = state.map(|p| Arc::new(Mutex::new(p)));
+            rows[1].install = plugin_state.map(|p| Arc::new(Mutex::new(p)));
+            rows[1].show_log = true;
+            rows[1].changelog = Some(Arc::new(Mutex::new(Some(Ok(log.to_owned())))));
+            ui.app.dialog = Dialog::Update { rows };
             ui.frames(4);
             assert!(matches!(ui.app.dialog, Dialog::Update { .. }), "{name}: open");
             if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
@@ -6535,6 +6932,11 @@ mod tests {
             ui.frames(1);
             assert_eq!(matches!(ui.app.dialog, Dialog::Update { .. }), running, "{name}: Escape");
         }
+        ui.app.dialog = Dialog::None;
+        // the changelog's text, as laid out
+        let job = inline_markdown(&egui::Ui::new(ui.ctx.clone(), egui::LayerId::background(), egui::Id::new("t"), egui::UiBuilder::new()), "a **b** `c` d");
+        let parts: Vec<&str> = job.sections.iter().map(|s| &job.text[s.byte_range.clone()]).collect();
+        assert_eq!(parts, ["a ", "b", " ", "c", " d"]);
     }
 
     #[cfg(windows)]
@@ -6803,21 +7205,20 @@ mod tests {
         fs::write(t.path().join("a.txt"), "x").unwrap();
         let mut ui = Ui::new(t.path(), t.path());
         ui.text("a.t");
-        // built-in by default
+        // the plugin's viewer by default
         ui.key(Key::F3);
-        assert_eq!(ui.app.viewers.len(), 1);
-        ui.app.viewers.clear();
-        // a custom viewer is started instead (here one that doesn't exist: an error, no built-in window)
+        assert_eq!(ui.viewed().len(), 1);
+        // a custom viewer is started instead (here one that doesn't exist: an error, no plugin window)
         ui.app.cfg.use_custom_viewer = true;
         ui.app.cfg.viewer = r#""C:\No Such Dir\viewer.exe""#.into();
         ui.key(Key::F3);
-        assert!(ui.app.viewers.is_empty());
+        assert_eq!(ui.viewed().len(), 1);
         assert!(matches!(&ui.app.dialog, Dialog::Message { text, .. } if text.contains("viewer.exe")), "reports the program that failed");
         // switching back to the built-in one keeps the custom command for later
         ui.key(Key::Escape);
         ui.app.cfg.use_custom_viewer = false;
         ui.key(Key::F3);
-        assert_eq!(ui.app.viewers.len(), 1);
+        assert_eq!(ui.viewed().len(), 2);
         assert!(!ui.app.cfg.viewer.is_empty());
     }
 

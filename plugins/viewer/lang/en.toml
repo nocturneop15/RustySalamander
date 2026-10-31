@@ -1,0 +1,19 @@
+# RustySalamander UI strings — the template for translations.
+# Generated from the source; copy to <code>.toml, set [language] and translate the values.
+# Keys with "|" are plural forms: give as many forms as the language's plural rule has.
+
+[language]
+code = "en"
+name = "English"
+plural = "en"
+
+[strings]
+" (showing first {size})" = " (showing first {size})"
+"F4 toggles" = "F4 toggles"
+"Hex" = "Hex"
+"Shows files as text, in the encoding it detects or one you choose, or as hex (F3)." = "Shows files as text, in the encoding it detects or one you choose, or as hex (F3)."
+"Text" = "Text"
+"Text and hex viewer" = "Text and hex viewer"
+"Viewer" = "Viewer"
+"Wrap" = "Wrap"
+"{bytes} bytes" = "{bytes} bytes"

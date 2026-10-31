@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use eframe::egui::{FontData, FontDefinitions, FontFamily};
+use egui::{FontData, FontDefinitions, FontFamily};
 
 /// (file in %WINDIR%\Fonts, collection index, use as default UI font)
 const PROPORTIONAL: &[(&str, u32, bool)] = &[
@@ -193,7 +193,7 @@ pub fn definitions(ui_font: &str, mono_font: &str, installed: &[SystemFont]) -> 
     defs
 }
 
-pub fn install(ctx: &eframe::egui::Context, ui_font: &str, mono_font: &str) {
+pub fn install(ctx: &egui::Context, ui_font: &str, mono_font: &str) {
     let installed = if ui_font.is_empty() && mono_font.is_empty() { Vec::new() } else { system_fonts() };
     ctx.set_fonts(definitions(ui_font, mono_font, &installed));
 }
@@ -201,7 +201,7 @@ pub fn install(ctx: &eframe::egui::Context, ui_font: &str, mono_font: &str) {
 pub const ICON_FONT: &str = "icons";
 
 /// The icon font family, if a Windows icon font was found.
-pub fn icon_family(ctx: &eframe::egui::Context) -> Option<FontFamily> {
+pub fn icon_family(ctx: &egui::Context) -> Option<FontFamily> {
     let fam = FontFamily::Name(ICON_FONT.into());
     ctx.fonts(|f| f.families().contains(&fam)).then_some(fam)
 }

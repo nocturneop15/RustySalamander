@@ -30,6 +30,7 @@ export_plugin!(FileList);
 
 impl Plugin for FileList {
     const ID: &'static str = "filelist";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const NAME: &'static str = n_("File lists");
     const DESCRIPTION: &'static str = n_("Shows *.filelist files (one path per line) as folders of the files they list.");
 

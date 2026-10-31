@@ -7,6 +7,7 @@ Three plugins in this repository serve as references:
 - **`plugins/example-filelist`**: a small, complete example (about 200 lines with its test). It shows `*.filelist` text files (one path per line) as folders. Read it next to this guide.
 - **`plugins/sevenzip`**: the 7-Zip archive plugin, a real-world plugin that drives a third-party library (`7z.dll`).
 - **`plugins/scp`**: the SCP plugin. It adds a command to the Plugins menu, asks for the server and password in a form, and shows the server's files in a panel as a *connection*.
+- **`plugins/viewer`**: the Viewer plugin, the F3 viewer. It registers as the viewer of every file (`openers`, `open_file`) and shows files in windows of its own, on a thread of its own.
 - **`plugins/search`**: the search plugin. Its form starts a search in the background; the program shows the results in a results window while they come in (`Reply::Results`), and they are a connection too, browsed in a panel as a virtual folder of real files (`real_path`).
 
 The API reference is the rustdoc of `crates/sal-plugin-api`. To open it, run `cargo doc -p sal-plugin-api --open`.
@@ -25,8 +26,10 @@ The API reference is the rustdoc of `crates/sal-plugin-api`. To open it, run `ca
 10. [Testing](#testing)
 11. [Building, installing and distributing](#building-installing-and-distributing)
 12. [Rules and pitfalls](#rules-and-pitfalls)
-13. [The C interface and versioning](#the-c-interface-and-versioning)
-14. [Checklist](#checklist)
+13. [Viewers and editors](#viewers-and-editors)
+14. [Versions and updates](#versions-and-updates)
+15. [The C interface and versioning](#the-c-interface-and-versioning)
+16. [Checklist](#checklist)
 
 ## What a plugin is
 
@@ -48,7 +51,7 @@ plugins\
 
 The program contains no plugins. It only knows the interface in `sal-plugin-api`, so each plugin is built separately and can be added or removed by copying or deleting its folder.
 
-Today there is one kind of plugin, the **folder plugin**. A folder plugin shows things as folders in a panel:
+A plugin can do two things, alone or together. It can be a **viewer or editor** of files (F3/F4, see [Viewers and editors](#viewers-and-editors)), and it can be a **folder plugin**. A folder plugin shows things as folders in a panel:
 
 - **files it handles**: archives are the typical case, but anything that holds a list of items works (a playlist, a mailbox, a disk image);
 - **connections it opens** from its commands in the **Plugins** menu: a server, a cloud store, a device.
@@ -161,9 +164,11 @@ Plugins only ever see the file and inner paths. `sal_plugin_api::join_inner(base
 | `const ID` | Unique, stable id, saved in the configuration. Lowercase ASCII is recommended. Never change it after release, or users' "off" settings are lost. |
 | `const NAME` | Short name for Settings, in English, marked with `n_` (see [Translations](#translations)). |
 | `const DESCRIPTION` | One or two sentences, in English, marked with `n_`. |
+| `const VERSION` | The plugin's own version, a semantic version: `env!("CARGO_PKG_VERSION")`. It is independent of the program's; Settings shows it and the update check compares it. |
+| `const UPDATES` | Where newer versions are published (`Updates { repo, tag, changelog }`); the default `Updates::NONE` means nowhere. See [Versions and updates](#versions-and-updates). |
 | `fn start(dir) -> Result<Self, String>` | Called when the plugin is turned on. `dir` is the plugin's folder. Load libraries or settings from there. On failure, return a message telling the user what is wrong and how to fix it (e.g. "7z.dll is missing in …"). It is shown in Settings, so translate it. |
 
-The program reads `ID`, `NAME` and `DESCRIPTION` without calling `start`, even for plugins that are turned off. Keep them `const`.
+The program reads `ID`, `NAME`, `DESCRIPTION`, `VERSION` and `UPDATES` without calling `start`, even for plugins that are turned off. Keep them `const`.
 
 ## The `FolderPlugin` trait, method by method
 
@@ -184,6 +189,8 @@ All methods take `&self` and may be called **from several threads at once**: the
 | `commands()` | When the Plugins menu opens | The plugin's menu commands (optional; none by default). |
 | `run(command, values)` | A menu command is chosen, or a form's OK | What to show next: see below. Runs on a background thread. |
 | `close(root)` | The user disconnects, the plugin is turned off, or the program ends | Release the connection with this root. |
+| `openers()` | When F3/F4 is pressed, and for Settings → Plugins | The plugin's viewers and editors (optional; none by default). |
+| `open_file(opener, file, options)` | F3/F4 on a file an opener matches | Show the file in a window of your own and return at once. See [Viewers and editors](#viewers-and-editors). |
 
 **How the program combines them:**
 
@@ -252,6 +259,29 @@ Three methods of `FolderPlugin` serve it; each has a default, so other plugins i
 A search runs on a thread of the plugin's own, started by `run`, which returns at once. The search plugin keeps its searches in a `Mutex<HashMap<authority, Arc<Job>>>`, with atomic counters and a `Mutex<Vec<Found>>` the search thread fills and `list` and `activity` read.
 
 **Security.** Passwords reach the plugin only in `values`; don't log them, put them in error messages, or save them (the SCP plugin saves the last server, port, user and key path, never a password). Check what a server proves about itself (the SCP plugin verifies host keys against `known_hosts` and asks before trusting a new one), and treat every name a server sends as untrusted (see [Rules and pitfalls](#rules-and-pitfalls)).
+
+## Viewers and editors
+
+Any plugin can open files for the user: `openers()` returns its viewers (`OpenKind::View`, F3) and editors (`OpenKind::Edit`, F4), each with an id, a translated label and the file names it takes (`masks`: `*.txt;*.log`, `*` for any file). On F3 or F4 the program picks the first plugin, in the order of Settings → Plugins, with an opener of that kind matching the file's name, and calls `open_file(opener id, file, options)`; a program the user chose in Settings comes first, and without an editor plugin F4 opens Notepad.
+
+- **`file` is always a file on disk.** An item inside an archive or on a server is extracted to a temporary folder first; `options["temporary"]` is `1` then, and changes to it are not saved back.
+- **`options`** say how the program looks, so the window can match it: `theme` (`system`, `light`, `dark`), `ui_font` and `mono_font` (font names, empty for the default), `scrollbars` (`solid`, `floating`).
+- **Return at once.** `open_file` runs on the program's UI thread: hand the file to your window and return; don't wait for the window to close.
+- **The window is yours.** This is the one place a plugin shows UI of its own. The Viewer plugin uses egui (`eframe`) in a thread of its own with an event loop of its own (`with_any_thread`), kept for the whole session because an event loop can be created only once per DLL; `sal-ui` gives it the program's fonts and scroll bars. Close your windows in `Drop`, which runs when the plugin is turned off.
+
+## Versions and updates
+
+A plugin has its **own version** (`Plugin::VERSION`), apart from the program's, and is released on its own. In this repository each plugin's crate has its own `version` in its `Cargo.toml` and its own `CHANGELOG.md`, with a `## <version> (<date>)` heading per version.
+
+`Plugin::UPDATES` says where releases are published, and the program's update check (Help → Check for updates, and at start-up) looks there too:
+
+- **`repo`**: the GitHub repository, `owner/name`. The plugins in this repository use `nocturneop15/RustySalamander`; a plugin in a repository of its own names that one.
+- **`tag`**: what the tags of the plugin's releases start with, followed by the version: `viewer-v` → `viewer-v0.6.0`. The program's own releases are `v<version>`.
+- **`changelog`**: the changelog's path in the repository (`plugins/viewer/CHANGELOG.md`). The update window shows the sections between the installed version and the new one, read at the release's tag.
+
+**A release** of a plugin has one zip, named `<id>-<version>-api<interface>.zip` (`viewer-0.6.0-api5.zip`), holding the plugin's folder: the `.spl`, its libraries, `lang`, licenses and the changelog. The interface number is `abi::VERSION` the plugin was built for; the program only offers a zip for an interface it has. Several zips for different interfaces may be attached to one release.
+
+**Installing:** the zip is unpacked into `plugins\.updates\<folder>`, and the next start copies it over the plugin's folder before the plugins are loaded (the DLL is in use while the program runs). Files the plugin saved in its folder stay.
 
 ## Errors, progress and cancelling
 
@@ -336,13 +366,14 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 - **Toolchain:** the program is built with the `x86_64-pc-windows-gnu` Rust toolchain. A plugin can use the GNU or the MSVC toolchain, because only the C interface is shared, but it must be **64-bit**.
 - **Debug or release:** both work with either build of the program.
 - **Install:** copy the DLL as `plugins\<name>\<name>.spl`, with any libraries it needs and its `lang` folder. The program also loads loose `plugins\*.spl` files, but a folder per plugin keeps dependencies apart.
-- **Inside this repository:** `crates/sal-app/build.rs` builds the 7-Zip plugin and installs it into `target\<profile>\plugins\7zip`. To ship a new plugin with the program, add a similar step there. The example plugin is deliberately not installed.
+- **Inside this repository:** `crates/sal-app/build.rs` builds the plugins and installs them into `target\<profile>\plugins\<folder>`. To ship a new plugin with the program, add a similar step there. The example plugin is deliberately not installed.
+- **Releasing a plugin on its own:** raise `version` in its `Cargo.toml`, add the section to its `CHANGELOG.md`, and publish a release tagged `<tag><version>` with the zip `<id>-<version>-api<interface>.zip` (see [Versions and updates](#versions-and-updates)).
 - **Licensing:** RustySalamander is GPL-2.0-or-later. A plugin is loaded into the program's process; take that into account when choosing its license. Ship the licenses of the libraries you bundle; the 7-Zip plugin includes 7-Zip's.
 
 ## Rules and pitfalls
 
 - **Don't keep files open between calls.** Windows locks open files, and the program must be able to rename, move or delete the file at any time. Open, work, close, within one call.
-- **Don't show any UI** (message boxes, dialogs). Report problems through errors and `status()`. A plugin that blocks on a window blocks a file operation, or the whole program if it was called from the UI thread.
+- **Don't show any UI** (message boxes, dialogs) except the windows of your viewers and editors. Report problems through errors and `status()`. A plugin that blocks on a window blocks a file operation, or the whole program if it was called from the UI thread.
 - **Load libraries quietly.** A damaged DLL makes `LoadLibrary` show a Windows "Bad Image" box that blocks until someone clicks it. Set `SetThreadErrorMode(SEM_FAILCRITICALERRORS)` around the call and restore it afterwards (see `plugins/sevenzip/src/library.rs`).
 - **Never trust names inside the file.** Inner paths come from data you read. Reject `..` components, drive letters and absolute paths before writing `out\<inner path>` in `extract`.
 - **Keep everything Unicode.** Use `Path`/`PathBuf` for disk paths (they round-trip every Windows name) and `String` for inner paths. Never go through ANSI code pages.
@@ -361,12 +392,13 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 
 Commands, replies, forms and values cross the interface as text: lists of strings, each encoded as `<length>:<bytes>,` (`sal_plugin_api::ui::encode`). This way forms can gain new kinds of fields without changing the function table.
 
-**Versioning.** `abi::VERSION` (now 4: `activity`, `stop`, `real_path`, `Reply::Results` and `FieldKind::Folder` are new) changes with every incompatible change to the interface. The program skips plugins built for another version and says so in Settings, so rebuild plugins against the matching `sal-plugin-api`. The interface is young (this is an alpha), so expect it to change between releases.
+**Versioning.** `abi::VERSION` is the interface version (now 5: the plugin's own version and update source in the descriptor, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
 
 ## Checklist
 
 - [ ] `crate-type = ["cdylib"]`, 64-bit, `export_plugin!(YourType)`.
-- [ ] Unique, stable `ID`; `NAME` and `DESCRIPTION` marked with `n_`.
+- [ ] Unique, stable `ID`; `NAME` and `DESCRIPTION` marked with `n_`; `VERSION` from `Cargo.toml`, and `UPDATES` if you publish releases.
+- [ ] Viewers and editors: masks as narrow as the files you really open; `open_file` returns at once.
 - [ ] `start` returns helpful, translated errors (missing library, wrong version).
 - [ ] `handles` decides by name only and is fast (or returns false for a plugin that only opens connections).
 - [ ] `list` returns a complete index, or the asked-for folder (`complete: false`), and `NotFound` for what isn't a folder.

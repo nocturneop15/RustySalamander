@@ -159,13 +159,25 @@ pub struct Plugins {
     pub active: Vec<Arc<dyn FolderPlugin>>,
     /// Plugins that are on but couldn't start: (id, why).
     pub errors: Vec<(String, String)>,
+    /// The folders of plugins updated at this start, and the updates that
+    /// couldn't be put in place yet (they are tried again next time).
+    pub updated: Vec<String>,
+    pub update_failed: Vec<String>,
 }
 
 impl Plugins {
-    /// Find the plugins in [`plugins_dir`] and start all but the disabled ones.
+    /// Find the plugins in [`plugins_dir`] and start all but the disabled
+    /// ones; plugin updates downloaded last time are put in place first.
     pub fn load(disabled: &[String]) -> Plugins {
-        let mut p = Plugins::scan(plugins_dir().as_deref());
+        let dir = plugins_dir();
+        let (updated, failed) = dir.as_deref().map(crate::update::apply_staged).unwrap_or_default();
+        if !updated.is_empty() || !failed.is_empty() {
+            crate::debuglog::write(format!("startup: plugins updated {updated:?}, not updated {failed:?}"));
+        }
+        let mut p = Plugins::scan(dir.as_deref());
         p.start(disabled);
+        p.updated = updated;
+        p.update_failed = failed;
         p
     }
 
@@ -199,7 +211,7 @@ impl Plugins {
             }
         }
         found.sort_by_key(|a| a.info.name.to_lowercase());
-        Plugins { found: Arc::new(found), broken, active: Vec::new(), errors: Vec::new() }
+        Plugins { found: Arc::new(found), broken, active: Vec::new(), errors: Vec::new(), updated: Vec::new(), update_failed: Vec::new() }
     }
 
     /// Start the plugins that are on and stop the others; running ones keep

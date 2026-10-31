@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use sal_plugin_api::{export_plugin, mount_of, n_, tr, trf, Command, Field, FieldKind, FolderPlugin, Form, Index, Mount, Plugin, Progress, Reply, Values};
+use sal_plugin_api::{export_plugin, mount_of, n_, tr, trf, Command, Field, FieldKind, FolderPlugin, Form, Index, Mount, Plugin, Progress, Reply, Updates, Values};
 
 use crate::remote::{inner_path, list_command, parse_listing, quote, remote_path};
 use crate::ssh::{Auth, ConnectError, Connection, HostKey, HostKeys, Target};
@@ -68,6 +68,8 @@ fn home_dir() -> Option<PathBuf> {
 
 impl Plugin for Scp {
     const ID: &'static str = "scp";
+    const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+    const UPDATES: Updates = Updates { repo: "nocturneop15/RustySalamander", tag: "scp-v", changelog: "plugins/scp/CHANGELOG.md" };
     const NAME: &'static str = n_("SCP (SSH servers)");
     const DESCRIPTION: &'static str = n_("Connects to servers over SSH and works with their files through the SCP protocol. Start with Plugins → Connect to server…");
 
