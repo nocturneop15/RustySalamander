@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2-alpha (2026-10-31)
+
+- **Plugins named as such:** in Settings → Viewers and editors, a viewer or editor that a plugin provides reads "Plugin Viewer: Text and hex viewer", so it is clear it comes from a plugin; one whose plugin is off or missing reads "Plugin …: off or missing".
+
 ## 0.5.1-alpha (2026-10-31)
 
 - **Settings → Viewers and editors (new tab):** the default viewer (F3) and editor (F4), moved out of General → External programs. Each can be any viewer or editor a running plugin registers, Notepad, or a program of your own (with Browse…). A custom viewer or editor from an older config stays in use.

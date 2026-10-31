@@ -4554,7 +4554,7 @@ enum Browse {
 }
 
 /// A plugin's viewer or editor offered in Settings: plugin id, opener id,
-/// and how it reads ("Text and hex viewer (Viewer)").
+/// and how it reads ("Plugin Viewer: Text and hex viewer").
 type OpenerChoice = (String, String, String);
 
 /// The viewers (or editors) the running plugins register.
@@ -4564,7 +4564,8 @@ fn opener_choices(plugins: &Plugins, kind: OpenKind) -> Vec<OpenerChoice> {
         let name = plugins.name_of(p.id());
         for o in p.openers().into_iter().filter(|o| o.kind == kind) {
             let masks = if o.masks.trim() == "*" { String::new() } else { format!(" · {}", o.masks) };
-            out.push((p.id().to_owned(), o.id.clone(), format!("{} ({name}){masks}", o.label)));
+            let label = trf("Plugin {plugin}: {opener}", &[("plugin", &name), ("opener", &o.label)]);
+            out.push((p.id().to_owned(), o.id.clone(), format!("{label}{masks}")));
         }
     }
     out
@@ -4581,7 +4582,7 @@ fn open_with_label(w: Option<&OpenWith>, choices: &[OpenerChoice]) -> String {
             .iter()
             .find(|(p, o, _)| p == plugin && o == opener)
             .map(|c| c.2.clone())
-            .unwrap_or_else(|| trf("The {plugin} plugin (off or missing)", &[("plugin", plugin)])),
+            .unwrap_or_else(|| trf("Plugin {plugin}: off or missing", &[("plugin", plugin)])),
     }
 }
 
