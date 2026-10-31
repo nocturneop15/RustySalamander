@@ -93,6 +93,7 @@ impl DialogWin {
         let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| our_app_is_foreground()));
         let builder = ViewportBuilder::default()
             .with_title(title)
+            .with_icon(sal_ui::icon::program())
             .with_inner_size([width, 160.0])
             .with_position(pos)
             .with_resizable(false)

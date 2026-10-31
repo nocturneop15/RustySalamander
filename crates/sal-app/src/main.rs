@@ -50,7 +50,11 @@ fn main() -> eframe::Result<()> {
     // optional start directories: rustysalamander [left] [right]
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_title("RustySalamander").with_inner_size([1200.0, 760.0]).with_min_inner_size([640.0, 400.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_title("RustySalamander")
+            .with_icon(sal_ui::icon::program())
+            .with_inner_size([1200.0, 760.0])
+            .with_min_inner_size([640.0, 400.0]),
         ..Default::default()
     };
     debuglog::write("startup: creating the window");

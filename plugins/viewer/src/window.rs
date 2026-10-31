@@ -137,7 +137,7 @@ fn flush_messages() {
 
 /// A viewer window's size and title.
 fn window(title: &str) -> ViewportBuilder {
-    ViewportBuilder::default().with_title(title).with_inner_size([900.0, 650.0])
+    ViewportBuilder::default().with_title(title).with_icon(sal_ui::icon::viewer()).with_inner_size([900.0, 650.0])
 }
 
 /// How the program looks, which the windows follow.

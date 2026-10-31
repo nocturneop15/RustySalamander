@@ -17,6 +17,10 @@ pub(crate) const FONT: &[u8] = include_bytes!("../fonts/materialdesignicons-subs
 /// Its name in the font set.
 pub const FONT_NAME: &str = "mdi";
 
+// window icons (see crate::icon)
+pub const FORMAT_COLUMNS: &str = "\u{F08DF}";
+pub const FILE_EYE_OUTLINE: &str = "\u{F0DCB}";
+
 // drives and connections
 pub const HARDDISK: &str = "\u{F02CA}";
 pub const FOLDER_NETWORK: &str = "\u{F0870}";

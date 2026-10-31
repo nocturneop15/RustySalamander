@@ -3,6 +3,7 @@
 //! bars and the accent color.
 
 pub mod fonts;
+pub mod icon;
 pub mod mdi;
 
 /// Solid always-visible scrollbars, or egui's thin ones that appear on hover.

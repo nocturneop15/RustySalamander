@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.8-alpha (2026-10-31)
+
+- **Window icons:** the windows have icons of their own, drawn from Material Design Icons on a rust-colored square: two lists side by side for the program's main window and dialogs, a document with an eye for the viewer. Until now they showed egui's default "e" logo, which looked like Internet Explorer's.
+- **The Viewer plugin 0.5.4-alpha** is bundled, with its new window icon.
+
 ## 0.5.7-alpha (2026-10-31)
 
 - **Smaller program:** the built-in Material Design Icons font holds only the 32 icons the program uses (5 KB instead of 1.3 MB), in the program and in the Viewer plugin. `tools/subset-mdi.py` makes it again when an icon is added, and a test says when one is missing.
