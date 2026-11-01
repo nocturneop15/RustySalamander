@@ -2391,6 +2391,10 @@ impl App {
                 sizes.insert(e.path.clone(), info);
             }
         }
+        // sorted by size: folders by their sizes once known (not while counting, so nothing jumps)
+        if self.panels[idx].sort.key == SortKey::Size && !sizes.is_empty() {
+            self.panels[idx].keep_sorted_by_size(&|e| sizes.get(&e.path).filter(|i| i.done).map(|i| i.size.bytes));
+        }
         let use_icons = self.cfg.system_icons;
         let marks = self.panels[idx].archive.as_ref().map(|a| a.marks.clone()).filter(|m| !m.is_empty());
         let (weak, dark) = (ui.visuals().weak_text_color(), ui.visuals().dark_mode);
@@ -2446,7 +2450,8 @@ impl App {
                         for (key, title) in
                             [(SortKey::Name, tr("Name")), (SortKey::Ext, tr("Ext")), (SortKey::Size, tr("Size")), (SortKey::Time, tr("Date")), (SortKey::Attr, tr("Attr"))]
                         {
-                            h.col(|ui| {
+                            // the whole cell sorts, not only its title
+                            let (_, cell) = h.col(|ui| {
                                 let arrow = if sort.key == key {
                                     if sort.reverse {
                                         sal_ui::mdi::MENU_UP
@@ -2456,10 +2461,11 @@ impl App {
                                 } else {
                                     ""
                                 };
-                                if ui.add(egui::Label::new(RichText::new(format!("{title} {arrow}")).strong()).sense(Sense::click())).clicked() {
-                                    sort_click = Some(key);
-                                }
+                                ui.add(egui::Label::new(RichText::new(format!("{title} {arrow}")).strong()).selectable(false));
                             });
+                            if cell.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                sort_click = Some(key);
+                            }
                         }
                     })
                     .body(|body| {
@@ -7071,6 +7077,93 @@ mod tests {
             let out = ui.last.take().unwrap();
             ui.snap.render(&ui.ctx, out, bg, &out_dir.join(format!("all_drives_{ppp}.png")));
         }
+    }
+
+    /// Clicking a column header sorts the panel by that column, and again
+    /// in reverse; anywhere in the header cell counts, not only its title.
+    /// Sorted by size, folders go by their calculated sizes.
+    #[test]
+    fn header_clicks_sort() {
+        let t = tempfile::tempdir().unwrap();
+        let set_time = |p: &Path, secs: u64| fs::File::options().write(true).open(p).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+        // files whose names, extensions, sizes and dates are in different orders
+        for (name, size, secs) in [("b.txt", 300, 2_000_000), ("a.zip", 100, 3_000_000), ("c.doc", 200, 1_000_000)] {
+            fs::write(t.path().join(name), vec![b'x'; size]).unwrap();
+            set_time(&t.path().join(name), secs);
+        }
+        // folders: "aa" small, "zz" big
+        fs::create_dir_all(t.path().join("aa")).unwrap();
+        fs::write(t.path().join("aa").join("f"), vec![b'x'; 10]).unwrap();
+        fs::create_dir_all(t.path().join("zz")).unwrap();
+        fs::write(t.path().join("zz").join("f"), vec![b'x'; 10_000]).unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        crate::fonts::install(&ui.ctx, "", "");
+        ui.frames(2);
+        let names = |ui: &Ui| ui.app.panels[0].entries().iter().skip(1).map(|e| e.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&ui), ["aa", "zz", "a.zip", "b.txt", "c.doc"]);
+
+        // the header row is the top row of the list; its cells from the right:
+        // Attr 42, Date 120, Size 95, Ext 55 wide (plus the spacing)
+        let body = ui.app.body_rects[0];
+        let row_h = ui.ctx.style().text_styles[&egui::TextStyle::Body].size + 6.0;
+        let y = body.top() + row_h / 2.0;
+        let mut edges = vec![body.right()];
+        for w in [42.0, 120.0, 95.0, 55.0] {
+            let last = *edges.last().unwrap();
+            edges.push(last - w - 8.0);
+        }
+        let cell = |key: SortKey| match key {
+            SortKey::Attr => (edges[1], edges[0]),
+            SortKey::Time => (edges[2], edges[1]),
+            SortKey::Size => (edges[3], edges[2]),
+            SortKey::Ext => (edges[4], edges[3]),
+            SortKey::Name => (body.left(), edges[4]),
+        };
+        let click = |ui: &mut Ui, x: f32| {
+            let pos = egui::pos2(x, y);
+            ui.run(vec![Event::PointerMoved(pos)], Modifiers::NONE);
+            ui.run(vec![Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }], Modifiers::NONE);
+            ui.run(vec![Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+            ui.frames(2);
+        };
+        for (key, order) in [
+            (SortKey::Ext, ["aa", "zz", "c.doc", "b.txt", "a.zip"]),
+            (SortKey::Size, ["aa", "zz", "a.zip", "c.doc", "b.txt"]),
+            (SortKey::Time, ["aa", "zz", "c.doc", "b.txt", "a.zip"]),
+            (SortKey::Name, ["aa", "zz", "a.zip", "b.txt", "c.doc"]),
+        ] {
+            let (l, r) = cell(key);
+            // on the title
+            click(&mut ui, l + 12.0);
+            assert_eq!(ui.app.panels[0].sort, sal_core::SortSpec { key, reverse: false }, "{key:?} on its title");
+            // in the empty part of the cell: the other way round
+            click(&mut ui, r - 10.0);
+            assert_eq!(ui.app.panels[0].sort, sal_core::SortSpec { key, reverse: true }, "{key:?} in the empty part");
+            click(&mut ui, r - 10.0);
+            assert_eq!(ui.app.panels[0].sort.key, key);
+            if ui.app.panels[0].sort.reverse {
+                click(&mut ui, r - 10.0);
+            }
+            assert_eq!(names(&ui), order, "{key:?}");
+        }
+
+        // sorted by size, folders go by their sizes once calculated (Alt+F10 on both)
+        let (_, r) = cell(SortKey::Size);
+        click(&mut ui, r - 10.0);
+        assert_eq!(ui.app.panels[0].sort, sal_core::SortSpec { key: SortKey::Size, reverse: false });
+        for d in ["aa", "zz"] {
+            ui.app.dir_sizes.restart(t.path().join(d), &ui.ctx.clone());
+        }
+        for _ in 0..500 {
+            ui.frames(1);
+            if !ui.app.dir_sizes.busy() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ui.frames(2);
+        click(&mut ui, r - 10.0);
+        assert_eq!(names(&ui), ["zz", "aa", "b.txt", "c.doc", "a.zip"], "largest first, folders by their sizes");
     }
 
     fn type_path(ui: &mut Ui, text: &str) {

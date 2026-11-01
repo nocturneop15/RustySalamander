@@ -354,13 +354,27 @@ impl Panel {
 
     /// Sort by `sort`, keeping the cursor on its item.
     pub fn resort(&mut self, sort: SortSpec) {
+        self.resort_sized(sort, &|_| None);
+    }
+
+    /// Sort by `sort`, folders by the sizes `dir_size` knows, keeping the
+    /// cursor on its item.
+    pub fn resort_sized(&mut self, sort: SortSpec, dir_size: sal_core::sort::DirSizeOf) {
         self.sort = sort;
         let focus = self.current().map(|e| e.name.clone());
-        sal_core::sort::sort_entries(&mut self.listing.entries, sort);
+        sal_core::sort::sort_entries_sized(&mut self.listing.entries, sort, dir_size);
         if let Some(n) = focus {
             self.cursor = self.listing.entries.iter().position(|e| e.name == n).unwrap_or(0);
         }
         self.scroll_to_cursor = true;
+    }
+
+    /// Sorted by size: put folders whose size became known (calculated, or
+    /// listed again) in their place.
+    pub fn keep_sorted_by_size(&mut self, dir_size: sal_core::sort::DirSizeOf) {
+        if self.sort.key == sal_core::SortKey::Size && !sal_core::sort::is_sorted(&self.listing.entries, self.sort, dir_size) {
+            self.resort_sized(self.sort, dir_size);
+        }
     }
 
     /// Leave a plugin's connection (closed, or its plugin turned off): back

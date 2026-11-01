@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.2-alpha (2026-11-01)
+
+- **Sorting by a column header works anywhere in the header:** a click sorted only when it hit the column's title; most of the Ext, Size and Date headers did nothing. The whole header cell sorts now (the pointer turns into a hand), in the panels and in the search results window.
+- **Sorted by size, folders go by their sizes:** once a folder's size is calculated (Shift+Space, Alt+F10), or inside an archive, where it is known, sorting by size puts it in its place instead of counting it as empty; a panel sorted by size re-sorts when a calculation finishes (not while it counts, so nothing jumps).
+
 ## 0.7.1-alpha (2026-11-01)
 
 - **Calmer copy and move progress:** the speed and the time left are worked out every 2 seconds instead of with every bit of progress, so they no longer jump about; when moving, the progress bars and counts move every 2 seconds too (the name of the file being moved stays current).

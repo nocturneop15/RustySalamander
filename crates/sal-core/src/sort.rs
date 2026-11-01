@@ -124,13 +124,19 @@ pub fn cmp_name_ext(a: &FileEntry, b: &FileEntry) -> Ordering {
     logical_cmp(a.base(), b.base(), true).then_with(|| logical_cmp(a.ext(), b.ext(), true)).then_with(|| logical_cmp(&a.name, &b.name, false))
 }
 
-/// Compare by one key (names break ties elsewhere).
-fn cmp_by(a: &FileEntry, b: &FileEntry, key: SortKey) -> Ordering {
+/// The size of a folder, when known (calculated, or from an archive's
+/// index); `None` sorts it as empty.
+pub type DirSizeOf<'a> = &'a dyn Fn(&FileEntry) -> Option<u64>;
+
+/// Compare by one key (names break ties elsewhere); folders by the sizes
+/// `dir_size` knows.
+fn cmp_by(a: &FileEntry, b: &FileEntry, key: SortKey, dir_size: DirSizeOf) -> Ordering {
+    let size = |e: &FileEntry| if e.kind == EntryKind::File { e.size } else { dir_size(e).unwrap_or(0) };
     match key {
         SortKey::Name => Ordering::Equal,
         SortKey::Ext => logical_cmp(a.ext(), b.ext(), true),
         SortKey::Time => a.modified.cmp(&b.modified),
-        SortKey::Size => a.size.cmp(&b.size),
+        SortKey::Size => size(a).cmp(&size(b)),
         SortKey::Attr => a.attrs.cmp(&b.attrs),
     }
 }
@@ -144,19 +150,35 @@ fn group(e: &FileEntry) -> u8 {
     }
 }
 
+/// The panel's order of two items: `..` first, then directories, then
+/// files; `reverse` flips the order within each group only.
+fn cmp_entries(a: &FileEntry, b: &FileEntry, spec: SortSpec, dir_size: DirSizeOf) -> Ordering {
+    group(a).cmp(&group(b)).then_with(|| {
+        let r = cmp_by(a, b, spec.key, dir_size).then_with(|| cmp_name_ext(a, b));
+        if spec.reverse {
+            r.reverse()
+        } else {
+            r
+        }
+    })
+}
+
 /// Sort a panel: `..` first, then directories, then files; `reverse` flips
-/// the order within each group only.
+/// the order within each group only. Folders count as empty when sorted by
+/// size (see [`sort_entries_sized`]).
 pub fn sort_entries(entries: &mut [FileEntry], spec: SortSpec) {
-    entries.sort_by(|a, b| {
-        group(a).cmp(&group(b)).then_with(|| {
-            let r = cmp_by(a, b, spec.key).then_with(|| cmp_name_ext(a, b));
-            if spec.reverse {
-                r.reverse()
-            } else {
-                r
-            }
-        })
-    });
+    sort_entries_sized(entries, spec, &|_| None);
+}
+
+/// Sort a panel as [`sort_entries`] does, folders by the sizes `dir_size`
+/// knows.
+pub fn sort_entries_sized(entries: &mut [FileEntry], spec: SortSpec, dir_size: DirSizeOf) {
+    entries.sort_by(|a, b| cmp_entries(a, b, spec, dir_size));
+}
+
+/// Whether `entries` are in the order [`sort_entries_sized`] gives.
+pub fn is_sorted(entries: &[FileEntry], spec: SortSpec, dir_size: DirSizeOf) -> bool {
+    entries.windows(2).all(|w| cmp_entries(&w[0], &w[1], spec, dir_size) != Ordering::Greater)
 }
 
 #[cfg(test)]
@@ -182,6 +204,27 @@ mod tests {
         assert_eq!(logical_cmp("ŽLUŤOUČKÝ", "žluťoučký", true), Equal);
         assert_eq!(logical_cmp("ΑΒΓ", "αβγ", true), Equal);
         assert_eq!(logical_cmp("Straße 2", "straße 10", true), Less);
+    }
+
+    #[test]
+    fn folders_by_their_sizes() {
+        let mk = |n: &str, k, size| FileEntry::new(PathBuf::from(n), k, size, None, 0);
+        let mut v = vec![mk("small", EntryKind::Dir, 0), mk("big", EntryKind::Dir, 0), mk("unknown", EntryKind::Dir, 0), mk("b.txt", EntryKind::File, 5), mk("a.txt", EntryKind::File, 9)];
+        let spec = SortSpec { key: SortKey::Size, reverse: false };
+        let sizes = |e: &FileEntry| match e.name.as_str() {
+            "small" => Some(10),
+            "big" => Some(1_000),
+            _ => None,
+        };
+        sort_entries_sized(&mut v, spec, &sizes);
+        let names: Vec<_> = v.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["unknown", "small", "big", "b.txt", "a.txt"], "an unknown size counts as empty");
+        assert!(is_sorted(&v, spec, &sizes));
+        assert!(!is_sorted(&v, SortSpec { key: SortKey::Size, reverse: true }, &sizes));
+        // without the sizes the folders are by name
+        sort_entries(&mut v, spec);
+        let names: Vec<_> = v.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["big", "small", "unknown", "b.txt", "a.txt"]);
     }
 
     #[test]

@@ -280,16 +280,18 @@ impl ResultsWin {
             table
                 .header(row_h, |mut h| {
                     for (col, label) in &headers {
-                        h.col(|ui| {
+                        // the whole cell sorts, not only its title
+                        let (_, cell) = h.col(|ui| {
                             let mark = match self.sort {
                                 Some((c, true)) if c == *col => sal_ui::mdi::MENU_UP,
                                 Some((c, false)) if c == *col => sal_ui::mdi::MENU_DOWN,
                                 _ => "",
                             };
-                            if ui.add(egui::Label::new(RichText::new(format!("{label} {mark}")).strong()).sense(egui::Sense::click())).clicked() {
-                                clicked_sort = Some(*col);
-                            }
+                            ui.add(egui::Label::new(RichText::new(format!("{label} {mark}")).strong()).selectable(false));
                         });
+                        if cell.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            clicked_sort = Some(*col);
+                        }
                     }
                 })
                 .body(|body| {
