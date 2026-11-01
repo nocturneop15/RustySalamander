@@ -199,6 +199,15 @@ pub trait Plugin: FolderPlugin + Sized + 'static {
     const VERSION: &'static str;
     /// Where newer versions are published; the default is nowhere.
     const UPDATES: Updates = Updates::NONE;
+    /// The oldest RustySalamander version the plugin works with (`"0.6.0"`),
+    /// when it needs something only newer ones have; empty (the default)
+    /// for any. An older program doesn't load it, and its update check
+    /// doesn't offer it.
+    const PROGRAM_MIN: &'static str = "";
+    /// The newest RustySalamander version the plugin works with, itself
+    /// included; empty (the default) for any. A plugin that is being phased
+    /// out sets it: newer programs don't load it.
+    const PROGRAM_MAX: &'static str = "";
     /// Start it; `dir` is the plugin's folder. The error says why it can't run.
     fn start(dir: &Path) -> Result<Self, String>;
 }

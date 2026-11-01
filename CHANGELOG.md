@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0-alpha (2026-11-01)
+
+- **Update all:** when more than one update can be installed, the update window has an **Update all** button that starts them all.
+- **Updates made for other program versions are greyed:** a plugin release says which RustySalamander versions it works with (in its notes); an update this version is outside of is shown greyed with the reason ("needs RustySalamander 0.7.0 or later"), and Update all leaves it out.
+- **Plugins say which program versions they work with:** plugin interface version 6 lets a plugin name the oldest and the newest RustySalamander it works with (`PROGRAM_MIN`, `PROGRAM_MAX`), so plugins can be phased out. A program outside the range doesn't load it, and Settings → Plugins says why. Plugins built for interface 5 keep working, with no limits.
+- **The plugins** are built for interface 6: 7-Zip, SCP and Search 0.5.1-alpha, Viewer 0.5.6-alpha.
+
 ## 0.5.9-alpha (2026-11-01)
 
 - **The exe has an icon:** `rustysalamander.exe` carries the program's icon (two lists side by side on a rust-colored square, from 16 to 256 pixels), so Explorer, shortcuts and the Start menu show it, and version information, so Windows names it "RustySalamander" (file properties, Task Manager).

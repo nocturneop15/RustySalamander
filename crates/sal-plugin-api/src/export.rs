@@ -93,6 +93,8 @@ pub const fn descriptor<T: Plugin>(vtable: &'static VTable) -> Descriptor {
         update_repo: Str::new(T::UPDATES.repo),
         update_tag: Str::new(T::UPDATES.tag),
         changelog: Str::new(T::UPDATES.changelog),
+        program_min: Str::new(T::PROGRAM_MIN),
+        program_max: Str::new(T::PROGRAM_MAX),
     }
 }
 

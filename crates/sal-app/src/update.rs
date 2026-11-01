@@ -58,6 +58,29 @@ pub struct Release {
     pub asset: String,
     pub asset_url: String,
     pub asset_size: u64,
+    /// The program versions a plugin release works with, from its notes
+    /// ([`program_range`]); empty for no limit.
+    pub program_min: String,
+    pub program_max: String,
+}
+
+/// The line in a plugin release's notes saying which program versions it
+/// works with: `<!-- rustysalamander-program: 0.6.0 .. 0.9.0 -->`, either
+/// side empty for no limit. Written when the release is published, from the
+/// plugin's [`sal_plugin_api::Plugin::PROGRAM_MIN`] and `PROGRAM_MAX`.
+pub const PROGRAM_MARK: &str = "rustysalamander-program:";
+
+/// The program versions a release's notes say it works with (`min`, `max`);
+/// empty for no limit, also when the notes say nothing.
+pub fn program_range(notes: &str) -> (String, String) {
+    let Some(at) = notes.find(PROGRAM_MARK) else { return Default::default() };
+    let rest = &notes[at + PROGRAM_MARK.len()..];
+    let line = rest.split(['\n', '\r']).next().unwrap_or_default();
+    let line = line.split("-->").next().unwrap_or_default();
+    match line.split_once("..") {
+        Some((min, max)) => (min.trim().to_owned(), max.trim().to_owned()),
+        None => (line.trim().to_owned(), String::new()),
+    }
 }
 
 /// What an update is for.
@@ -82,6 +105,15 @@ pub struct Update {
 }
 
 impl Update {
+    /// Whether this program can run it; if not, why (a plugin made for other
+    /// program versions).
+    pub fn fits(&self) -> Result<(), String> {
+        match self.target {
+            Target::Program => Ok(()),
+            Target::Plugin { .. } => crate::plugins::program_fits(&self.release.program_min, &self.release.program_max),
+        }
+    }
+
     /// "RustySalamander", or the plugin's name.
     pub fn name(&self) -> &str {
         match &self.target {
@@ -222,7 +254,10 @@ pub fn newest(json: &str, prefix: &str, current: &str, accept: &dyn Fn(&str) -> 
         }
         let assets = r["assets"].as_array().map(Vec::as_slice).unwrap_or_default();
         let Some(zip) = assets.iter().find(|a| a["name"].as_str().is_some_and(accept)) else { continue };
+        let (program_min, program_max) = program_range(r["body"].as_str().unwrap_or_default());
         let release = Release {
+            program_min,
+            program_max,
             version: version.to_owned(),
             tag: tag.to_owned(),
             page: r["html_url"].as_str().unwrap_or_default().to_owned(),
@@ -753,6 +788,24 @@ mod tests {
         // nothing could be read: an error
         assert_eq!(check(&plugins, &mut |_| Err("offline".into())).unwrap_err(), "offline");
         assert!(!plugin_zip("viewer", "viewer-0.6.0.zip") && !plugin_zip("viewer", "viewerx-0.6.0-api5.zip"));
+    }
+
+    /// A plugin release's notes say which program versions it works with.
+    #[test]
+    fn program_versions_from_the_notes() {
+        assert_eq!(program_range("Text.\n<!-- rustysalamander-program: 0.6.0 .. 0.9.0 -->\nMore."), ("0.6.0".into(), "0.9.0".into()));
+        assert_eq!(program_range("<!-- rustysalamander-program: 0.6.0-alpha .. -->"), ("0.6.0-alpha".into(), String::new()));
+        assert_eq!(program_range("<!-- rustysalamander-program: .. 0.7.0 -->"), (String::new(), "0.7.0".into()));
+        assert_eq!(program_range("rustysalamander-program: 0.6.0\r\n"), ("0.6.0".into(), String::new()));
+        assert_eq!(program_range("Nothing said."), (String::new(), String::new()));
+        // the release list carries them to the update
+        let json = format!(
+            r#"[{{"tag_name": "viewer-v0.9.0", "draft": false, "html_url": "p", "body": "New.\r\n<!-- rustysalamander-program: 99.0.0 .. -->",
+                 "assets": [{{"name": "viewer-0.9.0-api{now}.zip", "browser_download_url": "x", "size": 2}}]}}]"#,
+            now = abi::VERSION
+        );
+        let r = newest(&json, "viewer-v", "0.5.0", &|n| plugin_zip("viewer", n)).unwrap().unwrap();
+        assert_eq!((r.program_min.as_str(), r.program_max.as_str()), ("99.0.0", ""));
     }
 
     #[test]

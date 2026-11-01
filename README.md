@@ -231,7 +231,11 @@ At start-up the program asks GitHub whether newer releases exist, of the program
 
 **The program:** **Update now** downloads it and unpacks it into a folder named by the version, next to the folder the program runs from (`…\RustySalamander\0.2.1-alpha` → `…\RustySalamander\0.3.0-alpha`), then copies the settings there: `config.toml` and the files plugins saved in their folders (such as the SCP plugin's `known_hosts`). **Start the new version** opens it and closes the old one. The old version stays as it was, so you can go back to it.
 
-**A plugin:** **Update now** downloads it into `plugins\.updates`; it replaces the plugin's files when the program starts again (**Restart now** does that at once). What the plugin saved in its folder stays. A plugin is only offered in a build for an interface version this program has.
+**A plugin:** **Update now** downloads it into `plugins\.updates`; it replaces the plugin's files when the program starts again (**Restart now** does that at once). What the plugin saved in its folder stays. A plugin is only offered in a build for an interface version this program has. A plugin release made for other program versions (its notes say which) is shown greyed, with the reason, and can't be installed.
+
+**Update all** appears when more than one update can be installed: it starts all of them at once (not the greyed ones).
+
+**Plugins for other program versions:** a plugin can say which RustySalamander versions it works with. One made for a newer program, or phased out before this one, isn't loaded; Settings → Plugins lists it with the reason.
 
 **Help → Check for updates…** checks at any time. **Settings → General → Updates** turns the start-up check off (`check_updates` in `config.toml`).
 

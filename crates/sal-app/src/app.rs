@@ -2800,7 +2800,9 @@ impl App {
                 let states: Vec<Option<Progress>> = rows.iter().map(|r| r.install.as_ref().map(|i| i.lock().unwrap().clone())).collect();
                 let running = states.iter().any(|s| matches!(s, Some(Progress::Downloading { .. } | Progress::Unpacking)));
                 let staged = states.iter().any(|s| matches!(s, Some(Progress::Staged)));
+                let ready = startable(rows, &states);
                 let (mut open_page, mut start, mut toggle_log, mut run_new, mut restart) = (None, None, None, None, false);
+                let mut update_all = false;
                 let title = if rows.len() == 1 { tr("Update available") } else { tr("Updates available") };
                 dw.modal().show(ctx, &mut self.dialog_places, "update", title, 560.0, &mut enter, &mut escape, &mut |ui| {
                     for (i, (row, state)) in rows.iter().zip(&states).enumerate() {
@@ -2815,6 +2817,8 @@ impl App {
                                 }
                             });
                             let plugin = matches!(u.target, Target::Plugin { .. });
+                            // a plugin made for other program versions is shown, greyed
+                            let fits = u.fits();
                             let mut offer = |ui: &mut egui::Ui, action: Option<&str>| {
                                 ui.horizontal(|ui| {
                                     let log = if row.show_log { tr("Hide changelog") } else { tr("Show changelog") };
@@ -2822,7 +2826,7 @@ impl App {
                                         toggle_log = Some(i);
                                     }
                                     if let Some(action) = action {
-                                        if ui.add_enabled(!running, egui::Button::new(action)).clicked() {
+                                        if ui.add_enabled(!running && fits.is_ok(), egui::Button::new(action)).clicked() {
                                             start = Some(i);
                                         }
                                     }
@@ -2830,7 +2834,9 @@ impl App {
                             };
                             match state {
                                 None => {
-                                    if plugin {
+                                    if let Err(why) = &fits {
+                                        ui.colored_label(ui.visuals().warn_fg_color, trf("This version can't be installed here: it {why}.", &[("why", why)]));
+                                    } else if plugin {
                                         ui.label(tr("Update now downloads it; it is installed when RustySalamander starts again. What the plugin saved stays."));
                                     } else {
                                         let folder = crate::update::target_dir(&u.release).map(|p| display_path(&p)).unwrap_or_default();
@@ -2903,13 +2909,24 @@ impl App {
                     if staged {
                         ui.label(tr("Plugin updates are installed when RustySalamander starts again."));
                         ui.add_space(4.0);
-                        match centered_buttons(ui, &[(tr("Restart now"), tr("Closes and starts RustySalamander again")), (tr("Close"), "")]) {
-                            Some(0) => restart = true,
-                            Some(_) => outcome = 2,
-                            None => {}
+                    }
+                    // Update all when more than one can start; Restart now once a
+                    // plugin waits for it; Close
+                    let all = ready.len() > 1 && !running;
+                    let mut buttons = Vec::new();
+                    if all {
+                        buttons.push((tr("Update all"), tr("Downloads and installs every update that can be installed")));
+                    }
+                    if staged {
+                        buttons.push((tr("Restart now"), tr("Closes and starts RustySalamander again")));
+                    }
+                    buttons.push((tr("Close"), ""));
+                    if let Some(b) = centered_buttons(ui, &buttons) {
+                        match (b, all, staged) {
+                            (0, true, _) => update_all = true,
+                            (0, false, true) | (1, true, true) => restart = true,
+                            _ => outcome = 2,
                         }
-                    } else if centered_buttons(ui, &[(tr("Close"), "")]).is_some() {
-                        outcome = 2;
                     }
                 });
                 // the window stays while a download runs
@@ -2932,7 +2949,8 @@ impl App {
                         row.changelog = Some(crate::update::changelog(ctx, &row.update));
                     }
                 }
-                if let Some(i) = start {
+                let to_start: Vec<usize> = if update_all { ready } else { start.into_iter().collect() };
+                for i in to_start {
                     if rows[i].update.target == Target::Program {
                         // the settings as they are now go to the new version
                         self.save_config();
@@ -4399,6 +4417,18 @@ fn strip_color(v: &egui::Visuals) -> Color32 {
 /// How many search results a session keeps; the oldest are closed.
 const MAX_RESULTS: usize = 10;
 
+/// The updates that can be installed now: not started (or failed), and made
+/// for this program.
+fn startable(rows: &[UpdateRow], states: &[Option<crate::update::Progress>]) -> Vec<usize> {
+    use crate::update::Progress;
+    rows.iter()
+        .zip(states)
+        .enumerate()
+        .filter(|(_, (row, state))| row.update.fits().is_ok() && matches!(state, None | Some(Progress::Failed(_))))
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// What the update check looks at for the plugins found: those that say
 /// where they are published.
 fn update_sources(plugins: &Plugins) -> Vec<crate::update::PluginSource> {
@@ -5556,6 +5586,19 @@ mod tests {
         assert!(viewed[0].ends_with(Path::new("docs").join("zpráva 🦎.txt")), "{viewed:?}");
         let opened = ui.recorder.opened.lock().unwrap();
         assert_eq!(opened[0].2["temporary"], "1", "the viewer is told it is a temporary copy");
+    }
+
+    /// A plugin is loaded only by the program versions it says it works with.
+    #[test]
+    fn plugins_say_which_program_versions_they_need() {
+        let this = env!("CARGO_PKG_VERSION");
+        assert!(plugins::program_fits("", "").is_ok());
+        assert!(plugins::program_fits(this, this).is_ok(), "both ends included");
+        assert!(plugins::program_fits("0.1.0", "").is_ok() && plugins::program_fits("", "99.0.0").is_ok());
+        assert!(plugins::program_fits("not a version", "").is_ok(), "a range that can't be read is no limit");
+        assert_eq!(plugins::program_fits("99.0.0", "").unwrap_err(), "needs RustySalamander 99.0.0 or later");
+        assert_eq!(plugins::program_fits("", "0.1.0").unwrap_err(), "works with RustySalamander up to 0.1.0 only");
+        assert_eq!(plugins::program_fits("98.0.0", "99.0.0").unwrap_err(), "needs RustySalamander 98.0.0 to 99.0.0");
     }
 
     /// A plugins folder for one test, `target\<profile>\test-plugins\<name>`:
@@ -7238,6 +7281,8 @@ mod tests {
             asset: asset.into(),
             asset_url: String::new(),
             asset_size: 7_126_108,
+            program_min: String::new(),
+            program_max: String::new(),
         };
         let program = Update {
             target: Target::Program,
@@ -7285,6 +7330,25 @@ mod tests {
             ui.key(Key::Escape);
             ui.frames(1);
             assert_eq!(matches!(ui.app.dialog, Dialog::Update { .. }), running, "{name}: Escape");
+        }
+        ui.app.dialog = Dialog::None;
+
+        // a plugin made for a newer program is greyed and left out of Update all
+        let mut newer = plugin.clone();
+        newer.target = Target::Plugin { id: "search".into(), name: "Search".into(), dir: t.path().join("plugins").join("search") };
+        newer.release.program_min = "99.0.0".into();
+        let mut scp = plugin.clone();
+        scp.target = Target::Plugin { id: "scp".into(), name: "SCP".into(), dir: t.path().join("plugins").join("scp") };
+        assert!(newer.fits().unwrap_err().contains("99.0.0"));
+        let rows = vec![UpdateRow::new(program.clone()), UpdateRow::new(plugin.clone()), UpdateRow::new(newer), UpdateRow::new(scp)];
+        let states = [None, Some(Progress::Staged), None, Some(Progress::Failed("offline".into()))];
+        assert_eq!(startable(&rows, &states), [0, 3], "not the staged one, not the one for a newer program; a failed one again");
+        ui.app.dialog = Dialog::Update { rows };
+        ui.frames(4);
+        if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &dir.join("update_all.png"));
         }
         ui.app.dialog = Dialog::None;
         // the changelog's text, as laid out

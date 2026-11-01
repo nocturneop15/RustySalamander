@@ -25,6 +25,12 @@ pub struct Info {
     pub interface: u32,
     /// Where newer versions are published, if anywhere.
     pub updates: Option<Source>,
+    /// The oldest program version it works with; empty for any (and for
+    /// plugins built for interface 5).
+    pub program_min: String,
+    /// The newest program version it works with, itself included; empty for
+    /// any.
+    pub program_max: String,
 }
 
 /// [`crate::Updates`] of a plugin, as the program keeps it.
@@ -54,6 +60,8 @@ pub unsafe fn info(desc: &'static Descriptor) -> Result<Info, String> {
     }
     let repo = desc.update_repo.get().to_owned();
     let updates = (!repo.is_empty()).then(|| Source { repo, tag: desc.update_tag.get().to_owned(), changelog: desc.changelog.get().to_owned() });
+    // fields added in version 6 aren't there in older plugins' descriptors
+    let (program_min, program_max) = if desc.version >= 6 { (desc.program_min.get().to_owned(), desc.program_max.get().to_owned()) } else { Default::default() };
     Ok(Info {
         id,
         name: desc.name.get().to_owned(),
@@ -61,6 +69,8 @@ pub unsafe fn info(desc: &'static Descriptor) -> Result<Info, String> {
         version: desc.plugin_version.get().to_owned(),
         interface: desc.version,
         updates,
+        program_min,
+        program_max,
     })
 }
 
@@ -362,6 +372,8 @@ mod tests {
         const DESCRIPTION: &'static str = "Files in memory.";
         const VERSION: &'static str = "1.2.3-beta";
         const UPDATES: crate::Updates = crate::Updates { repo: "me/mem", tag: "mem-v", changelog: "CHANGELOG.md" };
+        const PROGRAM_MIN: &'static str = "0.6.0";
+        const PROGRAM_MAX: &'static str = "0.9.0";
         fn start(dir: &Path) -> Result<Self, String> {
             if dir.ends_with("bad") {
                 return Err(format!("{} is bad", dir.display()));
@@ -393,8 +405,14 @@ mod tests {
                 version: "1.2.3-beta".into(),
                 interface: VERSION,
                 updates: Some(Source { repo: "me/mem".into(), tag: "mem-v".into(), changelog: "CHANGELOG.md".into() }),
+                program_min: "0.6.0".into(),
+                program_max: "0.9.0".into(),
             }
         );
+        // a plugin built for interface 5 has no program range
+        static FIVE: Descriptor = Descriptor { version: 5, ..crate::export::descriptor::<Mem>(&VTABLE) };
+        let five = unsafe { super::info(&FIVE) }.unwrap();
+        assert_eq!((five.program_min.as_str(), five.program_max.as_str(), five.interface), ("", "", 5));
         assert_eq!(unsafe { start(&DESCRIPTOR, &HOST, Path::new("C:\\x\\bad")) }.err().unwrap(), "C:\\x\\bad is bad");
         let p = unsafe { start(&DESCRIPTOR, &HOST, Path::new("C:\\plugins\\mem")) }.unwrap();
         let t = std::env::temp_dir().join(format!("sal-plugin-api-{}", std::process::id()));

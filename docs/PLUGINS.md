@@ -165,6 +165,7 @@ Plugins only ever see the file and inner paths. `sal_plugin_api::join_inner(base
 | `const NAME` | Short name for Settings, in English, marked with `n_` (see [Translations](#translations)). |
 | `const DESCRIPTION` | One or two sentences, in English, marked with `n_`. |
 | `const VERSION` | The plugin's own version, a semantic version: `env!("CARGO_PKG_VERSION")`. It is independent of the program's; Settings shows it and the update check compares it. |
+| `const PROGRAM_MIN`, `const PROGRAM_MAX` | The oldest and newest RustySalamander versions the plugin works with (both included); empty, the default, for no limit. See [Versions and updates](#versions-and-updates). |
 | `const UPDATES` | Where newer versions are published (`Updates { repo, tag, changelog }`); the default `Updates::NONE` means nowhere. See [Versions and updates](#versions-and-updates). |
 | `fn start(dir) -> Result<Self, String>` | Called when the plugin is turned on. `dir` is the plugin's folder. Load libraries or settings from there. On failure, return a message telling the user what is wrong and how to fix it (e.g. "7z.dll is missing in …"). It is shown in Settings, so translate it. |
 
@@ -279,7 +280,11 @@ A plugin has its **own version** (`Plugin::VERSION`), apart from the program's, 
 - **`tag`**: what the tags of the plugin's releases start with, followed by the version: `viewer-v` → `viewer-v0.6.0`. The program's own releases are `v<version>`.
 - **`changelog`**: the changelog's path in the repository (`plugins/viewer/CHANGELOG.md`). The update window shows the sections between the installed version and the new one, read at the release's tag.
 
-**A release** of a plugin has one zip, named `<id>-<version>-api<interface>.zip` (`viewer-0.6.0-api5.zip`), holding the plugin's folder: the `.spl`, its libraries, `lang`, licenses and the changelog. The interface number is `abi::VERSION` the plugin was built for; the program only offers a zip for an interface it has. Several zips for different interfaces may be attached to one release.
+**Program versions:** a plugin that needs something only newer programs have sets `Plugin::PROGRAM_MIN` (`"0.7.0"`), and one that is being phased out sets `Plugin::PROGRAM_MAX`, the newest program it works with, itself included. Empty, the default, means no limit. A program outside the range doesn't load the plugin and lists it in Settings with the reason ("needs RustySalamander 0.7.0 or later (this is 0.6.0-alpha)"). Versions compare as semantic versions, so `0.7.0-alpha` comes before `0.7.0`.
+
+**A release** of a plugin has one zip, named `<id>-<version>-api<interface>.zip` (`viewer-0.6.0-api6.zip`), holding the plugin's folder: the `.spl`, its libraries, `lang`, licenses and the changelog. The interface number is `abi::VERSION` the plugin was built for; the program only offers a zip for an interface it has. Several zips for different interfaces may be attached to one release.
+
+**Its notes** say which program versions it works with, so the update check knows before downloading: a line `<!-- rustysalamander-program: <PROGRAM_MIN> .. <PROGRAM_MAX> -->` (either side empty for no limit; no line, no limit). An update the running program is outside of is shown greyed, with the reason, and isn't installed by Update all.
 
 **Installing:** the zip is unpacked into `plugins\.updates\<folder>`, and the next start copies it over the plugin's folder before the plugins are loaded (the DLL is in use while the program runs). Files the plugin saved in its folder stay.
 
@@ -392,7 +397,7 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 
 Commands, replies, forms and values cross the interface as text: lists of strings, each encoded as `<length>:<bytes>,` (`sal_plugin_api::ui::encode`). This way forms can gain new kinds of fields without changing the function table.
 
-**Versioning.** `abi::VERSION` is the interface version (now 5: the plugin's own version and update source in the descriptor, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
+**Versioning.** `abi::VERSION` is the interface version (now 6: the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
 
 ## Checklist
 

@@ -2,7 +2,7 @@
 name = "sal-plugin-scp"
 description = "RustySalamander plugin: files on SSH servers through the SCP protocol"
 # the plugin's own version, apart from the program's
-version = "0.5.0-alpha"
+version = "0.5.1-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

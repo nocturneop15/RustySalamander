@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
 /// changes (see the module's "Versions").
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// The oldest interface version the program still runs plugins of. Version
 /// 5 is the first that tells the plugin's own version.
@@ -279,6 +279,12 @@ pub struct Descriptor {
     pub update_tag: Str,
     /// Version 5: [`crate::Updates::changelog`].
     pub changelog: Str,
+    /// Version 6: the oldest program version the plugin works with
+    /// ([`crate::Plugin::PROGRAM_MIN`]); empty for any.
+    pub program_min: Str,
+    /// Version 6: the newest program version the plugin works with
+    /// ([`crate::Plugin::PROGRAM_MAX`]); empty for any.
+    pub program_max: Str,
 }
 
 /// The functions of a started plugin; see [`crate::FolderPlugin`] for what

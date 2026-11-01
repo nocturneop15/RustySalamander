@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.6-alpha (2026-11-01)
+
+- **Plugin interface 6:** built for interface 6 (RustySalamander 0.6.0-alpha and later), which lets plugins say which program versions they work with; no change in what it does.
+
 ## 0.5.5-alpha (2026-11-01)
 
 - **An accent color for each theme:** the windows follow the light and the dark theme's own accent colors chosen in the program (RustySalamander 0.5.9-alpha and later); with older versions, the one color they send.

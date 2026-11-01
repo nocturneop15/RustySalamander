@@ -27,6 +27,8 @@ use sal_plugin_api::abi::{self, Descriptor, HostApi, Str, StrOut};
 use sal_plugin_api::host::{self, Info};
 pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Reply, Results, Values};
 
+use crate::i18n::trf;
+
 /// An open connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Connection {
@@ -106,6 +108,23 @@ pub fn mount_root_of(path: &Path) -> Option<(PathBuf, String)> {
 /// Translates a plugin's text; `ctx` is its `lang` folder (a `PathBuf`).
 unsafe extern "C" fn translate(ctx: *mut c_void, msg: Str, out: *const StrOut) {
     (*out).send(&crate::i18n::tr_from(&*(ctx as *const PathBuf), msg.get()));
+}
+
+/// Whether this program version is within `min` ..= `max` (empty: no
+/// limit; a version that can't be read is no limit either); if not, why,
+/// translated ("needs RustySalamander 0.6.0 or later").
+pub fn program_fits(min: &str, max: &str) -> Result<(), String> {
+    let parse = |s: &str| semver::Version::parse(s.trim()).ok();
+    let this = parse(env!("CARGO_PKG_VERSION")).expect("the program's version");
+    let (lo, hi) = (parse(min), parse(max));
+    if lo.as_ref().is_none_or(|lo| this >= *lo) && hi.as_ref().is_none_or(|hi| this <= *hi) {
+        return Ok(());
+    }
+    Err(match (lo.is_some(), hi.is_some()) {
+        (true, true) => trf("needs RustySalamander {min} to {max}", &[("min", &min.trim()), ("max", &max.trim())]),
+        (true, false) => trf("needs RustySalamander {min} or later", &[("min", &min.trim())]),
+        _ => trf("works with RustySalamander up to {max} only", &[("max", &max.trim())]),
+    })
 }
 
 /// Where plugins are looked for: `plugins` next to the program
@@ -206,6 +225,10 @@ impl Plugins {
             match load_library(&file) {
                 Ok(desc) => match unsafe { host::info(desc) } {
                     Ok(info) if found.iter().any(|f| f.info.id == info.id) => broken.push((file, format!("another plugin has the id \"{}\"", info.id))),
+                    Ok(info) if program_fits(&info.program_min, &info.program_max).is_err() => {
+                        let why = program_fits(&info.program_min, &info.program_max).unwrap_err();
+                        broken.push((file, trf("{why} (this is {version})", &[("why", &why.as_str()), ("version", &env!("CARGO_PKG_VERSION"))])))
+                    }
                     Ok(info) => found.push(Found::new(info, file, desc)),
                     Err(e) => broken.push((file, e)),
                 },
