@@ -2398,6 +2398,14 @@ impl App {
         let use_icons = self.cfg.system_icons;
         let marks = self.panels[idx].archive.as_ref().map(|a| a.marks.clone()).filter(|m| !m.is_empty());
         let (weak, dark) = (ui.visuals().weak_text_color(), ui.visuals().dark_mode);
+        // a quick search's marks, in shades of the accent color: rows it matches
+        // (other than the cursor's) get a light wash, a bit stronger than the
+        // tint of a plugin's panel; the matched letters a stronger one; on the
+        // cursor's row (all accent) the letters a wash of its text color
+        let accent = ui.visuals().selection;
+        let qs_fill = accent.bg_fill.gamma_multiply(if dark { 0.22 } else { 0.3 });
+        let qs_letters = accent.bg_fill.gamma_multiply(if dark { 0.55 } else { 0.5 });
+        let qs_letters_cursor = accent.stroke.color.gamma_multiply(0.3);
         let icons = &mut self.icons;
         let panel = &mut self.panels[idx];
         let scroll_to = if panel.scroll_to_cursor { Some(panel.cursor) } else { None };
@@ -2472,12 +2480,17 @@ impl App {
                         body.rows(row_h, entries.len(), |mut row| {
                             let i = row.index();
                             let e = &entries[i];
+                            // the quick search's match in the whole name (chars), in every row that matches
+                            let qs_hit = qs_mask.as_ref().filter(|_| active).and_then(|m| sal_core::quicksearch::find_match(&e.name, m, qs_anywhere));
+                            let base_chars = if e.kind == EntryKind::File && !e.base().is_empty() { e.base().chars().count() } else { e.name.chars().count() };
                             row.set_selected(active && i == cursor);
                             let mark = marks.as_ref().and_then(|m| m.get(&e.name)).copied();
                             let missing = mark == Some(sal_plugin_api::ItemMark::Missing);
                             let color = if e.selected { Some(SELECTED_COLOR) } else if missing { Some(weak) } else { None };
-                            let mark_bg = mark.and_then(|m| mark_fill(m, dark));
-                            // the mark's color behind each cell of the row
+                            // a quick search's match first (it lasts only while typing), else the mark
+                            let qs_row = qs_hit.is_some() && i != cursor;
+                            let mark_bg = if qs_row { Some(qs_fill) } else { mark.and_then(|m| mark_fill(m, dark)) };
+                            // the color behind each cell of the row
                             let shade = |ui: &mut egui::Ui| {
                                 if let Some(bg) = mark_bg {
                                     let r = ui.max_rect().expand2(egui::vec2(ui.spacing().item_spacing.x / 2.0, 0.0));
@@ -2509,31 +2522,12 @@ impl App {
                                 let logical: &str = &pretty;
                                 let visual = visual_order(logical, true);
                                 let shown: &str = &visual;
-                                // partial highlight only makes sense when visual == logical order
-                                let hl = qs_mask
-                                    .as_ref()
-                                    .filter(|_| active && i == cursor)
-                                    .and_then(|m| sal_core::quicksearch::find_match(&e.name, m, qs_anywhere))
-                                    .map(|(a, b)| if shown == logical { (a, b) } else { (0, shown.chars().count()) });
-                                let mut job = LayoutJob::default();
-                                let style = ui.style();
-                                let font = egui::TextStyle::Body.resolve(style);
+                                // the match's part in the name column (the base name); the whole
+                                // name when its letters are reordered (right-to-left scripts)
+                                let hl = qs_hit.map(|(a, b)| if shown == logical { (a.min(base_chars), b.min(base_chars)) } else { (0, shown.chars().count()) }).filter(|(a, b)| a < b);
                                 let fg = color.unwrap_or_else(|| if active && i == cursor { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
-                                let normal = TextFormat { font_id: font.clone(), color: fg, italics: e.name_lossy, ..Default::default() };
-                                match hl {
-                                    Some((a, b)) => {
-                                        // char range -> byte offsets, clamped to the shown name (no extension)
-                                        let at = |n: usize| shown.char_indices().nth(n).map_or(shown.len(), |(x, _)| x);
-                                        let (sa, sb) = (at(a), at(b));
-                                        let mut h = normal.clone();
-                                        h.underline = egui::Stroke::new(1.5f32, fg);
-                                        h.background = ui.visuals().warn_fg_color.gamma_multiply(0.35);
-                                        job.append(&shown[..sa], 0.0, normal.clone());
-                                        job.append(&shown[sa..sb], 0.0, h);
-                                        job.append(&shown[sb..], 0.0, normal);
-                                    }
-                                    None => job.append(shown, 0.0, normal),
-                                }
+                                let normal = TextFormat { font_id: egui::TextStyle::Body.resolve(ui.style()), color: fg, italics: e.name_lossy, ..Default::default() };
+                                let job = qs_job(shown, hl, normal, if active && i == cursor { qs_letters_cursor } else { qs_letters });
                                 let r = ui.add(egui::Label::new(job).truncate().selectable(false));
                                 if e.name_lossy {
                                     r.on_hover_text(tr(
@@ -2543,7 +2537,21 @@ impl App {
                             });
                             row.col(|ui| {
                                 shade(ui);
-                                ui.label(text(if e.kind == EntryKind::File { display_name(e.ext()).into_owned() } else { String::new() }));
+                                let ext = if e.kind == EntryKind::File { display_name(e.ext()).into_owned() } else { String::new() };
+                                // the match's part in the extension (after the base name and its dot)
+                                let skip = base_chars + 1;
+                                let in_ext = qs_hit.filter(|_| e.kind == EntryKind::File && !e.base().is_empty()).map(|(a, b)| (a.saturating_sub(skip), b.saturating_sub(skip))).filter(|(a, b)| a < b);
+                                match in_ext {
+                                    Some(hl) => {
+                                        let fg = color.unwrap_or_else(|| if active && i == cursor { ui.visuals().strong_text_color() } else { ui.visuals().text_color() });
+                                        let normal = TextFormat { font_id: egui::TextStyle::Body.resolve(ui.style()), color: fg, ..Default::default() };
+                                        let bg = if active && i == cursor { qs_letters_cursor } else { qs_letters };
+                                        ui.add(egui::Label::new(qs_job(&ext, Some(hl), normal, bg)).truncate().selectable(false));
+                                    }
+                                    None => {
+                                        ui.label(text(ext));
+                                    }
+                                }
                             });
                             row.col(|ui| {
                                 shade(ui);
@@ -4653,6 +4661,27 @@ fn mark_fill(m: sal_plugin_api::ItemMark, dark: bool) -> Option<Color32> {
         ItemMark::OnlyHere => Some(Color32::from_rgba_unmultiplied(60, 180, 90, a)),
         ItemMark::Same | ItemMark::Missing => None,
     }
+}
+
+/// `text` with the characters `hl` (a range) marked as a quick search's
+/// match: underlined, on `bg`.
+fn qs_job(text: &str, hl: Option<(usize, usize)>, normal: TextFormat, bg: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    match hl {
+        Some((a, b)) => {
+            // char range -> byte offsets
+            let at = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(x, _)| x);
+            let (sa, sb) = (at(a), at(b));
+            let mut h = normal.clone();
+            h.underline = egui::Stroke::new(1.5f32, normal.color);
+            h.background = bg;
+            job.append(&text[..sa], 0.0, normal.clone());
+            job.append(&text[sa..sb], 0.0, h);
+            job.append(&text[sb..], 0.0, normal);
+        }
+        None => job.append(text, 0.0, normal),
+    }
+    job
 }
 
 /// The background tint of a panel a plugin shows: a faint wash of the
@@ -8670,6 +8699,12 @@ mod tests {
         let bg = ui.ctx.style().visuals.panel_fill;
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("qs_anywhere.png"));
+        ui.key(Key::Escape);
+        // a match running into the extension, in every row that has it
+        ui.text(".tx");
+        ui.frames(3);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("qs_ext.png"));
         ui.key(Key::Escape);
         click(&mut ui, egui::pos2(250.0, 10.0)); // Options menu
         ui.frames(3);

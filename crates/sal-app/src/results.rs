@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 use eframe::egui::{self, Key, RichText};
 use egui_extras::{Column, TableBuilder};
 use sal_core::encoding::format_thousands;
+use sal_core::sort::Collated;
 use sal_plugin_api::{Activity, FolderPlugin, Index};
 
 use crate::i18n::{tr, trn};
@@ -175,15 +176,22 @@ impl ResultsWin {
     /// Sort the rows by the column chosen.
     fn sort_rows(&mut self) {
         let Some((by, asc)) = self.sort else { return };
-        let key = |a: &Row, b: &Row| -> Ordering {
+        // names and folders in the user's alphabetical order, as in the panels
+        // (each worked out once); then the rows put in that order
+        let keys: Vec<(Collated, Collated)> = self.rows.iter().map(|r| (Collated::of(&r.name), Collated::of(&r.folder))).collect();
+        let key = |i: usize, j: usize| -> Ordering {
+            let (a, b) = (&self.rows[i], &self.rows[j]);
             match by {
-                Sort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                Sort::Folder => a.folder.to_lowercase().cmp(&b.folder.to_lowercase()).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+                Sort::Name => keys[i].0.cmp(&keys[j].0).then_with(|| a.name.cmp(&b.name)),
+                Sort::Folder => keys[i].1.cmp(&keys[j].1).then_with(|| keys[i].0.cmp(&keys[j].0)),
                 Sort::Size => a.size.cmp(&b.size),
                 Sort::Date => a.modified.cmp(&b.modified),
             }
         };
-        self.rows.sort_by(|a, b| if asc { key(a, b) } else { key(b, a) });
+        let mut order: Vec<usize> = (0..self.rows.len()).collect();
+        order.sort_by(|&i, &j| if asc { key(i, j) } else { key(j, i) });
+        let mut rows: Vec<Option<Row>> = std::mem::take(&mut self.rows).into_iter().map(Some).collect();
+        self.rows = order.into_iter().filter_map(|i| rows[i].take()).collect();
     }
 
     /// The results shown, in their order.

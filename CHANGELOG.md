@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3-alpha (2026-11-01)
+
+- **Alphabetical order of your language:** names sort as in Explorer, by Windows in the language set for your account: `Čeština` right after `Cena` (not after `Zeta`), `Ábel` among the A's, in Czech `Chata` after `Hora`; case doesn't matter and numbers go by value (`a2` before `a10`). Symbols come before numbers, numbers before letters. In the panels, inside archives and connections, and in the search results window.
+- **Masks and quick search can't freeze the program:** matching a mask with many `*` (or a quick search with many `/`) tried every way of splitting the name and could take minutes on a long name; it now takes at most name length × mask length steps.
+- **Quick search tints every match:** the typed text was marked only in the item under the cursor; now every item it matches shows it, also where the match runs into the extension (Ext column), and the rows it matches have a light wash of the accent color (the letters a stronger one), so they stand out from the rest.
+- **Find files reads masks as Select does:** the Search plugin 0.5.3-alpha (bundled) uses the program's own masks: `;;` for a `;` in a name, and a message saying where a mask can't be read.
+
 ## 0.7.2-alpha (2026-11-01)
 
 - **Sorting by a column header works anywhere in the header:** a click sorted only when it hit the column's title; most of the Ext, Size and Date headers did nothing. The whole header cell sorts now (the pointer turns into a hand), in the panels and in the search results window.

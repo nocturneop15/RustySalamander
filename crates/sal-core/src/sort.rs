@@ -1,7 +1,11 @@
-//! Panel sorting (port of `sort.cpp`).
+//! Panel sorting.
 //!
-//! Names are compared "logically" (numbers by value, as Explorer does), with
-//! Unicode-aware case folding instead of the original ANSI `LowerCase[]` table.
+//! Names are in the alphabetical order of the user's language, as Explorer
+//! has them: `Čeština` between `Cena` and `Dům` (not after `Zeta`, where
+//! the letters' code numbers put it), in Czech `Chata` after `Hora`, case
+//! not mattering, and numbers by their value (`a2` before `a10`). Windows
+//! orders them ([`Collated`]); elsewhere [`logical_cmp`] does, a port of
+//! Salamander's `StrCmpLogicalEx` (letters by their code numbers).
 
 use std::cmp::Ordering;
 
@@ -118,10 +122,71 @@ pub fn logical_cmp(a: &str, b: &str, ignore_case: bool) -> Ordering {
     }
 }
 
-/// Port of `CmpNameExt`: base name, then extension, case-insensitive first,
-/// case-sensitive as a final tie-breaker so the order is total.
-pub fn cmp_name_ext(a: &FileEntry, b: &FileEntry) -> Ordering {
-    logical_cmp(a.base(), b.base(), true).then_with(|| logical_cmp(a.ext(), b.ext(), true)).then_with(|| logical_cmp(&a.name, &b.name, false))
+/// A text's place in the alphabetical order of the user's language, case
+/// not mattering and numbers by their value; compared as bytes, so working
+/// it out once per name makes sorting many names fast.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Collated(
+    #[cfg(windows)] Vec<u8>,
+    #[cfg(not(windows))] String,
+);
+
+impl Collated {
+    /// The place of `text`.
+    #[cfg(windows)]
+    pub fn of(text: &str) -> Collated {
+        use windows_sys::Win32::Globalization::{LCMapStringEx, LCMAP_SORTKEY, NORM_IGNORECASE, SORT_DIGITSASNUMBERS, SORT_STRINGSORT};
+        if text.is_empty() {
+            return Collated(Vec::new());
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        // the user's locale (a null name); symbols sort before letters
+        // instead of being skipped (SORT_STRINGSORT), as in a file list
+        let flags = LCMAP_SORTKEY | NORM_IGNORECASE | SORT_DIGITSASNUMBERS | SORT_STRINGSORT;
+        let map = |out: *mut u16, len: i32| unsafe { LCMapStringEx(std::ptr::null(), flags, wide.as_ptr(), wide.len() as i32, out, len, std::ptr::null(), std::ptr::null(), 0) };
+        // the length of the key in bytes, then the key itself
+        let len = map(std::ptr::null_mut(), 0);
+        if len <= 0 {
+            return Collated(text.to_lowercase().into_bytes());
+        }
+        let mut key = vec![0u8; len as usize];
+        let written = map(key.as_mut_ptr().cast(), len);
+        key.truncate(written.max(0) as usize);
+        // the key ends with a 0 byte; it doesn't change the order
+        Collated(key)
+    }
+
+    /// The place of `text`: elsewhere [`logical_cmp`] compares.
+    #[cfg(not(windows))]
+    pub fn of(text: &str) -> Collated {
+        Collated(text.to_owned())
+    }
+}
+
+#[cfg(not(windows))]
+impl Ord for Collated {
+    fn cmp(&self, other: &Self) -> Ordering {
+        logical_cmp(&self.0, &other.0, true)
+    }
+}
+
+/// An item's name worked out for sorting: base name and extension.
+struct NameKey {
+    base: Collated,
+    ext: Collated,
+}
+
+impl NameKey {
+    fn of(e: &FileEntry) -> NameKey {
+        NameKey { base: Collated::of(e.base()), ext: Collated::of(e.ext()) }
+    }
+}
+
+/// By name: base name, then extension (as Salamander's `CmpNameExt`), in
+/// the user's alphabetical order; the exact names last, so the order is
+/// total.
+fn cmp_name_ext(a: (&FileEntry, &NameKey), b: (&FileEntry, &NameKey)) -> Ordering {
+    a.1.base.cmp(&b.1.base).then_with(|| a.1.ext.cmp(&b.1.ext)).then_with(|| a.0.name.cmp(&b.0.name))
 }
 
 /// The size of a folder, when known (calculated, or from an archive's
@@ -130,11 +195,12 @@ pub type DirSizeOf<'a> = &'a dyn Fn(&FileEntry) -> Option<u64>;
 
 /// Compare by one key (names break ties elsewhere); folders by the sizes
 /// `dir_size` knows.
-fn cmp_by(a: &FileEntry, b: &FileEntry, key: SortKey, dir_size: DirSizeOf) -> Ordering {
+fn cmp_by(a: (&FileEntry, &NameKey), b: (&FileEntry, &NameKey), key: SortKey, dir_size: DirSizeOf) -> Ordering {
     let size = |e: &FileEntry| if e.kind == EntryKind::File { e.size } else { dir_size(e).unwrap_or(0) };
+    let ((a, ka), (b, kb)) = (a, b);
     match key {
         SortKey::Name => Ordering::Equal,
-        SortKey::Ext => logical_cmp(a.ext(), b.ext(), true),
+        SortKey::Ext => ka.ext.cmp(&kb.ext),
         SortKey::Time => a.modified.cmp(&b.modified),
         SortKey::Size => size(a).cmp(&size(b)),
         SortKey::Attr => a.attrs.cmp(&b.attrs),
@@ -152,8 +218,8 @@ fn group(e: &FileEntry) -> u8 {
 
 /// The panel's order of two items: `..` first, then directories, then
 /// files; `reverse` flips the order within each group only.
-fn cmp_entries(a: &FileEntry, b: &FileEntry, spec: SortSpec, dir_size: DirSizeOf) -> Ordering {
-    group(a).cmp(&group(b)).then_with(|| {
+fn cmp_entries(a: (&FileEntry, &NameKey), b: (&FileEntry, &NameKey), spec: SortSpec, dir_size: DirSizeOf) -> Ordering {
+    group(a.0).cmp(&group(b.0)).then_with(|| {
         let r = cmp_by(a, b, spec.key, dir_size).then_with(|| cmp_name_ext(a, b));
         if spec.reverse {
             r.reverse()
@@ -173,12 +239,24 @@ pub fn sort_entries(entries: &mut [FileEntry], spec: SortSpec) {
 /// Sort a panel as [`sort_entries`] does, folders by the sizes `dir_size`
 /// knows.
 pub fn sort_entries_sized(entries: &mut [FileEntry], spec: SortSpec, dir_size: DirSizeOf) {
-    entries.sort_by(|a, b| cmp_entries(a, b, spec, dir_size));
+    // each name worked out once, then the items put in order
+    let keys: Vec<NameKey> = entries.iter().map(NameKey::of).collect();
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&i, &j| cmp_entries((&entries[i], &keys[i]), (&entries[j], &keys[j]), spec, dir_size));
+    // move each item to its place (position i gets the item at order[i])
+    for i in 0..order.len() {
+        let mut from = order[i];
+        while from < i {
+            from = order[from];
+        }
+        entries.swap(i, from);
+    }
 }
 
 /// Whether `entries` are in the order [`sort_entries_sized`] gives.
 pub fn is_sorted(entries: &[FileEntry], spec: SortSpec, dir_size: DirSizeOf) -> bool {
-    entries.windows(2).all(|w| cmp_entries(&w[0], &w[1], spec, dir_size) != Ordering::Greater)
+    let keys: Vec<NameKey> = entries.iter().map(NameKey::of).collect();
+    (1..entries.len()).all(|i| cmp_entries((&entries[i - 1], &keys[i - 1]), (&entries[i], &keys[i]), spec, dir_size) != Ordering::Greater)
 }
 
 #[cfg(test)]
@@ -225,6 +303,36 @@ mod tests {
         sort_entries(&mut v, spec);
         let names: Vec<_> = v.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["big", "small", "unknown", "b.txt", "a.txt"]);
+    }
+
+    /// Names in the alphabetical order of the user's language: letters with
+    /// accents among their plain ones (not after Z), case not mattering,
+    /// numbers by value, the extension after the name.
+    #[cfg(windows)]
+    #[test]
+    fn alphabetical_order() {
+        let mk = |n: &str| FileEntry::new(PathBuf::from(n), EntryKind::File, 0, None, 0);
+        let mut v: Vec<FileEntry> = ["Zeta", "Čeština", "Cena", "Ábel", "Adam", "Šárka", "Sára", "émile", "Eva", "file10.txt", "File2.txt", "a b.txt", "a.txt", "a.TXT", "_x", "1 začátek"].into_iter().map(mk).collect();
+        sort_entries(&mut v, SortSpec::default());
+        let names: Vec<&str> = v.iter().map(|e| e.name.as_str()).collect();
+        let at = |n: &str| names.iter().position(|&x| x == n).unwrap();
+        assert!(at("Čeština") < at("Zeta") && at("Cena") < at("Čeština"), "{names:?}");
+        assert!(at("Ábel") < at("Cena") && at("Šárka") < at("Zeta"), "{names:?}");
+        assert!(at("File2.txt") < at("file10.txt"), "numbers by value: {names:?}");
+        assert!(at("a.txt") < at("a b.txt"), "the name before the extension: {names:?}");
+        assert!(at("a.TXT") < at("a.txt"), "the same but for case: always the same way round");
+        assert!(at("_x") < at("1 začátek") && at("1 začátek") < at("Adam"), "symbols, then numbers, then letters: {names:?}");
+        assert!(is_sorted(&v, SortSpec::default(), &|_| None));
+    }
+
+    /// Sorting a big folder takes a moment, not more.
+    #[test]
+    fn many_names_quickly() {
+        let mut v: Vec<FileEntry> = (0..20_000).map(|i| FileEntry::new(PathBuf::from(format!("Soubor č. {} – ŽÁDOST.pdf", (i * 7919) % 20_000)), EntryKind::File, i, None, 0)).collect();
+        let start = std::time::Instant::now();
+        sort_entries(&mut v, SortSpec::default());
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
+        assert!(v[0].name.contains(" 0 ") && v[1].name.contains(" 1 ") && v[19_999].name.contains(" 19999 "));
     }
 
     #[test]

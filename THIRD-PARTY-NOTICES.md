@@ -4,7 +4,7 @@ RustySalamander is licensed under the GNU General Public License, version 2 or (
 
 ## Open Salamander
 
-RustySalamander is a rewrite of [Open Salamander](https://github.com/OpenSalamander/salamander) (GPL-2.0-or-later). Its behaviour (keyboard model, mask syntax, sort order, file operations) follows the original, and parts are ports of its C++ code (`masks.cpp`, `sort.cpp` and the quick-search code). Open Salamander is the work of its authors; see the AUTHORS file in its repository.
+RustySalamander is a rewrite of [Open Salamander](https://github.com/OpenSalamander/salamander) (GPL-2.0-or-later). Its behaviour (keyboard model, mask syntax, sort order, file operations) follows the original, and parts are ports of its C++ code: from `masks.cpp`, the mask syntax, renaming by mask and preparing a quick search; from `sort.cpp`, comparing numbers in names by value (used where Windows doesn't sort the names). Open Salamander is the work of its authors; see the AUTHORS file in its repository.
 
 ## 7-Zip (the 7-Zip plugin)
 

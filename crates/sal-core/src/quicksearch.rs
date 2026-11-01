@@ -1,4 +1,5 @@
-//! Panel quick search (port of the QS functions in `masks.cpp`).
+//! Panel quick search: preparing what was typed is a port of the QS
+//! functions in Salamander's `masks.cpp`; matching is written anew.
 //!
 //! The typed text matches name prefixes case-insensitively; `/`, `\` and `<`
 //! stand for any sequence of characters (they cannot occur in file names).
@@ -32,30 +33,38 @@ pub fn prepare(src: &str) -> Vec<char> {
     out
 }
 
-/// Where the match of `mask` from `pos` in `name` ends, if it matches there.
+/// Where the match of `mask` from `pos` in `name` ends, if it matches there
+/// (the mask covers the start of what follows `pos`; `/` takes as little as
+/// it can).
+///
+/// A `/` first takes nothing, and only the last `/` seen takes one more
+/// character when the rest doesn't fit: never more than name length × mask
+/// length steps (trying every way for every `/` took exponential time).
 fn agree(name: &[char], pos: usize, mask: &[char], has_ext: bool) -> Option<usize> {
     let (mut n, mut m) = (pos, 0usize);
+    // the last `/`, and the name position it took up to
+    let mut star: Option<(usize, usize)> = None;
     while n < name.len() {
-        if m >= mask.len() {
-            return Some(n);
-        }
-        if name[n] == mask[m] {
-            n += 1;
-            m += 1;
-        } else if mask[m] == '/' {
-            m += 1;
-            while n < name.len() {
-                if let Some(off) = agree(name, n, &mask[m..], has_ext) {
-                    return Some(off);
-                }
-                n += 1;
+        match mask.get(m) {
+            None => return Some(n),
+            Some('/') => {
+                star = Some((m, n));
+                m += 1;
             }
-            break;
-        } else {
-            return None;
+            Some(&mc) if mc == name[n] => {
+                n += 1;
+                m += 1;
+            }
+            _ => match star {
+                Some((sm, sn)) => {
+                    star = Some((sm, sn + 1));
+                    (m, n) = (sm + 1, sn + 1);
+                }
+                None => return None,
+            },
         }
     }
-    let rest = &mask[m.min(mask.len())..];
+    let rest = &mask[m..];
     if rest.is_empty() || (!has_ext && rest == ['.']) {
         Some(n)
     } else {
@@ -103,6 +112,19 @@ mod tests {
         assert_eq!(matches("README.md", &m), Some(6));
         let m = prepare("ž");
         assert_eq!(matches("Žluťoučký kůň", &m), Some(1));
+    }
+
+    /// Many `/` that almost fit: once minutes, now at once.
+    #[test]
+    fn many_wild_chars_stay_fast() {
+        let start = std::time::Instant::now();
+        let m = prepare(&format!("{}b", "/a".repeat(12)));
+        assert_eq!(find_match(&"a".repeat(40), &m, true), None);
+        assert_eq!(find_match(&format!("x{}b", "a".repeat(40)), &m, true), Some((0, 42)), "a leading / takes the x");
+        assert!(start.elapsed() < std::time::Duration::from_millis(100), "{:?}", start.elapsed());
+        // `/` takes as little as it can: the highlight ends at the first fit
+        assert_eq!(matches("banana split", &prepare("b/n")), Some(3));
+        assert_eq!(matches("banana", &prepare("b/x")), None);
     }
 
     #[test]

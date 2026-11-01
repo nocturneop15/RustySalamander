@@ -1,4 +1,5 @@
-//! Wildcard masks (port of `masks.cpp`).
+//! Wildcard masks: the syntax and renaming by mask are ports of Salamander's
+//! `masks.cpp`; matching is written anew (see [`agree_mask`]).
 //!
 //! * `?` any character, `*` any string, `#` any digit (extended mode only)
 //! * groups are separated by `;` (a literal `;` is written as `;;`)
@@ -45,36 +46,42 @@ pub fn prepare_mask(src: &str) -> Vec<char> {
     out
 }
 
-/// Port of `AgreeMask`. Both slices must already be case-folded.
+/// Whether `name` matches `mask` (as `AgreeMask` decides). Both slices must
+/// already be case-folded.
+///
+/// A `*` first takes nothing, and only the last `*` seen takes one more
+/// character when the rest doesn't fit: never more than name length × mask
+/// length steps (trying every way for every `*` took exponential time:
+/// minutes for a mask with a dozen of them).
 pub fn agree_mask(name: &[char], mask: &[char], has_ext: bool, extended: bool) -> bool {
     let (mut n, mut m) = (0usize, 0usize);
+    // the last `*`, and the name position it took up to
+    let mut star: Option<(usize, usize)> = None;
     while n < name.len() {
-        if m >= mask.len() {
-            return false;
-        }
-        let (fc, mc) = (name[n], mask[m]);
-        let agree = fc == mc || mc == '?' || (extended && mc == '#' && fc.is_ascii_digit());
-        if agree {
-            n += 1;
-            m += 1;
-        } else if mc == '*' {
-            m += 1;
-            while n < name.len() {
-                if agree_mask(&name[n..], &mask[m..], has_ext, extended) {
-                    return true;
-                }
-                n += 1;
+        match mask.get(m) {
+            Some('*') => {
+                star = Some((m, n));
+                m += 1;
             }
-            break;
-        } else {
-            return false;
+            Some(&mc) if mc == name[n] || mc == '?' || (extended && mc == '#' && name[n].is_ascii_digit()) => {
+                n += 1;
+                m += 1;
+            }
+            _ => match star {
+                Some((sm, sn)) => {
+                    star = Some((sm, sn + 1));
+                    (m, n) = (sm + 1, sn + 1);
+                }
+                None => return false,
+            },
         }
     }
+    // the name is used up: what is left of the mask must fit nothing
     let rest = &mask[m..];
-    let rest = if rest.first() == Some(&'*') { &rest[1..] } else { rest };
+    let rest = &rest[rest.iter().take_while(|&&c| c == '*').count()..];
     if !has_ext && rest.first() == Some(&'.') {
         // without an extension, "*.*" must still match
-        rest.len() == 1 || (rest.len() == 2 && rest[1] == '*')
+        rest[1..].iter().all(|&c| c == '*')
     } else {
         rest.is_empty()
     }
@@ -304,6 +311,19 @@ mod tests {
         assert!(MaskGroup::new("*.txt|", false).is_err());
         assert!(MaskGroup::new("*.a|*.b|*.c", false).is_err());
         assert_eq!(MaskGroup::new("a<b", false).unwrap_err().position, 1);
+    }
+
+    /// Many `*` that almost fit: once minutes, now at once.
+    #[test]
+    fn many_stars_stay_fast() {
+        let start = std::time::Instant::now();
+        let m = g(&format!("{}b", "*a".repeat(14)));
+        assert!(!m.matches(&"a".repeat(40)));
+        assert!(m.matches(&format!("{}b", "a".repeat(40))));
+        assert!(start.elapsed() < std::time::Duration::from_millis(100), "{:?}", start.elapsed());
+        // the end of the name: what the stars leave
+        assert!(g("a*.*").matches("abc") && g("*.*").matches("noext") && !g("*.x").matches("noext"));
+        assert!(g("*a*").matches("banana") && g("b*n*a").matches("banana") && !g("b*n*x").matches("banana"));
     }
 
     #[test]

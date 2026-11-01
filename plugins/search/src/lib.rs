@@ -152,7 +152,7 @@ fn query(values: &Values) -> Result<(PathBuf, Query), String> {
     let names = if values.get("syntax").map(String::as_str) == Some("regex") {
         Names::regex(names_text, case).map_err(|e| trf("The regular expression for names is wrong: {error}", &[("error", &e)]))?
     } else {
-        Names::masks(names_text)
+        Names::masks(names_text).map_err(|at| trf("The name masks can't be read from character {at} on.", &[("at", &at)]))?
     };
     let text = match values.get("text").filter(|t| !t.is_empty()) {
         None => None,

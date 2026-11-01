@@ -16,7 +16,7 @@ Documentation:
 ## Unicode model
 
 - **Identity:** every item carries a `PathBuf` (WTF-8 on Windows). This round-trips every NTFS name, including names with unpaired UTF-16 surrogates that aren't valid Unicode. All operations use it.
-- **Display/matching:** UTF-8 `String`. Masks, quick search and sorting use Unicode case folding (`*.ŽÁK` matches `žák.žák`, `ελ` finds `Ελληνικά`).
+- **Display/matching:** UTF-8 `String`. Masks and quick search use Unicode case folding (`*.ŽÁK` matches `žák.žák`, `ελ` finds `Ελληνικά`). Names sort in the alphabetical order of the account's language, as Explorer has them (Windows' sort keys): `Čeština` after `Cena`, not after `Zeta`; numbers by value.
 - **No MAX_PATH:** std uses the wide Win32 APIs with automatic `\\?\` handling. Tests cover paths longer than 300 characters.
 - **Bidi:** Hebrew and Arabic names are reordered with the Unicode Bidirectional Algorithm.
 - **Characters Windows forbids:** names from Macs, Samba/NAS shares or WSL may contain `* : ? | < > " \`. Windows stores these as private-use stand-ins (U+F020–F029 or U+F000+char) that no font can draw, so they're shown as the original characters. This is display only; operations use the exact name.
@@ -31,7 +31,7 @@ Documentation:
 crates/sal-core   Unicode-native core library (no GUI)
   entry.rs        panel item (replaces CFileData)
   listing.rs      directory reading
-  sort.rs         logical (numeric-aware) sort, port of sort.cpp
+  sort.rs         panel order: the language's alphabetical order (Windows), numbers by value
   masks.rs        masks / mask groups / MaskName, port of masks.cpp
   quicksearch.rs  quick search, port of the QS code in masks.cpp
   fileops.rs      copy / move / delete / mkdir / rename with progress, conflicts, retry
@@ -328,7 +328,7 @@ Troubleshooting: run with the environment variable `SAL_DIAG_MENU=1` to open bot
 
 ## Quick search
 
-Typing in a panel starts a quick search (`/` or `\` match any characters; keys that match nothing are ignored). **Options → Quick search** (also in **Settings → General → Quick search**):
+Typing in a panel starts a quick search (`/` or `\` match any characters; keys that match nothing are ignored). Every item the typed text matches has a faintly tinted row and the matched part marked, in the name and, where the match runs into it, in the extension. **Options → Quick search** (also in **Settings → General → Quick search**):
 
 - **From first letter** (default) or **Anywhere in name**. With *Anywhere*, `port` finds `alfa report.txt`, and the matched part is highlighted wherever it is. *Switch quick search mode* is in the keyboard shortcuts table; it has no default key, and `Ctrl+Shift+Q` is offered as a preset.
 - **Arrows jump between matches** (on by default, in both modes): while a search is active, ↑/↓ skip straight to the previous/next matching item, wrapping around, instead of ending the search. Esc ends the search. Ctrl+↑/↓ always jump between matches.

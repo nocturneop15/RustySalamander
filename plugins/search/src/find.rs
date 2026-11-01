@@ -10,6 +10,7 @@ use std::time::SystemTime;
 
 use regex::bytes::RegexBuilder as BytesRegexBuilder;
 use regex::RegexBuilder;
+use sal_core::MaskGroup;
 
 const ATTR_HIDDEN: u32 = 0x2;
 const ATTR_SYSTEM: u32 = 0x4;
@@ -19,69 +20,23 @@ const ATTR_REPARSE_POINT: u32 = 0x400;
 
 // ---------------------------------------------------------------- names
 
-/// A wildcard mask: `*` is any run of characters, `?` one character; case
-/// doesn't matter, as in Windows. `*.*` is every name, with or without a dot.
-#[derive(Debug, Clone)]
-pub struct Mask(Vec<char>);
-
-impl Mask {
-    /// A wildcard mask (`*`, `?`), any case.
-    pub fn new(text: &str) -> Mask {
-        Mask(text.chars().flat_map(char::to_lowercase).collect())
-    }
-
-    /// Whether `name` matches; `*.*` and `*` match any name.
-    pub fn matches(&self, name: &str) -> bool {
-        if self.0 == ['*', '.', '*'] || self.0 == ['*'] {
-            return true;
-        }
-        let name: Vec<char> = name.chars().flat_map(char::to_lowercase).collect();
-        // the classic greedy match with one backtrack point per `*`
-        let (p, n) = (&self.0, &name);
-        let (mut i, mut j) = (0, 0);
-        let mut star: Option<(usize, usize)> = None;
-        while j < n.len() {
-            if i < p.len() && (p[i] == '?' || p[i] == n[j]) {
-                i += 1;
-                j += 1;
-            } else if i < p.len() && p[i] == '*' {
-                star = Some((i, j));
-                i += 1;
-            } else if let Some((si, sj)) = star {
-                i = si + 1;
-                j = sj + 1;
-                star = Some((si, sj + 1));
-            } else {
-                return false;
-            }
-        }
-        p[i..].iter().all(|&c| c == '*')
-    }
-}
-
 /// Which names are found.
 #[derive(Debug, Clone)]
 pub enum Names {
-    /// Masks separated by `;`; the ones after `|` leave names out
-    /// (`*.txt;*.md|old*`), as in Salamander. No masks before `|` is `*.*`.
-    Masks {
-        include: Vec<Mask>,
-        exclude: Vec<Mask>,
-    },
+    /// Wildcard masks separated by `;`; the ones after `|` leave names out
+    /// (`*.txt;*.md|old*`), as in Salamander and the program's Select:
+    /// the program's own masks (`sal_core::MaskGroup`).
+    Masks(MaskGroup),
     Regex(regex::Regex),
 }
 
 impl Names {
     /// Name masks as typed: `*.txt;*.md|old*` (to find, then after `|` to
-    /// leave out); none means all.
-    pub fn masks(text: &str) -> Names {
-        let (inc, exc) = text.split_once('|').unwrap_or((text, ""));
-        let list = |s: &str| s.split(';').map(str::trim).filter(|m| !m.is_empty()).map(Mask::new).collect::<Vec<_>>();
-        let mut include = list(inc);
-        if include.is_empty() {
-            include.push(Mask::new("*.*"));
-        }
-        Names::Masks { include, exclude: list(exc) }
+    /// leave out); none means all. A mask that can't be read: the character
+    /// (from 1) where it goes wrong.
+    pub fn masks(text: &str) -> Result<Names, usize> {
+        let text = if text.trim().is_empty() { "*" } else { text };
+        MaskGroup::new(text, false).map(Names::Masks).map_err(|e| e.position + 1)
     }
 
     /// A regular expression found anywhere in the name (`^…$` for whole names).
@@ -92,7 +47,7 @@ impl Names {
     /// Whether a name is wanted.
     pub fn matches(&self, name: &str) -> bool {
         match self {
-            Names::Masks { include, exclude } => include.iter().any(|m| m.matches(name)) && !exclude.iter().any(|m| m.matches(name)),
+            Names::Masks(masks) => masks.matches(name),
             Names::Regex(r) => r.is_match(name),
         }
     }
@@ -316,7 +271,7 @@ mod tests {
 
     #[test]
     fn masks() {
-        let m = |mask: &str, name: &str| Names::masks(mask).matches(name);
+        let m = |mask: &str, name: &str| Names::masks(mask).unwrap().matches(name);
         assert!(m("*.*", "README") && m("*.*", "a.b.c") && m("", "cokoli"));
         assert!(m("*.TXT", "zpráva.txt") && !m("*.txt", "zpráva.txt.bak"));
         assert!(m("?.rs", "a.rs") && !m("?.rs", "ab.rs"));
@@ -326,6 +281,10 @@ mod tests {
         // exclusions after |
         assert!(m("*.txt|old*", "new.txt") && !m("*.txt|old*", "old.txt"));
         assert!(m("|*.bak", "a.txt") && !m("|*.bak;*.tmp", "a.tmp"));
+        // as in Select: `;;` is a `;` in a name, and a mask that can't be read says where
+        assert!(m("a;;b.txt", "a;b.txt"));
+        assert_eq!(Names::masks("*.txt|").unwrap_err(), 6);
+        assert_eq!(Names::masks("a<b").unwrap_err(), 2);
     }
 
     #[test]
@@ -384,13 +343,13 @@ mod tests {
             search(root, &q, &st);
             st.found.into_inner().unwrap().into_iter().map(|f| f.inner).collect::<Vec<_>>()
         };
-        let q = Query { names: Names::masks("*.txt"), text: None, subfolders: true, folders: false, hidden: true };
+        let q = Query { names: Names::masks("*.txt").unwrap(), text: None, subfolders: true, folders: false, hidden: true };
         assert_eq!(run(q.clone()), ["a.TXT", "b.txt", "docs\\c.txt", "docs\\staré\\e.txt"], "files before subfolders, in name order");
         assert_eq!(run(Query { subfolders: false, ..q.clone() }), ["a.TXT", "b.txt"]);
-        assert_eq!(run(Query { names: Names::masks("*txt*"), folders: true, ..q.clone() }), ["a.TXT", "b.txt", "txt-folder", "docs\\c.txt", "docs\\staré\\e.txt"]);
-        let text = Query { names: Names::masks("*.*"), text: Some(Text::literal("hello", false).unwrap()), folders: true, ..q.clone() };
+        assert_eq!(run(Query { names: Names::masks("*txt*").unwrap(), folders: true, ..q.clone() }), ["a.TXT", "b.txt", "txt-folder", "docs\\c.txt", "docs\\staré\\e.txt"]);
+        let text = Query { names: Names::masks("*.*").unwrap(), text: Some(Text::literal("hello", false).unwrap()), folders: true, ..q.clone() };
         assert_eq!(run(text), ["b.txt", "docs\\c.txt", "docs\\d.md", "docs\\staré\\e.txt"], "folders never match text");
-        let case = Query { names: Names::masks("*.*"), text: Some(Text::literal("hello", true).unwrap()), ..q.clone() };
+        let case = Query { names: Names::masks("*.*").unwrap(), text: Some(Text::literal("hello", true).unwrap()), ..q.clone() };
         assert_eq!(run(case), ["b.txt", "docs\\c.txt", "docs\\d.md"]);
 
         let st = State::default();
@@ -420,7 +379,7 @@ mod tests {
         file(&t.path().join("skrytá"), "inside.txt", b"");
         let ok = std::process::Command::new("attrib").raw_arg("+h").arg(t.path().join("skrytá")).status().unwrap().success();
         assert!(ok);
-        let q = Query { names: Names::masks("*.txt"), text: None, subfolders: true, folders: false, hidden: false };
+        let q = Query { names: Names::masks("*.txt").unwrap(), text: None, subfolders: true, folders: false, hidden: false };
         let st = State::default();
         search(t.path(), &q, &st);
         assert_eq!(st.found.lock().unwrap().iter().map(|f| f.inner.as_str()).collect::<Vec<_>>(), ["seen.txt"], "hidden folders aren't entered");

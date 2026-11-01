@@ -2,7 +2,7 @@
 name = "sal-plugin-search"
 description = "RustySalamander plugin: finds files and folders by name (wildcards or regular expressions) and by the text inside them"
 # the plugin's own version, apart from the program's
-version = "0.5.2-alpha"
+version = "0.5.3-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -15,6 +15,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 sal-plugin-api = { path = "../../crates/sal-plugin-api" }
+# the program's wildcard masks, so Find files reads them as Select does
+sal-core = { path = "../../crates/sal-core" }
 regex = "1"
 
 [target."cfg(windows)".dependencies]
