@@ -13,6 +13,8 @@ pub const RUST: [u8; 3] = [196, 82, 29];
 pub const PROGRAM: &str = crate::mdi::FORMAT_COLUMNS;
 /// The viewer's window icon (a document with an eye).
 pub const VIEWER: &str = crate::mdi::FILE_EYE_OUTLINE;
+/// The Settings window's icon (a toothed wheel).
+pub const SETTINGS: &str = crate::mdi::COG;
 
 /// Pixels of the window icons; Windows scales them for the title bar and
 /// the taskbar.
@@ -23,6 +25,12 @@ const SIZE: u32 = 64;
 pub fn program() -> Arc<egui::IconData> {
     static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
     ICON.get_or_init(|| window_icon(PROGRAM, RUST, SIZE)).clone()
+}
+
+/// The icon of the Settings window, drawn once.
+pub fn settings() -> Arc<egui::IconData> {
+    static ICON: OnceLock<Arc<egui::IconData>> = OnceLock::new();
+    ICON.get_or_init(|| window_icon(SETTINGS, RUST, SIZE)).clone()
 }
 
 /// The icon of the viewer's windows, drawn once.
@@ -80,7 +88,7 @@ mod tests {
 
     #[test]
     fn icons_are_drawn() {
-        for glyph in [PROGRAM, VIEWER] {
+        for glyph in [PROGRAM, VIEWER, SETTINGS] {
             let icon = window_icon(glyph, RUST, 64);
             assert_eq!((icon.width, icon.height, icon.rgba.len()), (64, 64, 64 * 64 * 4));
             let px = |x: usize, y: usize| &icon.rgba[(y * 64 + x) * 4..(y * 64 + x) * 4 + 4];

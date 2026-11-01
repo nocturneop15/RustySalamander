@@ -236,19 +236,23 @@ pub fn decode(s: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Commands as text: id and label of each.
 pub(crate) fn encode_commands(commands: &[Command]) -> String {
     encode(&commands.iter().flat_map(|c| [c.id.as_str(), c.label.as_str()]).collect::<Vec<_>>())
 }
 
+/// Commands from [`encode_commands`].
 pub(crate) fn decode_commands(s: &str) -> Vec<Command> {
     decode(s).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| Command { id: c[0].clone(), label: c[1].clone() }).collect()
 }
 
+/// Viewers and editors as text: id, kind, label and masks of each.
 pub(crate) fn encode_openers(openers: &[Opener]) -> String {
     let kind = |k: OpenKind| if k == OpenKind::View { "view" } else { "edit" };
     encode(&openers.iter().flat_map(|o| [o.id.as_str(), kind(o.kind), o.label.as_str(), o.masks.as_str()]).collect::<Vec<_>>())
 }
 
+/// Viewers and editors from [`encode_openers`]; unknown kinds are left out.
 pub(crate) fn decode_openers(s: &str) -> Vec<Opener> {
     let parts = decode(s).unwrap_or_default();
     parts
@@ -266,14 +270,17 @@ pub(crate) fn decode_openers(s: &str) -> Vec<Opener> {
         .collect()
 }
 
+/// Values as text: name and value of each.
 pub(crate) fn encode_values(values: &Values) -> String {
     encode(&values.iter().flat_map(|(k, v)| [k.as_str(), v.as_str()]).collect::<Vec<_>>())
 }
 
+/// Values from [`encode_values`].
 pub(crate) fn decode_values(s: &str) -> Values {
     decode(s).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| (c[0].clone(), c[1].clone())).collect()
 }
 
+/// A form field as text.
 fn encode_field(f: &Field) -> String {
     let (kind, choices) = match &f.kind {
         FieldKind::Text => ("text", String::new()),
@@ -289,6 +296,7 @@ fn encode_field(f: &Field) -> String {
     encode(&[f.id.as_str(), &f.label, kind, &f.value, &if_id, &if_value, &choices])
 }
 
+/// A form field from [`encode_field`].
 fn decode_field(s: &str) -> Option<Field> {
     let p = decode(s)?;
     let [id, label, kind, value, if_id, if_value, choices] = <[String; 7]>::try_from(p).ok()?;
@@ -307,6 +315,7 @@ fn decode_field(s: &str) -> Option<Field> {
     Some(Field { id, label, kind, value, enabled_if })
 }
 
+/// A reply as text: its kind first, then its parts.
 pub(crate) fn encode_reply(r: &Reply) -> String {
     match r {
         Reply::Done => encode(&["done"]),
@@ -321,6 +330,7 @@ pub(crate) fn encode_reply(r: &Reply) -> String {
     }
 }
 
+/// A reply from [`encode_reply`]; `None` when damaged.
 pub(crate) fn decode_reply(s: &str) -> Option<Reply> {
     let p = decode(s)?;
     Some(match p.first()?.as_str() {

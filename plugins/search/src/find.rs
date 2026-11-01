@@ -25,10 +25,12 @@ const ATTR_REPARSE_POINT: u32 = 0x400;
 pub struct Mask(Vec<char>);
 
 impl Mask {
+    /// A wildcard mask (`*`, `?`), any case.
     pub fn new(text: &str) -> Mask {
         Mask(text.chars().flat_map(char::to_lowercase).collect())
     }
 
+    /// Whether `name` matches; `*.*` and `*` match any name.
     pub fn matches(&self, name: &str) -> bool {
         if self.0 == ['*', '.', '*'] || self.0 == ['*'] {
             return true;
@@ -70,6 +72,8 @@ pub enum Names {
 }
 
 impl Names {
+    /// Name masks as typed: `*.txt;*.md|old*` (to find, then after `|` to
+    /// leave out); none means all.
     pub fn masks(text: &str) -> Names {
         let (inc, exc) = text.split_once('|').unwrap_or((text, ""));
         let list = |s: &str| s.split(';').map(str::trim).filter(|m| !m.is_empty()).map(Mask::new).collect::<Vec<_>>();
@@ -85,6 +89,7 @@ impl Names {
         RegexBuilder::new(text).case_insensitive(!case).build().map(Names::Regex).map_err(|e| e.to_string())
     }
 
+    /// Whether a name is wanted.
     pub fn matches(&self, name: &str) -> bool {
         match self {
             Names::Masks { include, exclude } => include.iter().any(|m| m.matches(name)) && !exclude.iter().any(|m| m.matches(name)),
@@ -220,12 +225,14 @@ pub struct State {
     pub found: Mutex<Vec<Found>>,
 }
 
+/// A file's Windows attributes.
 #[cfg(windows)]
 pub fn attributes(md: &fs::Metadata) -> u32 {
     use std::os::windows::fs::MetadataExt;
     md.file_attributes()
 }
 
+/// Elsewhere: folder or not, a leading dot is hidden.
 #[cfg(not(windows))]
 pub fn attributes(md: &fs::Metadata) -> u32 {
     if md.is_dir() {

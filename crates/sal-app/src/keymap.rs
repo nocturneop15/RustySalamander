@@ -61,6 +61,7 @@ pub struct ActionInfo {
     pub alternatives: &'static [&'static str],
 }
 
+/// An action's description (`const`, for the table below).
 const fn info(id: &'static str, label: &'static str, defaults: &'static [&'static str], alternatives: &'static [&'static str]) -> ActionInfo {
     ActionInfo { id, label, defaults, alternatives }
 }
@@ -76,6 +77,7 @@ pub enum Section {
 impl Section {
     pub const ALL: [Section; 3] = [Section::Files, Section::Navigation, Section::System];
 
+    /// The section's title (marked for translation).
     pub fn label(self) -> &'static str {
         match self {
             Section::Files => n_("File & folder operations"),
@@ -84,6 +86,7 @@ impl Section {
         }
     }
 
+    /// One line about the section (marked for translation).
     pub fn description(self) -> &'static str {
         match self {
             Section::Files => n_("Viewing, editing, copying, moving, deleting and selecting items"),
@@ -92,12 +95,14 @@ impl Section {
         }
     }
 
+    /// The actions in the section, in table order.
     pub fn actions(self) -> impl Iterator<Item = Action> {
         Action::ALL.into_iter().filter(move |a| a.section() == self)
     }
 }
 
 impl Action {
+    /// The section the action is listed in.
     pub fn section(self) -> Section {
         use Action::*;
         match self {
@@ -150,6 +155,7 @@ impl Action {
         Action::Exit,
     ];
 
+    /// The action's id, label and default shortcuts.
     pub fn info(self) -> ActionInfo {
         use Action::*;
         match self {
@@ -200,6 +206,7 @@ pub fn normalize(s: &str) -> String {
     Shortcut::parse(s).map_or_else(|| s.trim().to_owned(), |sc| sc.to_string())
 }
 
+/// Shortcuts in their written form, without empty ones and repeats.
 fn normalize_all<'a>(list: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for s in list {
@@ -211,10 +218,12 @@ fn normalize_all<'a>(list: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     out
 }
 
+/// The action's default shortcuts.
 pub fn defaults(a: Action) -> Vec<String> {
     normalize_all(a.info().defaults.iter().copied())
 }
 
+/// The action's shortcuts: the user's, or the defaults.
 pub fn bindings(ov: &Overrides, a: Action) -> Vec<String> {
     match ov.get(a.info().id) {
         Some(list) => normalize_all(list.iter().map(String::as_str)),
@@ -232,12 +241,14 @@ pub fn set_bindings(ov: &mut Overrides, a: Action, list: Vec<String>) {
     }
 }
 
+/// Give the action another shortcut.
 pub fn add_binding(ov: &mut Overrides, a: Action, s: &str) {
     let mut list = bindings(ov, a);
     list.push(s.to_owned());
     set_bindings(ov, a, list);
 }
 
+/// Take a shortcut away from the action.
 pub fn remove_binding(ov: &mut Overrides, a: Action, s: &str) {
     let list = bindings(ov, a).into_iter().filter(|b| b != s).collect();
     set_bindings(ov, a, list);
@@ -273,6 +284,7 @@ pub fn preset_label(ov: &Overrides, a: Action) -> String {
     presets(a).into_iter().find(|(_, set)| *set == cur).map_or_else(|| tr("Custom").to_owned(), |(l, _)| l)
 }
 
+/// The action a key press runs, if any.
 pub fn lookup(ov: &Overrides, key: Key, m: Modifiers) -> Option<Action> {
     Action::ALL.into_iter().find(|&a| bindings(ov, a).iter().any(|b| Shortcut::parse(b).is_some_and(|s| s.matches(key, m))))
 }

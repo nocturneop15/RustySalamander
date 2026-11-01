@@ -35,6 +35,8 @@ impl Snapshot {
         }
     }
 
+    /// Draw the frame `out` (its shapes, with egui's font atlas) into a PNG
+    /// at `path`.
     pub fn render(&self, ctx: &egui::Context, out: egui::FullOutput, bg: Color32, path: &Path) {
         let ppp = out.pixels_per_point;
         let screen = ctx.screen_rect();
@@ -93,6 +95,7 @@ impl Snapshot {
     }
 }
 
+/// The CRC-32 a PNG chunk ends with.
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {

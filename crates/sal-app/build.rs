@@ -11,12 +11,18 @@
 //! - The SCP plugin (`plugins/scp`) goes to `plugins\scp\scp.spl`.
 //! - The search plugin (`plugins/search`) goes to `plugins\search\search.spl`.
 //! - The viewer plugin (`plugins/viewer`) goes to `plugins\viewer\viewer.spl`.
+//!
+//! On Windows it also puts the program's icon (`res/rustysalamander.ico`)
+//! and version information into the exe, with `windres` from the MinGW
+//! toolchain.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SEVEN_ZIP: &str = "../../third_party/7zip-26.05";
 
+/// Copy the language files, build and install the plugins, and give the
+/// exe its resources.
 fn main() {
     println!("cargo:rerun-if-changed=lang");
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -47,6 +53,70 @@ fn main() {
     if let Err(e) = install_plugin(manifest, profile_dir, "sal-plugin-viewer", "viewer", "viewer") {
         println!("cargo:warning=the viewer plugin was not built: {e}");
     }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        if let Err(e) = exe_resources(manifest, &out) {
+            println!("cargo:warning=the exe has no icon: {e}");
+        }
+    }
+}
+
+/// The exe's resources: its icon, which Explorer and shortcuts show, and its
+/// version information, from which Windows names it (the taskbar, Task
+/// Manager, file properties). Compiled with `windres` (`WINDRES` names
+/// another one) into an object file linked into the program.
+fn exe_resources(manifest: &Path, out: &Path) -> Result<(), String> {
+    let ico = manifest.join("res").join("rustysalamander.ico");
+    println!("cargo:rerun-if-changed={}", ico.display());
+    println!("cargo:rerun-if-env-changed=WINDRES");
+    let number = |part: &str| std::env::var(format!("CARGO_PKG_VERSION_{part}")).unwrap_or_default().parse::<u16>().unwrap_or(0);
+    let (major, minor, patch) = (number("MAJOR"), number("MINOR"), number("PATCH"));
+    let version = env!("CARGO_PKG_VERSION");
+    let rc = format!(
+        r#"1 ICON "{ico}"
+1 VERSIONINFO
+FILEVERSION {major},{minor},{patch},0
+PRODUCTVERSION {major},{minor},{patch},0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "RustySalamander contributors"
+      VALUE "FileDescription", "RustySalamander"
+      VALUE "FileVersion", "{version}"
+      VALUE "InternalName", "rustysalamander"
+      VALUE "LegalCopyright", "GPL-2.0-or-later"
+      VALUE "OriginalFilename", "rustysalamander.exe"
+      VALUE "ProductName", "RustySalamander"
+      VALUE "ProductVersion", "{version}"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#,
+        ico = ico.display().to_string().replace('\\', "/")
+    );
+    let rc_file = out.join("rustysalamander.rc");
+    let obj = out.join("rustysalamander-res.o");
+    std::fs::write(&rc_file, rc).map_err(|e| e.to_string())?;
+    let windres = std::env::var_os("WINDRES").unwrap_or_else(|| "windres".into());
+    let status = Command::new(&windres)
+        .args(["--input-format=rc", "--output-format=coff", "--input"])
+        .arg(&rc_file)
+        .arg("--output")
+        .arg(&obj)
+        .status()
+        .map_err(|e| format!("{}: {e}", windres.to_string_lossy()))?;
+    if !status.success() {
+        return Err(format!("windres failed ({status})"));
+    }
+    println!("cargo:rustc-link-arg-bins={}", obj.display());
+    Ok(())
 }
 
 /// Build the plugin crate `package` (source in `plugins/<source>`) and put

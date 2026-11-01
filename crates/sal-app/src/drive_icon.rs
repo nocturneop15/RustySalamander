@@ -6,6 +6,7 @@ use eframe::egui::{self, pos2, vec2, Color32, Painter, Rect, Response, Sense, Ui
 use sal_ui::mdi;
 use sal_core::drives::DriveType;
 
+/// The color of a drive type's icon.
 pub fn color(kind: DriveType) -> Color32 {
     match kind {
         DriveType::Fixed => Color32::from_rgb(98, 140, 196),

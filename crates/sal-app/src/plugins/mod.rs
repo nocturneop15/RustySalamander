@@ -128,6 +128,7 @@ pub struct Found {
 }
 
 impl Found {
+    /// A plugin found in `file`, with its translations ready.
     fn new(info: Info, file: PathBuf, desc: &'static Descriptor) -> Found {
         let lang: &'static PathBuf = Box::leak(Box::new(file.parent().unwrap_or(Path::new(".")).join("lang")));
         let host = Box::leak(Box::new(HostApi { version: abi::VERSION, ctx: lang as *const PathBuf as *mut c_void, translate }));
@@ -144,6 +145,7 @@ impl Found {
         crate::i18n::tr_from(&self.dir().join("lang"), msg)
     }
 
+    /// Start the plugin.
     fn start(&self) -> Result<Arc<dyn FolderPlugin>, String> {
         unsafe { host::start(self.desc, self.host, self.dir()) }
     }
@@ -231,6 +233,7 @@ impl Plugins {
         }
     }
 
+    /// The running plugin with this id.
     pub fn get(&self, id: &str) -> Option<&Arc<dyn FolderPlugin>> {
         self.active.iter().find(|p| p.id() == id)
     }

@@ -10,7 +10,6 @@ pub const ATTR_DIRECTORY: u32 = 0x10;
 pub const ATTR_ARCHIVE: u32 = 0x20;
 pub const ATTR_REPARSE_POINT: u32 = 0x400;
 pub const ATTR_COMPRESSED: u32 = 0x800;
-pub const ATTR_OFFLINE: u32 = 0x1000;
 pub const ATTR_ENCRYPTED: u32 = 0x4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +41,8 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
+    /// An item at `path`; its name for display and matching comes from the
+    /// path (lossily when it isn't valid Unicode).
     pub fn new(path: PathBuf, kind: EntryKind, size: u64, modified: Option<SystemTime>, attrs: u32) -> Self {
         let (name, name_lossy) = match path.file_name() {
             Some(os) => match os.to_str() {
@@ -54,6 +55,7 @@ impl FileEntry {
         FileEntry { path, name, name_lossy, ext_start, kind, size, modified, attrs, selected: false }
     }
 
+    /// The `..` item leading to `parent`.
     pub fn up_dir(parent: PathBuf) -> Self {
         FileEntry { path: parent, name: "..".into(), name_lossy: false, ext_start: 2, kind: EntryKind::UpDir, size: 0, modified: None, attrs: ATTR_DIRECTORY, selected: false }
     }
@@ -67,20 +69,19 @@ impl FileEntry {
         }
     }
 
+    /// The extension, without the dot ("" for none and for folders).
     pub fn ext(&self) -> &str {
         &self.name[self.ext_start..]
     }
 
+    /// Whether it opens as a folder (`..` does).
     pub fn is_dir(&self) -> bool {
         self.kind != EntryKind::File
     }
 
+    /// Whether it has the hidden or the system attribute.
     pub fn is_hidden(&self) -> bool {
         self.attrs & (ATTR_HIDDEN | ATTR_SYSTEM) != 0
-    }
-
-    pub fn is_link(&self) -> bool {
-        self.attrs & ATTR_REPARSE_POINT != 0
     }
 
     /// Salamander-style attribute string, e.g. `RHSA`.

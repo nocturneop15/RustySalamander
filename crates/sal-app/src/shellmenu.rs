@@ -40,10 +40,12 @@ mod imp {
     const FIRST_ID: u32 = 1;
     const LAST_ID: u32 = 0x7FFF;
 
+    /// A window handle as Windows takes it.
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut core::ffi::c_void)
     }
 
+    /// A NUL-terminated UTF-16 string.
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
@@ -86,6 +88,7 @@ mod imp {
         Ok((menu, pidls))
     }
 
+    /// The verb ("open", "properties") of the menu item `id`, if it has one.
     fn verb_of(menu: &IContextMenu, id: u32) -> Option<String> {
         if id < FIRST_ID {
             return None;
@@ -96,6 +99,7 @@ mod imp {
         (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
     }
 
+    /// Run a menu item (by id) or a verb on the menu's items.
     fn invoke(menu: &IContextMenu, owner: HWND, verb: Result<u32, &str>, dir: &Path, pt: POINT) -> Result<(), String> {
         let dir_w = wide(&sal_core::encoding::display_path(dir));
         let verb_a: Vec<u8>;
@@ -171,6 +175,7 @@ mod imp {
         (pt.x, pt.y)
     }
 
+    /// Show the shell's own context menu for `items` at `at`; what was picked.
     pub fn show_classic(owner: isize, items: &[PathBuf], dir: &Path, at: (i32, i32), extended: bool) -> Result<Picked, String> {
         let owner = hwnd(owner);
         let (menu, _pidls) = context_menu(owner, items)?;
@@ -387,6 +392,7 @@ mod imp {
         }
     }
 
+    /// Run the shell verb `verb` ("cut", "properties", …) on `items`.
     pub fn invoke_verb(owner: isize, items: &[PathBuf], dir: &Path, verb: &str) -> Result<(), String> {
         let owner = hwnd(owner);
         let (menu, _pidls) = context_menu(owner, items)?;
@@ -425,6 +431,7 @@ mod imp {
         Ok(out)
     }
 
+    /// Whether the clipboard holds files to paste.
     pub fn clipboard_has_files() -> bool {
         unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32) }.is_ok()
     }
@@ -438,28 +445,37 @@ pub use imp::{arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file,
 #[cfg(not(windows))]
 mod fallback {
     use super::*;
+    /// Elsewhere there is no shell menu.
     pub fn show_classic(_: isize, _: &[PathBuf], _: &Path, _: (i32, i32), _: bool) -> Result<Picked, String> {
         Err("the system context menu is only available on Windows".into())
     }
+    /// Elsewhere there are no shell verbs.
     pub fn invoke_verb(_: isize, _: &[PathBuf], _: &Path, verb: &str) -> Result<(), String> {
         Err(format!("\"{verb}\" is only available on Windows"))
     }
+    /// Elsewhere window points are screen points.
     pub fn screen_point(_: isize, p: Option<(f32, f32)>) -> (i32, i32) {
         p.map_or((0, 0), |(x, y)| (x as i32, y as i32))
     }
+    /// Elsewhere there is nothing to paste.
     pub fn clipboard_has_files() -> bool {
         false
     }
+    /// Elsewhere there are no native menus.
     pub fn show_native(_: isize, _: &[Option<(u32, String, String, bool)>], _: (i32, i32)) -> u32 {
         0
     }
+    /// Elsewhere menus have no theme.
     pub fn set_menu_theme(_: Option<bool>) {}
+    /// Elsewhere there is no Open dialog.
     pub fn pick_file(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
         None
     }
+    /// Elsewhere there is no folder picker.
     pub fn pick_folder(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
         None
     }
+    /// Elsewhere there is no Open dialog.
     pub fn pick_program(_: Option<isize>, _: &str) -> Option<String> {
         None
     }

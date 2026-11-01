@@ -141,8 +141,10 @@ pub trait FolderPlugin: Send + Sync {
     /// for the window to close. `options` says how the program looks, so
     /// the window can match it: `theme` (`system`, `light` or `dark`),
     /// `ui_font` and `mono_font` (font names, empty for the default),
-    /// `scrollbars` (`solid` or `floating`), `accent` (the accent color as
-    /// `#rrggbb`, empty for the theme's); and `temporary` (`1` when the
+    /// `scrollbars` (`solid` or `floating`), `accent_light` and
+    /// `accent_dark` (the accent colors of the two themes as `#rrggbb`,
+    /// empty for the theme's own; `accent` is the one of the theme chosen,
+    /// for plugins from before); and `temporary` (`1` when the
     /// file is a temporary copy, from an archive or a server: changes to it
     /// are not saved back).
     fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {

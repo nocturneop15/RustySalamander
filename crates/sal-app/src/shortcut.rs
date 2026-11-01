@@ -14,6 +14,7 @@ pub struct Shortcut {
 }
 
 impl Shortcut {
+    /// The key with these modifiers.
     pub fn new(key: Key, m: Modifiers) -> Shortcut {
         Shortcut { key, ctrl: m.ctrl, shift: m.shift, alt: m.alt }
     }
@@ -38,6 +39,7 @@ impl Shortcut {
         Some(Shortcut { key: key?, ctrl, shift, alt })
     }
 
+    /// Whether a key press is this shortcut (the modifiers exactly).
     pub fn matches(&self, key: Key, m: Modifiers) -> bool {
         self.key == key && self.ctrl == m.ctrl && self.shift == m.shift && self.alt == m.alt
     }

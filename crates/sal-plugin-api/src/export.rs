@@ -15,6 +15,8 @@ use crate::Plugin;
 #[macro_export]
 macro_rules! export_plugin {
     ($t:ty) => {
+        /// The entry point the program looks for (`sal_plugin_api::abi::ENTRY`):
+        /// the plugin's descriptor.
         #[no_mangle]
         pub extern "C" fn rustysalamander_plugin() -> *const $crate::abi::Descriptor {
             static VTABLE: $crate::abi::VTable = $crate::export::vtable::<$t>();
@@ -54,6 +56,7 @@ pub fn trf(msg: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
     s
 }
 
+/// The function table of `T` (used by [`export_plugin!`](crate::export_plugin)).
 pub const fn vtable<T: Plugin>() -> VTable {
     VTable {
         free: free::<T>,
@@ -77,6 +80,7 @@ pub const fn vtable<T: Plugin>() -> VTable {
     }
 }
 
+/// The descriptor of `T` (used by [`export_plugin!`](crate::export_plugin)).
 pub const fn descriptor<T: Plugin>(vtable: &'static VTable) -> Descriptor {
     Descriptor {
         version: VERSION,
@@ -92,6 +96,7 @@ pub const fn descriptor<T: Plugin>(vtable: &'static VTable) -> Descriptor {
     }
 }
 
+/// A panic's message, for the error the program shows.
 fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
     let what = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default();
     format!("the plugin failed: {what}")
@@ -112,10 +117,12 @@ unsafe fn run(error: *const StrOut, f: impl FnOnce() -> io::Result<()>) -> i32 {
     }
 }
 
+/// The plugin `this` points to.
 unsafe fn me<'a, T>(this: *mut c_void) -> &'a T {
     &*(this as *const T)
 }
 
+/// A borrowed array of `n` strings, copied.
 unsafe fn strings(items: *const Str, n: usize) -> Vec<String> {
     if n == 0 {
         return Vec::new();
@@ -123,11 +130,16 @@ unsafe fn strings(items: *const Str, n: usize) -> Vec<String> {
     std::slice::from_raw_parts(items, n).iter().map(|s| s.get().to_owned()).collect()
 }
 
+/// The program's progress callback as a closure.
 unsafe fn with_progress<R>(p: *const ProgressFn, f: impl FnOnce(&mut dyn FnMut(u64, u64) -> bool) -> R) -> R {
     let p = &*p;
     f(&mut |done, total| (p.call)(p.ctx, done, total))
 }
 
+/// [`Descriptor::start`]: remember the program, start `T`.
+///
+/// The functions below are the [`VTable`] entries: each calls the trait
+/// method of the same name, catching panics.
 unsafe extern "C" fn start<T: Plugin>(host: *const HostApi, dir: Wide, error: *const StrOut) -> *mut c_void {
     if !host.is_null() {
         HOST.store(host as *mut HostApi, Ordering::Release);
@@ -146,23 +158,28 @@ unsafe extern "C" fn start<T: Plugin>(host: *const HostApi, dir: Wide, error: *c
     }
 }
 
+/// [`VTable::free`].
 unsafe extern "C" fn free<T: Plugin>(this: *mut c_void) {
     let _ = catch_unwind(|| drop(Box::from_raw(this as *mut T)));
 }
 
+/// [`VTable::handles`].
 unsafe extern "C" fn handles<T: Plugin>(this: *mut c_void, name: Str) -> bool {
     catch_unwind(|| me::<T>(this).handles(name.get())).unwrap_or(false)
 }
 
+/// [`VTable::can_write`].
 unsafe extern "C" fn can_write<T: Plugin>(this: *mut c_void, file: Wide) -> bool {
     catch_unwind(|| me::<T>(this).can_write(&file.path())).unwrap_or(false)
 }
 
+/// [`VTable::status`].
 unsafe extern "C" fn status<T: Plugin>(this: *mut c_void, out: *const StrOut) {
     let s = catch_unwind(|| me::<T>(this).status()).unwrap_or_else(|p| panic_text(&*p));
     (*out).send(&s);
 }
 
+/// [`VTable::list`].
 unsafe extern "C" fn list<T: Plugin>(this: *mut c_void, file: Wide, folder: Str, items: *const ItemOut, complete: *mut bool, error: *const StrOut) -> i32 {
     run(error, || {
         let index = me::<T>(this).list(&file.path(), folder.get())?;
@@ -184,10 +201,12 @@ unsafe extern "C" fn list<T: Plugin>(this: *mut c_void, file: Wide, folder: Str,
     })
 }
 
+/// [`VTable::extract`].
 unsafe extern "C" fn extract<T: Plugin>(this: *mut c_void, file: Wide, items: *const Str, n: usize, out: Wide, progress: *const ProgressFn, error: *const StrOut) -> i32 {
     run(error, || with_progress(progress, |p| me::<T>(this).extract(&file.path(), &strings(items, n), &out.path(), p)))
 }
 
+/// [`VTable::add`].
 unsafe extern "C" fn add<T: Plugin>(this: *mut c_void, file: Wide, disk: *const Wide, inner: *const Str, n: usize, progress: *const ProgressFn, error: *const StrOut) -> i32 {
     run(error, || {
         let disk: Vec<PathBuf> = if n == 0 { Vec::new() } else { std::slice::from_raw_parts(disk, n).iter().map(|w| w.path()).collect() };
@@ -196,23 +215,28 @@ unsafe extern "C" fn add<T: Plugin>(this: *mut c_void, file: Wide, disk: *const 
     })
 }
 
+/// [`VTable::delete`].
 unsafe extern "C" fn delete<T: Plugin>(this: *mut c_void, file: Wide, items: *const Str, n: usize, progress: *const ProgressFn, error: *const StrOut) -> i32 {
     run(error, || with_progress(progress, |p| me::<T>(this).delete(&file.path(), &strings(items, n), p)))
 }
 
+/// [`VTable::rename`].
 unsafe extern "C" fn rename<T: Plugin>(this: *mut c_void, file: Wide, old: Str, new: Str, progress: *const ProgressFn, error: *const StrOut) -> i32 {
     run(error, || with_progress(progress, |p| me::<T>(this).rename(&file.path(), old.get(), new.get(), p)))
 }
 
+/// [`VTable::mkdir`].
 unsafe extern "C" fn mkdir<T: Plugin>(this: *mut c_void, file: Wide, inner: Str, progress: *const ProgressFn, error: *const StrOut) -> i32 {
     run(error, || with_progress(progress, |p| me::<T>(this).mkdir(&file.path(), inner.get(), p)))
 }
 
+/// [`VTable::commands`].
 unsafe extern "C" fn commands<T: Plugin>(this: *mut c_void, out: *const StrOut) {
     let list = catch_unwind(|| me::<T>(this).commands()).unwrap_or_default();
     (*out).send(&crate::ui::encode_commands(&list));
 }
 
+/// [`VTable::run`].
 unsafe extern "C" fn run_command<T: Plugin>(this: *mut c_void, command: Str, values: Str, out: *const StrOut, error: *const StrOut) -> i32 {
     run(error, || {
         let reply = me::<T>(this).run(command.get(), &crate::ui::decode_values(values.get()))?;
@@ -221,29 +245,35 @@ unsafe extern "C" fn run_command<T: Plugin>(this: *mut c_void, command: Str, val
     })
 }
 
+/// [`VTable::close`].
 unsafe extern "C" fn close<T: Plugin>(this: *mut c_void, root: Wide) {
     let _ = catch_unwind(|| me::<T>(this).close(&root.path()));
 }
 
+/// [`VTable::activity`].
 unsafe extern "C" fn activity<T: Plugin>(this: *mut c_void, root: Wide, out: *const StrOut) -> bool {
     let a = catch_unwind(|| me::<T>(this).activity(&root.path())).unwrap_or_else(|p| crate::Activity { running: false, text: panic_text(&*p) });
     (*out).send(&a.text);
     a.running
 }
 
+/// [`VTable::stop`].
 unsafe extern "C" fn stop<T: Plugin>(this: *mut c_void, root: Wide) {
     let _ = catch_unwind(|| me::<T>(this).stop(&root.path()));
 }
 
+/// [`VTable::openers`].
 unsafe extern "C" fn openers<T: Plugin>(this: *mut c_void, out: *const StrOut) {
     let list = catch_unwind(|| me::<T>(this).openers()).unwrap_or_default();
     (*out).send(&crate::ui::encode_openers(&list));
 }
 
+/// [`VTable::open_file`].
 unsafe extern "C" fn open_file<T: Plugin>(this: *mut c_void, opener: Str, file: Wide, options: Str, error: *const StrOut) -> i32 {
     run(error, || me::<T>(this).open_file(opener.get(), &file.path(), &crate::ui::decode_values(options.get())))
 }
 
+/// [`VTable::real_path`].
 unsafe extern "C" fn real_path<T: Plugin>(this: *mut c_void, file: Wide, inner: Str, out: *const PathOut) {
     if let Ok(Some(p)) = catch_unwind(|| me::<T>(this).real_path(&file.path(), inner.get())) {
         (*out).send(&p);

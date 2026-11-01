@@ -13,6 +13,7 @@ pub enum DriveType {
 }
 
 impl DriveType {
+    /// The drive type as the drive selector shows it (translated there).
     pub fn label(self) -> &'static str {
         match self {
             DriveType::Fixed => "Local disk",
@@ -24,6 +25,7 @@ impl DriveType {
         }
     }
 
+    /// Whether the drive is in this computer (the drive list shows these first).
     pub fn is_local(self) -> bool {
         !matches!(self, DriveType::Network)
     }
@@ -68,12 +70,15 @@ pub fn kind_of_root(root: &Path, drives: &[Drive]) -> DriveType {
     drives.iter().find(|d| d.letter.chars().next() == letter).map_or(DriveType::Unknown, |d| d.kind)
 }
 
+/// A NUL-terminated UTF-16 string for the Windows API.
 #[cfg(windows)]
 fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// The drives there are: letter, label, type and, for network drives, the
+/// share.
 #[cfg(windows)]
 pub fn list() -> Vec<Drive> {
     use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW};
@@ -129,6 +134,7 @@ fn remote_name(letter: char) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..n])).filter(|s| !s.is_empty())
 }
 
+/// Elsewhere the one root.
 #[cfg(not(windows))]
 pub fn list() -> Vec<Drive> {
     vec![Drive { root: PathBuf::from("/"), letter: "/".into(), label: String::new(), kind: DriveType::Fixed, remote: None }]
@@ -144,6 +150,7 @@ pub fn free_space(p: &Path) -> Option<(u64, u64)> {
     (ok != 0).then_some((free, total))
 }
 
+/// Elsewhere unknown.
 #[cfg(not(windows))]
 pub fn free_space(_p: &Path) -> Option<(u64, u64)> {
     None

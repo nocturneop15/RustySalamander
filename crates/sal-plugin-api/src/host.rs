@@ -116,17 +116,20 @@ fn call(f: impl FnOnce(*const StrOut) -> i32) -> io::Result<()> {
     }
 }
 
+/// The [`ProgressFn`] the plugin calls: the caller's closure.
 unsafe extern "C" fn call_progress(ctx: *mut c_void, done: u64, total: u64) -> bool {
     let f = &mut *(ctx as *mut &mut Progress);
     f(done, total)
 }
 
+/// A closure as the [`ProgressFn`] the plugin gets.
 fn with_progress<R>(progress: &mut Progress, f: impl FnOnce(*const ProgressFn) -> R) -> R {
     let mut p: &mut Progress = progress;
     let pf = ProgressFn { ctx: &mut p as *mut &mut Progress as *mut c_void, call: call_progress };
     f(&pf)
 }
 
+/// The [`ItemOut`] receiver: one item into the listing.
 unsafe extern "C" fn put_item(ctx: *mut c_void, raw: *const RawItem) {
     let items = &mut *(ctx as *mut Vec<Item>);
     let r = &*raw;

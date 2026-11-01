@@ -93,6 +93,8 @@ pub struct ResultsWin {
 }
 
 impl ResultsWin {
+    /// A results window for the connection `root` (and its flat list), with
+    /// the commands its buttons run.
     pub fn new(plugin: Arc<dyn FolderPlugin>, root: PathBuf, flat: Option<PathBuf>, title: String, again: String, refresh: String) -> ResultsWin {
         ResultsWin {
             plugin,
@@ -170,6 +172,7 @@ impl ResultsWin {
         ctx.request_repaint_after(every);
     }
 
+    /// Sort the rows by the column chosen.
     fn sort_rows(&mut self) {
         let Some((by, asc)) = self.sort else { return };
         let key = |a: &Row, b: &Row| -> Ordering {
@@ -183,6 +186,7 @@ impl ResultsWin {
         self.rows.sort_by(|a, b| if asc { key(a, b) } else { key(b, a) });
     }
 
+    /// The results shown, in their order.
     #[cfg(test)]
     pub fn rows(&self) -> &[Row] {
         &self.rows

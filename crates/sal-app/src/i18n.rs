@@ -35,6 +35,7 @@ pub enum PluralRule {
 }
 
 impl PluralRule {
+    /// Which plural form `n` takes.
     fn index(self, n: u64) -> usize {
         match self {
             PluralRule::English => usize::from(n != 1),
@@ -72,6 +73,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// A language file's catalog (TOML: `[language]` and `[strings]`).
     pub fn parse(text: &str) -> Result<Catalog, String> {
         let f: File = toml::from_str(text).map_err(|e| e.to_string())?;
         let plural = match f.language.plural.as_str() {
@@ -82,6 +84,7 @@ impl Catalog {
         Ok(Catalog { code: f.language.code, name: f.language.name, plural, strings })
     }
 
+    /// The translation of `msg`, or `msg` itself.
     pub fn tr(&self, msg: &'static str) -> &'static str {
         self.strings.get(msg).copied().unwrap_or(msg)
     }
@@ -105,6 +108,7 @@ impl Catalog {
         form.replace("{n}", &sal_core::encoding::format_thousands(n))
     }
 
+    /// The English texts the catalog translates.
     #[cfg(test)]
     pub fn keys(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.strings.keys().copied()
@@ -126,6 +130,7 @@ thread_local! {
     static CURRENT: std::cell::RefCell<Option<Catalog>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Use the catalog in use (per test thread in tests, so they don't mix).
 fn with_current<R>(f: impl FnOnce(Option<&Catalog>) -> R) -> R {
     #[cfg(not(test))]
     return f(CURRENT.read().unwrap().as_ref());
@@ -133,6 +138,7 @@ fn with_current<R>(f: impl FnOnce(Option<&Catalog>) -> R) -> R {
     return CURRENT.with(|c| f(c.borrow().as_ref()));
 }
 
+/// Make `cat` the catalog in use (`None`: English).
 fn set_current(cat: Option<Catalog>) {
     #[cfg(not(test))]
     {
@@ -193,6 +199,7 @@ fn english() -> Catalog {
     Catalog { code: "en".into(), name: "English".into(), plural: PluralRule::English, strings: HashMap::new() }
 }
 
+/// The languages there are files for in `dir` (and English).
 fn available_in(dir: Option<&std::path::Path>) -> Vec<LangInfo> {
     let mut list = vec![LangInfo { code: "en".into(), name: "English".into() }];
     for text in sources(dir) {
@@ -205,6 +212,7 @@ fn available_in(dir: Option<&std::path::Path>) -> Vec<LangInfo> {
     list
 }
 
+/// The catalog of language `code` from `dir` (English needs no file).
 fn load_in(dir: Option<&std::path::Path>, code: &str) -> Option<Catalog> {
     let found = sources(dir).iter().filter_map(|t| Catalog::parse(t).ok()).find(|c| c.code.eq_ignore_ascii_case(code));
     found.or_else(|| code.eq_ignore_ascii_case("en").then(english))

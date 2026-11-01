@@ -80,10 +80,12 @@ impl Plugin for Search {
     }
 }
 
+/// An "unsupported" error with `msg` (translated).
 fn unsupported(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, tr(msg))
 }
 
+/// Whether the check box `id` is ticked.
 fn on(values: &Values, id: &str) -> bool {
     values.get(id).is_some_and(|v| !v.is_empty())
 }
@@ -294,6 +296,8 @@ fn tree_inner(dir: &Path, real: &Path) -> String {
     rel.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("\\")
 }
 
+/// Copy the folder `from` with its contents to `to`; `progress` gets the
+/// bytes and returns false to cancel.
 fn copy_dir(from: &Path, to: &Path, progress: &mut dyn FnMut(u64) -> bool) -> io::Result<()> {
     fs::create_dir_all(to)?;
     for e in fs::read_dir(from)? {
@@ -340,6 +344,7 @@ fn recycle(paths: &[PathBuf]) -> io::Result<()> {
     }
 }
 
+/// Elsewhere there is no Recycle Bin: deleted for good.
 #[cfg(not(windows))]
 fn recycle(paths: &[PathBuf]) -> io::Result<()> {
     for p in paths {

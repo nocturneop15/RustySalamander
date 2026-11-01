@@ -48,6 +48,7 @@ struct Phase<'a> {
 }
 
 impl Phase<'_> {
+    /// A phase of `files` items, starting at `current`.
     fn new<'a>(obs: &'a mut dyn OpObserver, current: &Path, files: u64) -> Phase<'a> {
         let p = Progress { current: current.to_path_buf(), files_done: 0, files_total: files, bytes_done: 0, bytes_total: 0 };
         Phase { obs, p }
@@ -78,10 +79,12 @@ struct Op<'a> {
 }
 
 impl Op<'_> {
+    /// The plugin's file and the path inside it for `p`.
     fn split(&self, p: &Path) -> Result<(PathBuf, String), String> {
         super::split(std::slice::from_ref(self.plugin), p).map(|(_, f, i)| (f, i)).ok_or_else(|| trf("{path} is not inside an archive.", &[("path", &display_path(p))]))
     }
 
+    /// An error unless the plugin can change `file`.
     fn writable(&self, file: &Path) -> Result<(), String> {
         if self.plugin.can_write(file) {
             Ok(())
@@ -96,6 +99,8 @@ impl Op<'_> {
     }
 }
 
+/// Run an operation inside plugins' files (extract, add, delete, rename,
+/// new folder), reporting to `obs`.
 pub fn run(plugin: &Arc<dyn FolderPlugin>, op: FolderOp, sources: &[PathBuf], target: &Path, obs: &mut dyn OpObserver) -> Result<OpSummary, String> {
     let o = Op { plugin };
     let mut summary = OpSummary::default();
@@ -140,6 +145,7 @@ pub fn run(plugin: &Arc<dyn FolderPlugin>, op: FolderOp, sources: &[PathBuf], ta
     Ok(summary)
 }
 
+/// Copy or move: out of a plugin's file, into one, or between two.
 fn transfer(o: &Op, kind: OpKind, sources: &[PathBuf], target: &Path, obs: &mut dyn OpObserver, summary: &mut OpSummary) -> Result<(), String> {
     let dst = o.split(target).ok();
     let Ok((src_file, _)) = o.split(&sources[0]) else {

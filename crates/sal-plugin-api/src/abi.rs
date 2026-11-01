@@ -138,6 +138,7 @@ pub struct StrOut {
     pub put: unsafe extern "C" fn(ctx: *mut c_void, s: Str),
 }
 
+/// The [`StrOut`] receiver behind [`StrOut::new`].
 unsafe extern "C" fn put_string(ctx: *mut c_void, s: Str) {
     *(ctx as *mut String) = s.get().to_owned();
 }
@@ -166,6 +167,7 @@ pub struct PathOut {
     pub put: unsafe extern "C" fn(ctx: *mut c_void, p: Wide),
 }
 
+/// The [`PathOut`] receiver behind [`PathOut::new`].
 unsafe extern "C" fn put_path(ctx: *mut c_void, p: Wide) {
     *(ctx as *mut Option<PathBuf>) = Some(p.path());
 }

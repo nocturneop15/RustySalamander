@@ -24,6 +24,8 @@ struct Log {
 
 static LOG: OnceLock<Log> = OnceLock::new();
 
+/// The log: a file when `RUSTYSALAMANDER_LOG` names one (`1` for the temp
+/// folder), else none.
 fn log() -> &'static Log {
     LOG.get_or_init(|| {
         let file = std::env::var_os("RUSTYSALAMANDER_LOG").filter(|v| !v.is_empty()).and_then(|v| {
@@ -71,6 +73,7 @@ pub fn time<R>(label: &str, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// A duration in milliseconds, for the log.
 pub fn ms(d: Duration) -> String {
     format!("{:.1} ms", d.as_secs_f64() * 1000.0)
 }
@@ -85,6 +88,7 @@ pub struct Frame {
 }
 
 impl Frame {
+    /// Frame `n` begins now.
     pub fn start(n: u64) -> Frame {
         let now = Instant::now();
         Frame { n, start: now, last: now, parts: Vec::new() }
@@ -99,6 +103,7 @@ impl Frame {
         }
     }
 
+    /// The frame ended: log its parts when it took long.
     pub fn finish(self) {
         if !enabled() {
             return;

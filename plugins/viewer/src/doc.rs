@@ -33,19 +33,24 @@ pub struct Doc {
     /// plain text.
     pub syntax: Option<String>,
     /// The colors of the lines: (dark theme, `version` they were made for, spans).
-    spans: Option<(bool, u64, Vec<Vec<Span>>)>,
+    spans: Option<(bool, u64, LineSpans)>,
     /// Changes with the lines and the syntax, so old colors aren't used.
     version: u64,
     /// Coloring running in the background.
     job: Option<Job>,
 }
 
+/// The colors of every line, one list of spans per line.
+type LineSpans = Vec<Vec<Span>>;
+
 /// Coloring the lines on a thread of its own.
 struct Job {
     dark: bool,
     version: u64,
     stop: Arc<AtomicBool>,
-    result: Arc<Mutex<Option<Option<Vec<Vec<Span>>>>>>,
+    /// Filled when the thread ends: the colors, or `None` when they could
+    /// not be made.
+    result: Arc<Mutex<Option<Option<LineSpans>>>>,
 }
 
 /// Where coloring a document stands.
@@ -61,6 +66,8 @@ pub enum Colors {
 }
 
 impl Doc {
+    /// Read `path` (at most [`MAX_BYTES`]): its text in the encoding detected,
+    /// its syntax by name or first line; binary files open as hex.
     pub fn open(path: &Path) -> Doc {
         let title = format!("{} - {}", encoding::display_name(&display_path(path)), tr("Viewer"));
         let mut d = Doc {
@@ -171,6 +178,7 @@ impl Doc {
         Colors::Working
     }
 
+    /// Stop the coloring that runs.
     fn cancel(&mut self) {
         if let Some(job) = self.job.take() {
             job.stop.store(true, Ordering::Relaxed);

@@ -62,6 +62,7 @@ pub enum Row {
     Separator,
 }
 
+/// The icon of `action`, centred in `rect`.
 fn paint_glyph(ui: &Ui, rect: Rect, action: MenuAction, icons: &Option<FontFamily>, color: Color32) {
     let size = rect.height() * 0.62;
     let family = icons.clone().unwrap_or(FontFamily::Proportional);

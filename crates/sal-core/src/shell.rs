@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// A NUL-terminated UTF-16 string for the Windows API.
 #[cfg(windows)]
 fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     s.encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// Run `verb` on `file`, as Explorer would.
 #[cfg(windows)]
 fn shell_execute(verb: &str, file: &Path, params: Option<&str>, dir: Option<&Path>) -> io::Result<()> {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -115,6 +117,7 @@ pub enum TerminalKind {
 impl TerminalKind {
     pub const ALL: [TerminalKind; 4] = [TerminalKind::Default, TerminalKind::Cmd, TerminalKind::PowerShell, TerminalKind::Custom];
 
+    /// The choice as Settings shows it (translated there).
     pub fn label(self) -> &'static str {
         match self {
             TerminalKind::Default => "Default terminal",
@@ -262,6 +265,7 @@ pub fn recycle(paths: &[PathBuf]) -> io::Result<()> {
     }
 }
 
+/// Elsewhere there is no Recycle Bin.
 #[cfg(not(windows))]
 pub fn recycle(_paths: &[PathBuf]) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "recycle bin is not supported on this platform"))

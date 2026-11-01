@@ -27,6 +27,7 @@ pub struct ArchiveView {
     stamp: (Option<SystemTime>, u64),
 }
 
+/// A file's modification time and size, to notice when it changed.
 fn stamp_of(file: &Path) -> (Option<SystemTime>, u64) {
     std::fs::metadata(file).map(|m| (m.modified().ok(), m.len())).unwrap_or((None, 0))
 }
@@ -85,11 +86,13 @@ fn archive_listing(view: &ArchiveView, vis: Visibility, sort: SortSpec) -> Listi
 /// cursor on, or `None` when nothing could be read.
 type Loaded = Option<(Listing, Option<String>)>;
 
+/// The folder a panel shows when its own can't be read.
 fn fallback_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
 }
 
 impl Panel {
+    /// A panel on `path` (or the nearest folder that can be read).
     pub fn new(path: &str, sort: SortSpec, vis: Visibility, plugins: Vec<Arc<dyn FolderPlugin>>) -> Self {
         let mut p = Panel {
             listing: Listing::default(),
@@ -151,14 +154,17 @@ impl Panel {
         p
     }
 
+    /// The folder shown.
     pub fn path(&self) -> &Path {
         &self.listing.path
     }
 
+    /// The items shown, sorted.
     pub fn entries(&self) -> &[FileEntry] {
         &self.listing.entries
     }
 
+    /// The item under the cursor.
     pub fn current(&self) -> Option<&FileEntry> {
         self.listing.entries.get(self.cursor)
     }
@@ -342,6 +348,7 @@ impl Panel {
         false
     }
 
+    /// Sort by `sort`, keeping the cursor on its item.
     pub fn resort(&mut self, sort: SortSpec) {
         self.sort = sort;
         let focus = self.current().map(|e| e.name.clone());
@@ -364,6 +371,7 @@ impl Panel {
         let _ = self.load(&fallback_dir(), vis, None);
     }
 
+    /// Backspace: the parent folder, with the cursor on the folder left.
     pub fn go_parent(&mut self, vis: Visibility) -> Result<(), String> {
         // a UNC share root goes up to its server's share list
         match location::parent_of(&self.listing.path) {
@@ -372,11 +380,13 @@ impl Panel {
         }
     }
 
+    /// The root of the drive or share.
     pub fn go_root(&mut self, vis: Visibility) -> Result<(), String> {
         let root = sal_core::drives::root_of(&self.listing.path);
         self.load(&root, vis, None)
     }
 
+    /// Back or forward in the panel's history.
     pub fn history_step(&mut self, back: bool, vis: Visibility) -> Result<(), String> {
         let pos = if back { self.history_pos.checked_sub(1) } else { Some(self.history_pos + 1).filter(|&p| p < self.history.len()) };
         let Some(pos) = pos else { return Ok(()) };
@@ -418,6 +428,7 @@ impl Panel {
         self.scroll_to_cursor = true;
     }
 
+    /// Put the cursor on item `i` and scroll to it.
     pub fn set_cursor(&mut self, i: usize) {
         if i < self.listing.entries.len() {
             self.cursor = i;
@@ -425,6 +436,8 @@ impl Panel {
         }
     }
 
+    /// Insert / Space: select or unselect the item under the cursor;
+    /// `advance` moves the cursor down.
     pub fn toggle_select(&mut self, advance: bool) {
         self.qs.clear();
         if let Some(e) = self.listing.entries.get_mut(self.cursor) {
@@ -437,6 +450,7 @@ impl Panel {
         }
     }
 
+    /// Select (or unselect) the items matching `mask`.
     pub fn select_by_mask(&mut self, mask: &MaskGroup, select: bool) {
         for e in &mut self.listing.entries {
             if e.kind != EntryKind::UpDir && mask.matches(&e.name) {
@@ -445,6 +459,7 @@ impl Panel {
         }
     }
 
+    /// Select or unselect everything (never `..`).
     pub fn select_all(&mut self, select: bool) {
         for e in &mut self.listing.entries {
             e.selected = select && e.kind != EntryKind::UpDir;
@@ -460,6 +475,7 @@ impl Panel {
         }
     }
 
+    /// Invert the selection of the files.
     pub fn invert_selection(&mut self) {
         // like Salamander's Num*, inverts files only
         for e in &mut self.listing.entries {
@@ -498,6 +514,7 @@ impl Panel {
         }
     }
 
+    /// Backspace in a quick search: drop its last character.
     pub fn quick_search_pop(&mut self) {
         self.qs.pop();
     }

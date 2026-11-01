@@ -115,10 +115,12 @@ mod ole {
 }
 
 impl PropVariant {
+    /// The string a `VT_BSTR` value holds.
     fn bstr_ptr(&self) -> *mut u16 {
         self.data[0] as usize as *mut u16
     }
 
+    /// The value as text, if it is a string.
     pub fn as_string(&self) -> Option<String> {
         if self.vt != VT_BSTR || self.bstr_ptr().is_null() {
             return None;
@@ -140,6 +142,7 @@ impl PropVariant {
         }
     }
 
+    /// The value as a number, if it is an unsigned one.
     pub fn as_u64(&self) -> Option<u64> {
         match self.vt {
             VT_UI1 => Some(self.data[0] & 0xFF),
@@ -150,40 +153,48 @@ impl PropVariant {
         }
     }
 
+    /// The value as a flag, if it is one.
     pub fn as_bool(&self) -> Option<bool> {
         (self.vt == VT_BOOL).then_some(self.data[0] & 0xFFFF != 0)
     }
 
+    /// The value as a time, if it is a FILETIME.
     pub fn as_time(&self) -> Option<SystemTime> {
         (self.vt == VT_FILETIME).then(|| filetime_to_system(self.data[0]))
     }
 
+    /// Hold `s` (a new `BSTR`, freed by [`PropVariant::clear`]).
     fn set_string(&mut self, s: &str) {
         let w: Vec<u16> = s.encode_utf16().collect();
         self.vt = VT_BSTR;
         self.data[0] = unsafe { ole::SysAllocStringLen(w.as_ptr(), w.len() as u32) } as usize as u64;
     }
 
+    /// Hold a flag.
     fn set_bool(&mut self, b: bool) {
         self.vt = VT_BOOL;
         self.data[0] = if b { 0xFFFF } else { 0 };
     }
 
+    /// Hold a 32-bit number.
     fn set_u32(&mut self, v: u32) {
         self.vt = VT_UI4;
         self.data[0] = v as u64;
     }
 
+    /// Hold a 64-bit number.
     fn set_u64(&mut self, v: u64) {
         self.vt = VT_UI8;
         self.data[0] = v;
     }
 
+    /// Hold a time.
     fn set_time(&mut self, t: SystemTime) {
         self.vt = VT_FILETIME;
         self.data[0] = system_to_filetime(t);
     }
 
+    /// Free what the value holds; it is empty after.
     fn clear(&mut self) {
         if self.vt == VT_BSTR && !self.bstr_ptr().is_null() {
             unsafe { ole::SysFreeString(self.bstr_ptr()) };
@@ -201,6 +212,7 @@ impl Drop for PropVariant {
 
 const FILETIME_UNIX_DIFF: u64 = 116_444_736_000_000_000;
 
+/// A FILETIME (100 ns since 1601) as a time.
 fn filetime_to_system(ft: u64) -> SystemTime {
     if ft >= FILETIME_UNIX_DIFF {
         UNIX_EPOCH + Duration::from_nanos((ft - FILETIME_UNIX_DIFF) * 100)
@@ -209,6 +221,7 @@ fn filetime_to_system(ft: u64) -> SystemTime {
     }
 }
 
+/// A time as FILETIME.
 fn system_to_filetime(t: SystemTime) -> u64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(d) => FILETIME_UNIX_DIFF + (d.as_nanos() / 100) as u64,
@@ -253,18 +266,22 @@ struct ComPtr<V> {
 }
 
 impl<V> ComPtr<V> {
+    /// The object's function table.
     fn vtbl(&self) -> &V {
         unsafe { &**self.p }
     }
 
+    /// The object pointer as 7-Zip takes it.
     fn raw(&self) -> *mut c_void {
         self.p as *mut c_void
     }
 
+    /// The `IUnknown` part of the function table.
     fn unknown(&self) -> &IUnknownVtbl {
         unsafe { &*(*self.p as *const IUnknownVtbl) }
     }
 
+    /// The object as another interface, if it has it.
     fn query<W>(&self, iid: &Guid) -> Option<ComPtr<W>> {
         let mut out = ptr::null_mut();
         let hr = unsafe { (self.unknown().query_interface)(self.raw(), iid, &mut out) };
@@ -292,10 +309,12 @@ struct Obj<V: 'static, T> {
 }
 
 impl<V: 'static, T> Obj<V, T> {
+    /// A new object of ours with one reference, handed to 7-Zip.
     fn create(vtbl: &'static V, iids: &'static [Guid], data: T) -> *mut c_void {
         Box::into_raw(Box::new(Obj { vtbl, refs: AtomicU32::new(1), iids, data })) as *mut c_void
     }
 
+    /// Our data inside the object `this`.
     unsafe fn data<'a>(this: *mut c_void) -> &'a mut T {
         &mut (*(this as *mut Obj<V, T>)).data
     }
@@ -331,6 +350,7 @@ impl<V: 'static, T> Obj<V, T> {
 struct Own(*mut c_void);
 
 impl Own {
+    /// The object pointer as 7-Zip takes it.
     fn raw(&self) -> *mut c_void {
         self.0
     }
@@ -372,6 +392,7 @@ unsafe extern "system" fn in_read(this: *mut c_void, data: *mut c_void, size: u3
     S_OK
 }
 
+/// A 7-Zip seek (offset and origin) as a [`SeekFrom`].
 fn seek_from(offset: i64, origin: u32) -> Option<SeekFrom> {
     match origin {
         0 => Some(SeekFrom::Start(offset as u64)),
@@ -398,6 +419,7 @@ unsafe extern "system" fn in_seek(this: *mut c_void, offset: i64, origin: u32, n
 static IN_STREAM_VTBL: InStreamVtbl = InStreamVtbl { base: InStreamObj::UNKNOWN, read: in_read, seek: in_seek };
 static IN_STREAM_IIDS: [Guid; 2] = [IID_ISEQUENTIAL_IN_STREAM, IID_IIN_STREAM];
 
+/// A file 7-Zip reads from.
 fn in_stream(f: File) -> Own {
     Own(InStreamObj::create(&IN_STREAM_VTBL, &IN_STREAM_IIDS, f))
 }
@@ -451,6 +473,7 @@ unsafe extern "system" fn out_set_size(this: *mut c_void, size: u64) -> HRESULT 
 static OUT_STREAM_VTBL: OutStreamVtbl = OutStreamVtbl { base: OutStreamObj::UNKNOWN, write: out_write, seek: out_seek, set_size: out_set_size };
 static OUT_STREAM_IIDS: [Guid; 2] = [IID_ISEQUENTIAL_OUT_STREAM, IID_IOUT_STREAM];
 
+/// A file 7-Zip writes to.
 fn out_stream(f: File) -> Own {
     Own(OutStreamObj::create(&OUT_STREAM_VTBL, &OUT_STREAM_IIDS, f))
 }
@@ -485,6 +508,7 @@ struct Progress<'a> {
 }
 
 impl Progress<'_> {
+    /// Report `done` bytes; `E_ABORT` when the user cancelled.
     fn completed(&mut self, done: u64) -> HRESULT {
         if (self.report)(done, self.total) {
             S_OK
@@ -576,6 +600,7 @@ unsafe extern "system" fn ex_set_result(this: *mut c_void, result: i32) -> HRESU
 }
 
 impl Own {
+    /// Hand the reference over to 7-Zip.
     fn into_raw(self) -> *mut c_void {
         let p = self.0;
         std::mem::forget(self);
@@ -726,6 +751,7 @@ extern "system" {
 /// instead of a Windows "Bad Image" box that blocks until it is dismissed.
 const SEM_FAILCRITICALERRORS: u32 = 1;
 
+/// An error with `msg`.
 fn error(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
@@ -747,6 +773,8 @@ pub fn result_text(code: i32) -> &'static str {
 }
 
 impl Library {
+    /// Load `7z.dll` from `path` and list its formats; no "Bad Image" box
+    /// for a damaged one.
     pub fn load(path: &Path) -> io::Result<Library> {
         let wide: Vec<u16> = path.as_os_str().encode_wide_z();
         let module = unsafe {
@@ -793,6 +821,7 @@ impl Library {
         Ok(Library { _module: module, create_object, formats, path: path.to_path_buf() })
     }
 
+    /// A new 7-Zip object of format `format` as interface `iid`.
     fn create<V>(&self, format: usize, iid: &Guid) -> Option<ComPtr<V>> {
         let mut out = ptr::null_mut();
         let hr = unsafe { (self.create_object)(&self.formats[format].class_id, iid, &mut out) };
@@ -901,6 +930,7 @@ pub struct OpenArchive {
 }
 
 impl OpenArchive {
+    /// Property `id` of item `index`.
     fn prop(&self, index: u32, id: u32) -> PropVariant {
         let mut v = PropVariant::default();
         unsafe { (self.arc.vtbl().get_property)(self.arc.raw(), index, id, &mut v) };
@@ -976,6 +1006,7 @@ impl Drop for OpenArchive {
 }
 
 trait EncodeWideZ {
+    /// A NUL-terminated UTF-16 copy.
     fn encode_wide_z(&self) -> Vec<u16>;
 }
 

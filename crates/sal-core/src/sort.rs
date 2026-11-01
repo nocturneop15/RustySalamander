@@ -41,6 +41,7 @@ impl SortSpec {
     }
 }
 
+/// Compare names, case-insensitive when asked.
 fn cmp_text(a: &str, b: &str, ignore_case: bool) -> Ordering {
     if ignore_case {
         a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
@@ -123,6 +124,7 @@ pub fn cmp_name_ext(a: &FileEntry, b: &FileEntry) -> Ordering {
     logical_cmp(a.base(), b.base(), true).then_with(|| logical_cmp(a.ext(), b.ext(), true)).then_with(|| logical_cmp(&a.name, &b.name, false))
 }
 
+/// Compare by one key (names break ties elsewhere).
 fn cmp_by(a: &FileEntry, b: &FileEntry, key: SortKey) -> Ordering {
     match key {
         SortKey::Name => Ordering::Equal,
@@ -133,6 +135,7 @@ fn cmp_by(a: &FileEntry, b: &FileEntry, key: SortKey) -> Ordering {
     }
 }
 
+/// Sort group: `..` first, then folders, then files.
 fn group(e: &FileEntry) -> u8 {
     match e.kind {
         EntryKind::UpDir => 0,

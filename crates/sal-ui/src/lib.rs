@@ -25,12 +25,12 @@ pub fn apply_scrollbars(ctx: &egui::Context, always: bool) {
     ctx.all_styles_mut(|s| s.spacing.scroll = style);
 }
 
-/// The accent color, in both themes: the color of what is selected or
-/// active (the cursor row, the active path bar, selected tabs and buttons,
-/// text selections), with readable text on it. `None` gives each theme its
-/// own.
-pub fn apply_accent(ctx: &egui::Context, accent: Option<[u8; 3]>) {
-    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+/// The accent colors of the light and the dark theme: the color of what is
+/// selected or active (the cursor row, the active path bar, selected tabs
+/// and buttons, text selections), with readable text on it. `None` gives
+/// that theme its own.
+pub fn apply_accent(ctx: &egui::Context, light: Option<[u8; 3]>, dark: Option<[u8; 3]>) {
+    for (theme, accent) in [(egui::Theme::Light, light), (egui::Theme::Dark, dark)] {
         let own = theme.default_visuals().selection;
         let selection = match accent {
             None => own,
@@ -92,14 +92,17 @@ mod tests {
         assert_eq!(readable_on(egui::Color32::from_rgb(255, 230, 120)), egui::Color32::from_gray(20));
         assert_eq!(readable_on(egui::Color32::from_rgb(20, 60, 140)), egui::Color32::WHITE);
 
+        // each theme its own color
         let ctx = egui::Context::default();
-        apply_accent(&ctx, Some([220, 120, 30]));
-        for theme in [egui::Theme::Dark, egui::Theme::Light] {
-            ctx.set_theme(theme);
-            assert_eq!(ctx.style().visuals.selection.bg_fill, egui::Color32::from_rgb(220, 120, 30));
-        }
-        apply_accent(&ctx, None);
+        apply_accent(&ctx, Some([220, 120, 30]), Some([40, 90, 200]));
+        ctx.set_theme(egui::Theme::Light);
+        assert_eq!(ctx.style().visuals.selection.bg_fill, egui::Color32::from_rgb(220, 120, 30));
         ctx.set_theme(egui::Theme::Dark);
+        assert_eq!(ctx.style().visuals.selection.bg_fill, egui::Color32::from_rgb(40, 90, 200));
+        // one custom, the other the theme's own
+        apply_accent(&ctx, Some([220, 120, 30]), None);
         assert_eq!(ctx.style().visuals.selection, egui::Visuals::dark().selection);
+        ctx.set_theme(egui::Theme::Light);
+        assert_eq!(ctx.style().visuals.selection.bg_fill, egui::Color32::from_rgb(220, 120, 30));
     }
 }

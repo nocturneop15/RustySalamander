@@ -3,10 +3,12 @@
 //! The typed text matches name prefixes case-insensitively; `/`, `\` and `<`
 //! stand for any sequence of characters (they cannot occur in file names).
 
+/// A character for case-insensitive matching.
 fn fold(c: char) -> char {
     c.to_lowercase().next().unwrap_or(c)
 }
 
+/// Whether `c` stands for any characters in a quick search (`/`, `\`, `<`).
 pub fn is_wild_char(c: char) -> bool {
     matches!(c, '/' | '\\' | '<')
 }
@@ -30,6 +32,7 @@ pub fn prepare(src: &str) -> Vec<char> {
     out
 }
 
+/// Where the match of `mask` from `pos` in `name` ends, if it matches there.
 fn agree(name: &[char], pos: usize, mask: &[char], has_ext: bool) -> Option<usize> {
     let (mut n, mut m) = (pos, 0usize);
     while n < name.len() {

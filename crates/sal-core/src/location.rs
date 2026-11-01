@@ -33,6 +33,7 @@ pub fn unc_share_root(p: &Path) -> Option<(String, String)> {
     Some((server.to_owned(), share.to_owned()))
 }
 
+/// The path of a UNC server (`\\server`), whose shares a panel lists.
 pub fn server_path(server: &str) -> PathBuf {
     PathBuf::from(format!(r"\\{server}"))
 }
@@ -278,6 +279,7 @@ pub fn list_shares(server: &str) -> io::Result<Vec<Share>> {
     Ok(shares)
 }
 
+/// Elsewhere there are no UNC servers.
 #[cfg(not(windows))]
 pub fn list_shares(_server: &str) -> io::Result<Vec<Share>> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "share browsing is only supported on Windows"))

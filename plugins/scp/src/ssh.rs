@@ -117,6 +117,7 @@ pub struct Connection {
     pub home: String,
 }
 
+/// An SSH error as an I/O error.
 fn io_error(e: russh::Error) -> io::Error {
     match e {
         russh::Error::IO(e) => e,
@@ -124,6 +125,7 @@ fn io_error(e: russh::Error) -> io::Error {
     }
 }
 
+/// A sign-in failure with `msg` (translated).
 fn denied(msg: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, tr(msg))
 }
@@ -224,6 +226,7 @@ impl Connection {
         Ok(String::from_utf8_lossy(&o.out).into_owned())
     }
 
+    /// The error when the connection broke during `e`.
     fn lost(&self, e: russh::Error) -> io::Error {
         io::Error::new(io::ErrorKind::NotConnected, trf("The connection was lost ({error}). Disconnect and connect again.", &[("error", &e)]))
     }

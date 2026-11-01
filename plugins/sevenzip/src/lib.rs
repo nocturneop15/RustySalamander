@@ -33,10 +33,12 @@ const ARCHIVES: &[&str] = &[
 /// Formats that can be changed (container formats 7-Zip writes).
 const WRITABLE: &[&str] = &["7z", "zip", "tar", "wim"];
 
+/// Whether `name`'s extension is one of `list`, any case.
 fn ext_in(name: &str, list: &[&str]) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| list.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
+/// A file's Windows attributes (kept when it is added to an archive).
 fn attributes(md: &fs::Metadata) -> u32 {
     use std::os::windows::fs::MetadataExt;
     md.file_attributes()
@@ -62,6 +64,7 @@ fn safe_inner(path: &str) -> String {
 }
 
 impl SevenZip {
+    /// The items of an open archive.
     fn index_of(open: &OpenArchive) -> Index {
         let items = open
             .items()

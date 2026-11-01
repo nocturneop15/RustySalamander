@@ -1,7 +1,7 @@
 //! The viewer plugin: shows files as text, in an encoding it detects or
 //! one the user picks, or as hex (F3). It registers itself as the viewer of
 //! every file ([`Opener`] with the mask `*`); its windows are its own (see
-//! [`window`]).
+//! `window.rs`).
 
 mod doc;
 mod highlight;
@@ -33,6 +33,7 @@ impl Plugin for Viewer {
     }
 }
 
+/// What the folder methods answer: a viewer has no folders.
 fn unsupported() -> io::Error {
     io::ErrorKind::Unsupported.into()
 }

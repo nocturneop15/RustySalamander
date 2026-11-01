@@ -1,5 +1,6 @@
 //! Reading a directory into a panel listing.
 
+#[cfg(any(not(windows), test))]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ pub struct Visibility {
 impl Visibility {
     pub const ALL: Visibility = Visibility { hidden: true, system: true };
 
+    /// Whether a panel shows `e`.
     pub fn shows(self, e: &FileEntry) -> bool {
         (self.hidden || e.attrs & entry::ATTR_HIDDEN == 0) && (self.system || e.attrs & entry::ATTR_SYSTEM == 0)
     }
@@ -31,12 +33,16 @@ pub struct Listing {
     pub unreadable: usize,
 }
 
-#[cfg(windows)]
+// on Windows the listing has the attributes already (find_files); the
+// test comparing it with std's listing builds entries this way
+#[cfg(all(windows, test))]
 fn attrs_of(md: &fs::Metadata, _name: &std::ffi::OsStr) -> u32 {
     use std::os::windows::fs::MetadataExt;
     md.file_attributes()
 }
 
+/// Outside Windows: attributes made up from the metadata and the name
+/// (a leading dot hides a file).
 #[cfg(not(windows))]
 fn attrs_of(md: &fs::Metadata, name: &std::ffi::OsStr) -> u32 {
     let mut a = 0;
@@ -55,13 +61,8 @@ fn attrs_of(md: &fs::Metadata, name: &std::ffi::OsStr) -> u32 {
     a
 }
 
-/// Build a [`FileEntry`] for an existing path (follows nothing; symlinks to
-/// directories are reported as directories, like Salamander does).
-pub fn stat_entry(path: PathBuf) -> io::Result<FileEntry> {
-    let md = fs::symlink_metadata(&path)?;
-    Ok(from_metadata(path, &md))
-}
-
+/// An entry from std's metadata (the listing outside Windows).
+#[cfg(any(not(windows), test))]
 fn from_metadata(path: PathBuf, md: &fs::Metadata) -> FileEntry {
     let attrs = attrs_of(md, path.file_name().unwrap_or_default());
     let is_dir = attrs & entry::ATTR_DIRECTORY != 0 || (md.file_type().is_symlink() && path.is_dir());
@@ -75,6 +76,8 @@ pub fn absolute(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+/// Read a folder (or a UNC server's shares) into a sorted listing with
+/// `..` first, leaving out what `vis` hides.
 pub fn read_dir(path: &Path, vis: Visibility, sort: SortSpec) -> io::Result<Listing> {
     // `\\server` is not a directory: list its shares instead
     if let Some(server) = crate::location::unc_server(path) {

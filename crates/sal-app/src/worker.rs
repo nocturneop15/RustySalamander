@@ -45,6 +45,7 @@ pub enum JobKind {
 }
 
 impl JobKind {
+    /// The operation's title in its window ("Copying").
     pub fn title(self) -> &'static str {
         match self {
             JobKind::Transfer(OpKind::Copy) => tr("Copying"),
@@ -145,6 +146,7 @@ pub struct Rate {
 const RATE_WINDOW: Duration = Duration::from_secs(8);
 
 impl Rate {
+    /// A rate measured from `now`.
     pub fn new(now: Instant) -> Rate {
         Rate { started: now, paused_for: Duration::ZERO, paused_at: None, samples: VecDeque::new() }
     }
@@ -155,21 +157,25 @@ impl Rate {
         now.saturating_duration_since(self.started).saturating_sub(paused)
     }
 
+    /// Whether the clock is stopped.
     #[cfg(test)]
     pub fn is_paused(&self) -> bool {
         self.paused_at.is_some()
     }
 
+    /// Stop the clock (the operation is paused or asks a question).
     pub fn pause(&mut self, now: Instant) {
         self.paused_at.get_or_insert(now);
     }
 
+    /// Start the clock again.
     pub fn resume(&mut self, now: Instant) {
         if let Some(p) = self.paused_at.take() {
             self.paused_for += now.saturating_duration_since(p);
         }
     }
 
+    /// `bytes` done by `now`; old samples beyond the window are dropped.
     pub fn sample(&mut self, now: Instant, bytes: u64) {
         let t = self.elapsed(now);
         self.samples.push_back((t, bytes));
@@ -225,6 +231,8 @@ struct ChannelObserver {
 }
 
 impl ChannelObserver {
+    /// Ask the user (on the UI thread) and wait for the answer; `None` when
+    /// the window went away.
     fn ask(&mut self, p: Prompt) -> Option<Reply> {
         self.tx.send(Msg::Prompt(p)).ok()?;
         self.ctx.request_repaint();
@@ -259,10 +267,12 @@ impl OpObserver for ChannelObserver {
 }
 
 impl Job {
+    /// Start the operation `spec` on a thread of its own.
     pub fn start(ctx: &egui::Context, spec: Spec) -> Job {
         Job::spawn(ctx, spec, false)
     }
 
+    /// Start `spec`, paused or not.
     fn spawn(ctx: &egui::Context, spec: Spec, paused: bool) -> Job {
         let (tx, rx) = channel();
         let (reply_tx, reply_rx) = channel();
@@ -311,6 +321,7 @@ impl Job {
         self.result.is_some()
     }
 
+    /// The user answered the question: the operation goes on.
     pub fn answer(&mut self, r: Reply) {
         self.prompt = None;
         if !self.is_paused() {
@@ -319,6 +330,7 @@ impl Job {
         let _ = self.reply.send(r);
     }
 
+    /// Whether the operation is paused.
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
     }
@@ -335,6 +347,7 @@ impl Job {
         }
     }
 
+    /// Cancel the operation (a question waiting is answered with Cancel).
     pub fn cancel(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         // unblock a worker waiting on a prompt
@@ -369,16 +382,19 @@ pub struct Jobs {
 }
 
 impl Jobs {
+    /// Whether nothing runs and nothing is queued.
     pub fn is_idle(&self) -> bool {
         self.running.is_empty() && self.queue.is_empty()
     }
 
+    /// [`Self::add_with`] for an operation of the program's own (tests).
     #[cfg(test)]
     pub fn add(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf, place: Placement) {
         self.add_with(ctx, kind, sources, target, place, None);
     }
 
-    /// [`Self::add`] for an operation a plugin does.
+    /// Run an operation now, or queue it (`place`); `plugin` does it when
+    /// it happens inside a plugin's file or connection.
     pub fn add_with(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf, place: Placement, plugin: Option<PluginRef>) {
         self.next_id += 1;
         let spec = Spec { id: self.next_id, kind, sources, target, plugin };
@@ -469,6 +485,7 @@ impl Jobs {
         }
     }
 
+    /// Take a queued operation out of the queue.
     pub fn remove_queued(&mut self, id: u64) {
         self.queue.retain(|s| s.id != id);
     }

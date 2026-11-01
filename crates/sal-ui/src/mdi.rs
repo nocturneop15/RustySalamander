@@ -20,6 +20,7 @@ pub const FONT_NAME: &str = "mdi";
 // window icons (see crate::icon)
 pub const FORMAT_COLUMNS: &str = "\u{F08DF}";
 pub const FILE_EYE_OUTLINE: &str = "\u{F0DCB}";
+pub const COG: &str = "\u{F0493}";
 
 // drives and connections
 pub const HARDDISK: &str = "\u{F02CA}";

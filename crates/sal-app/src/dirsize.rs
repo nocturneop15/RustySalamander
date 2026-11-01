@@ -3,7 +3,7 @@
 //! until a refresh or a file operation invalidates them.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -66,15 +66,24 @@ impl DirSizes {
         });
     }
 
+    /// The size of `path` known so far, if it was asked for.
     pub fn get(&self, path: &std::path::Path) -> Option<SizeInfo> {
         self.jobs.lock().unwrap().get(path).map(|j| j.info)
     }
 
-    /// Copy of all known sizes (taken once per frame for drawing).
+    /// Copy of all known sizes.
+    #[cfg(test)]
     pub fn snapshot(&self) -> HashMap<PathBuf, SizeInfo> {
         self.jobs.lock().unwrap().iter().map(|(p, j)| (p.clone(), j.info)).collect()
     }
 
+    /// The known sizes of the folders directly in `dir`, for drawing a panel
+    /// showing it (each frame, so not a copy of every size known).
+    pub fn snapshot_in(&self, dir: &Path) -> HashMap<PathBuf, SizeInfo> {
+        self.jobs.lock().unwrap().iter().filter(|(p, _)| p.parent() == Some(dir)).map(|(p, j)| (p.clone(), j.info)).collect()
+    }
+
+    /// Whether a size is still being counted.
     #[cfg(test)]
     pub fn busy(&self) -> bool {
         self.jobs.lock().unwrap().values().any(|j| !j.info.done)

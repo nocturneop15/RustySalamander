@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.5-alpha (2026-11-01)
+
+- **An accent color for each theme:** the windows follow the light and the dark theme's own accent colors chosen in the program (RustySalamander 0.5.9-alpha and later); with older versions, the one color they send.
+
 ## 0.5.4-alpha (2026-10-31)
 
 - **Window icon:** the viewer's windows show a document with an eye on a rust-colored square, instead of egui's default "e" logo, which looked like Internet Explorer's.

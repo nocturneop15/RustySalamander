@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.9-alpha (2026-11-01)
+
+- **The exe has an icon:** `rustysalamander.exe` carries the program's icon (two lists side by side on a rust-colored square, from 16 to 256 pixels), so Explorer, shortcuts and the Start menu show it, and version information, so Windows names it "RustySalamander" (file properties, Task Manager).
+- **Settings has a toothed wheel** as its window icon.
+- **An accent color for each theme:** Settings → General → Appearance → Accent color has its own choice for the light and the dark theme, each the theme's own or a custom color, with a preview of a selected row in that theme. An accent color chosen before becomes both.
+- **The Viewer plugin 0.5.5-alpha** is bundled: it follows both accent colors.
+- **Faster panels with many folder sizes:** drawing a panel takes only the sizes of its own folders, not a copy of every size calculated so far, on every frame.
+- **Tidier code:** every function has a comment saying what it does; code nothing used is gone; clippy and the documentation build are free of warnings.
+
 ## 0.5.8-alpha (2026-10-31)
 
 - **Window icons:** the windows have icons of their own, drawn from Material Design Icons on a rust-colored square: two lists side by side for the program's main window and dialogs, a document with an eye for the viewer. Until now they showed egui's default "e" logo, which looked like Internet Explorer's.

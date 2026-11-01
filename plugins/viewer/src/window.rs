@@ -58,6 +58,7 @@ impl Windows {
         Ok(())
     }
 
+    /// Wake the windows' loop to handle a new file.
     fn wake(&self) {
         if let Some(ctx) = &*self.ctx.lock().unwrap() {
             ctx.request_repaint();
@@ -75,6 +76,7 @@ impl Drop for Windows {
     }
 }
 
+/// Start the windows' thread; the sender of its files.
 fn spawn(slot: Slot) -> io::Result<Sender<Msg>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new().name("viewer windows".into()).spawn(move || run(rx, slot))?;
@@ -147,11 +149,13 @@ struct Look {
     ui_font: String,
     mono_font: String,
     solid_bars: bool,
-    accent: Option<[u8; 3]>,
+    /// The accent colors of the light and the dark theme.
+    accent: (Option<[u8; 3]>, Option<[u8; 3]>),
     fonts_done: bool,
 }
 
 impl Look {
+    /// Follow the program's look in `options` (fonts only when they changed).
     fn apply(&mut self, ctx: &egui::Context, options: &Values) {
         let get = |k: &str| options.get(k).cloned().unwrap_or_default();
         let (ui_font, mono_font) = (get("ui_font"), get("mono_font"));
@@ -168,8 +172,10 @@ impl Look {
         });
         self.solid_bars = get("scrollbars") == "solid";
         sal_ui::apply_scrollbars(ctx, self.solid_bars);
-        self.accent = sal_ui::parse_accent(&get("accent"));
-        sal_ui::apply_accent(ctx, self.accent);
+        // programs before 0.5.9 send one color for both themes
+        let one = |k: &str| if options.contains_key(k) { sal_ui::parse_accent(&get(k)) } else { sal_ui::parse_accent(&get("accent")) };
+        self.accent = (one("accent_light"), one("accent_dark"));
+        sal_ui::apply_accent(ctx, self.accent.0, self.accent.1);
     }
 
     /// The theme of the windows' title bars.
@@ -268,10 +274,13 @@ struct Win {
 }
 
 impl Win {
+    /// A window for `doc`.
     fn new(id: ViewportId, doc: Doc) -> Win {
         Win { id, doc, open: true, themed: false, place: None }
     }
 
+    /// Draw the window: the toolbar (Text/Hex, wrap, encoding, syntax, size)
+    /// and the text or the bytes.
     fn show(&mut self, ctx: &egui::Context, look: &Look) {
         if !self.themed {
             ctx.send_viewport_cmd(ViewportCommand::SetTheme(look.system_theme()));

@@ -28,6 +28,8 @@ mod debuglog;
 mod dialogwin;
 mod dirsize;
 mod drive_icon;
+#[cfg(test)]
+mod exe_icon;
 mod freespace;
 mod i18n;
 mod icons;
@@ -45,6 +47,8 @@ mod worker;
 use eframe::egui;
 use sal_ui::fonts;
 
+/// Start: the log, then the main window with the panels on the folders
+/// given on the command line.
 fn main() -> eframe::Result<()> {
     debuglog::init();
     // optional start directories: rustysalamander [left] [right]

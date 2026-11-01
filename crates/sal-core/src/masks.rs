@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+/// A character for case-insensitive matching.
 fn fold(c: char) -> char {
     if c.is_ascii() {
         c.to_ascii_lowercase()
@@ -17,6 +18,7 @@ fn fold(c: char) -> char {
     }
 }
 
+/// A name for case-insensitive matching.
 fn fold_all(s: &str) -> Vec<char> {
     s.chars().map(fold).collect()
 }
@@ -78,14 +80,9 @@ pub fn agree_mask(name: &[char], mask: &[char], has_ext: bool, extended: bool) -
     }
 }
 
+/// Whether `name` has an extension (`..` doesn't).
 fn has_extension(name: &str) -> bool {
     name != ".." && name.rfind('.').is_some_and(|i| i + 1 < name.len())
-}
-
-/// Matches a single prepared mask against a file name.
-pub fn matches_mask(name: &str, mask: &str, extended: bool) -> bool {
-    let mask: Vec<char> = prepare_mask(mask).into_iter().map(fold).collect();
-    agree_mask(&fold_all(name), &mask, has_extension(name), extended)
 }
 
 /// Port of `MaskName`: rename `name` by `mask` the way Win2K `copy` does
@@ -197,6 +194,8 @@ pub struct MaskGroup {
 }
 
 impl MaskGroup {
+    /// Masks as typed: `*.txt;*.md|old*` (to include, then after `|` to
+    /// leave out); `extended` lets `*.*` match names without a dot too.
     pub fn new(masks: &str, extended: bool) -> Result<Self, MaskError> {
         let chars: Vec<char> = masks.chars().collect();
         let mut include = Vec::new();
@@ -253,6 +252,7 @@ impl MaskGroup {
         Ok(MaskGroup { source: masks.to_owned(), extended, include, exclude })
     }
 
+    /// The masks as typed.
     pub fn as_str(&self) -> &str {
         &self.source
     }

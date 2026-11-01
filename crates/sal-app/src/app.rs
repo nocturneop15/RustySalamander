@@ -161,6 +161,7 @@ struct UpdateRow {
 }
 
 impl UpdateRow {
+    /// An update not yet installed, its changelog not yet read.
     fn new(update: crate::update::Update) -> UpdateRow {
         UpdateRow { update, install: None, changelog: None, show_log: false }
     }
@@ -368,6 +369,7 @@ struct PathEdit {
     fresh: bool,
 }
 
+/// The key a drive's last folder is remembered by: its root, any case.
 fn drive_key(root: &Path) -> String {
     display_path(root).to_uppercase()
 }
@@ -416,10 +418,12 @@ fn plural_subdirs(n: u64) -> String {
     trn("{n} subdirectory", "{n} subdirectories", n)
 }
 
+/// "1 directory", "12 directories" (translated).
 fn plural_dirs(n: usize) -> String {
     trn("{n} directory", "{n} directories", n as u64)
 }
 
+/// Size and counts of the selected items, with the folder sizes known so far.
 fn selection_totals(entries: &[sal_core::FileEntry], sizes: &HashMap<PathBuf, crate::dirsize::SizeInfo>) -> SelectionTotals {
     let mut t = SelectionTotals::default();
     for e in entries.iter().filter(|e| e.selected) {
@@ -459,10 +463,12 @@ fn shell_open(p: &Path) -> std::io::Result<()> {
     sal_core::shell::open(p)
 }
 
+/// Which hidden and system items the panels show.
 fn visibility(cfg: &Config) -> Visibility {
     Visibility { hidden: cfg.show_hidden, system: cfg.show_system }
 }
 
+/// A date and time as the panels show it (`2026-10-31 21:15`), local time.
 pub(crate) fn fmt_time(t: Option<std::time::SystemTime>) -> String {
     t.map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
@@ -479,6 +485,7 @@ fn plural_u64(n: u64, what: &str) -> String {
     }
 }
 
+/// "1 file", "12 files": `n` of `what`, translated.
 fn plural(n: usize, what: &str) -> String {
     plural_u64(n as u64, what)
 }
@@ -498,6 +505,7 @@ fn describe_drive(d: &Drive) -> String {
     s
 }
 
+/// The items of an operation for its question: the name of one, or how many.
 fn describe(sources: &[PathBuf]) -> String {
     match sources {
         [one] => format!("\"{}\"", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
@@ -506,6 +514,8 @@ fn describe(sources: &[PathBuf]) -> String {
 }
 
 impl App {
+    /// The application as it starts: the saved settings, fonts, plugins and
+    /// the folders given on the command line.
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<String>) -> App {
         crate::debuglog::write("startup: window ready");
         let cfg = crate::debuglog::time("startup: configuration", Config::load);
@@ -514,6 +524,8 @@ impl App {
         App::with_config(&cc.egui_ctx, cfg, args)
     }
 
+    /// The application with `cfg` (the tests' entry point): panels on the
+    /// folders given or saved, plugins started, the update check begun.
     pub fn with_config(ctx: &egui::Context, mut cfg: Config, args: Vec<String>) -> App {
         if let Some(l) = args.first() {
             cfg.left.path = l.clone();
@@ -536,7 +548,7 @@ impl App {
             apply_font_size(ctx, cfg.font_size);
             apply_theme(ctx, cfg.theme);
             sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
-            sal_ui::apply_accent(ctx, cfg.accent_color);
+            sal_ui::apply_accent(ctx, cfg.accent_light, cfg.accent_dark);
         });
         let plugins = time("startup: plugins", || Plugins::load(&cfg.disabled_plugins));
         if crate::debuglog::enabled() {
@@ -596,6 +608,7 @@ impl App {
         }
     }
 
+    /// Which hidden and system items the panels show.
     fn vis(&self) -> Visibility {
         visibility(&self.cfg)
     }
@@ -764,7 +777,7 @@ impl App {
             return;
         }
         win.poll(ctx);
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None };
         let (mut enter, mut escape) = (false, false);
         let height = (ctx.screen_rect().height() * 0.55).clamp(160.0, 520.0);
         let title = win.title.clone();
@@ -903,8 +916,19 @@ impl App {
             ThemeMode::Dark => "dark",
         };
         let scrollbars = if self.cfg.always_show_scrollbars { "solid" } else { "floating" };
-        let accent = sal_ui::accent_text(self.cfg.accent_color);
-        [("theme", theme), ("ui_font", &self.cfg.ui_font), ("mono_font", &self.cfg.mono_font), ("scrollbars", scrollbars), ("accent", &accent), ("temporary", if temporary { "1" } else { "" })]
+        let (light, dark) = (sal_ui::accent_text(self.cfg.accent_light), sal_ui::accent_text(self.cfg.accent_dark));
+        // plugins from before the themes had their own: the one of the theme chosen
+        let one = if self.cfg.theme == ThemeMode::Dark { dark.clone() } else { light.clone() };
+        [
+            ("theme", theme),
+            ("ui_font", &self.cfg.ui_font),
+            ("mono_font", &self.cfg.mono_font),
+            ("scrollbars", scrollbars),
+            ("accent_light", &light),
+            ("accent_dark", &dark),
+            ("accent", &one),
+            ("temporary", if temporary { "1" } else { "" }),
+        ]
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect()
@@ -994,6 +1018,8 @@ impl App {
         }
     }
 
+    /// Enter, F3 or F4 on an item inside a plugin's file: extract it in the
+    /// background, then open it ([`App::open_extracted`]).
     fn open_from_archive(&mut self, ctx: &egui::Context, file: PathBuf, how: OpenAs) -> Result<(), String> {
         let plugin = self.in_archive(&file).map(|(p, _, _)| PluginRef(p));
         let dir = plugins::temp_dir("open").map_err(|e| e.to_string())?;
@@ -1001,6 +1027,8 @@ impl App {
         Ok(())
     }
 
+    /// Save the settings, with the panels' folders, sort orders and the
+    /// active panel as they are now.
     fn save_config(&mut self) {
         // a connection is gone at the next start: keep the folder saved before it
         for (i, saved) in [(0, &mut self.cfg.left), (1, &mut self.cfg.right)] {
@@ -1035,6 +1063,7 @@ impl App {
         }
     }
 
+    /// Show `d` as the dialog, in a window of its own.
     fn open_dialog(&mut self, d: Dialog) {
         // a new dialog window opens centred on the main window again; the
         // windows of running operations stay as they are
@@ -1049,14 +1078,17 @@ impl App {
         crate::i18n::set_language(code);
     }
 
+    /// Show `text` in an error message.
     fn error(&mut self, text: impl Into<String>) {
         self.open_dialog(Dialog::Message { title: tr("Error").into(), text: text.into() });
     }
 
+    /// The active panel.
     fn act(&mut self) -> &mut Panel {
         &mut self.panels[self.active]
     }
 
+    /// Read both panels' folders again.
     fn reload_all(&mut self) {
         let h = self.vis();
         for p in &mut self.panels {
@@ -1064,6 +1096,8 @@ impl App {
         }
     }
 
+    /// Start (or queue) a copy, move or delete of `sources` to `target`, or
+    /// hand it to the plugin whose file is involved.
     fn start_job(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf) {
         if sources.is_empty() {
             return;
@@ -1107,6 +1141,8 @@ impl App {
         self.panels[panel].load(root, hidden, None)
     }
 
+    /// F8 / Shift+F8: delete `sources`, to the Recycle Bin when that is on
+    /// and `permanent` is not asked for.
     fn delete_items(&mut self, ctx: &egui::Context, sources: Vec<PathBuf>, permanent: bool) {
         if sources.is_empty() {
             return;
@@ -1119,6 +1155,7 @@ impl App {
         }
     }
 
+    /// Run a shell verb ("cut", "properties", …) on `items`, as Explorer would.
     fn shell_verb(&mut self, items: &[PathBuf], dir: &Path, verb: &str) -> Result<(), String> {
         let h = self.hwnd.ok_or_else(|| trf("\"{verb}\" needs the application window", &[("verb", &verb)]))?;
         shellmenu::invoke_verb(h, items, dir, verb)
@@ -1231,6 +1268,8 @@ impl App {
         }
     }
 
+    /// Where a context menu opens, in screen pixels: at the mouse, or at the
+    /// panel point `pos` when opened from the keyboard.
     fn menu_point(&self, ctx: &egui::Context, h: isize, pos: egui::Pos2, from_mouse: bool) -> (i32, i32) {
         if from_mouse {
             shellmenu::screen_point(h, None)
@@ -1350,6 +1389,7 @@ impl App {
         self.size_report = None;
     }
 
+    /// The program's own context menu, when one is open, and what was chosen in it.
     fn context_menu_ui(&mut self, ctx: &egui::Context) {
         let Some(menu) = &self.ctx_menu else { return };
         let (top, rows) = self.menu_model(menu);
@@ -1364,6 +1404,7 @@ impl App {
         }
     }
 
+    /// Do what was chosen in the context menu `menu`.
     fn run_menu_action(&mut self, ctx: &egui::Context, menu: CtxMenu, action: MenuAction) {
         let hidden = self.vis();
         let items = menu.items.clone();
@@ -1520,6 +1561,8 @@ impl App {
         self.panels[idx].load(target, hidden, focus.as_deref())
     }
 
+    /// Remember each panel's folder as its drive's last one (for changing
+    /// drives back).
     fn remember_dirs(&mut self) {
         for p in &self.panels {
             let key = drive_key(&drives::root_of(p.path()));
@@ -1531,6 +1574,8 @@ impl App {
 
     // ---------------------------------------------------------------- commands
 
+    /// Run a command (a key, a menu item, a function-key button); errors are
+    /// shown in a message.
     fn command(&mut self, ctx: &egui::Context, cmd: Cmd) {
         let hidden = self.vis();
         let other = 1 - self.active;
@@ -1826,6 +1871,7 @@ impl App {
 
     // ---------------------------------------------------------------- keyboard
 
+    /// This frame's key presses and typed text, when no dialog has them.
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
@@ -1865,6 +1911,8 @@ impl App {
         self.cached_drives().iter().any(|d| d.letter.starts_with(letter)).then_some(Cmd::Drive(letter))
     }
 
+    /// A key press in the panels: quick search keys first, then the keyboard
+    /// shortcuts, then the panel's own keys.
     fn on_key(&mut self, ctx: &egui::Context, key: Key, m: Modifiers) {
         // Backspace edits a quick search in progress before it means anything else
         if key == Key::Backspace && m.is_none() && !self.act().qs.is_empty() {
@@ -1932,6 +1980,7 @@ impl App {
         }
     }
 
+    /// Typed text: it starts or continues a quick search in the active panel.
     fn on_char(&mut self, c: char) {
         if c.is_control() {
             return;
@@ -1960,6 +2009,8 @@ impl App {
 
     // ---------------------------------------------------------------- panels
 
+    /// Draw panel `idx`: its path bar, the file list, the banner of a plugin's
+    /// panel and the footer; and handle the clicks in them.
     fn panel_ui(&mut self, ui: &mut egui::Ui, idx: usize) {
         let active = self.active == idx;
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
@@ -2113,7 +2164,7 @@ impl App {
         }
         self.panels[idx].visible_rows = ((body_h - row_h) / row_h).floor().max(1.0) as usize;
 
-        let mut sizes = self.dir_sizes.snapshot();
+        let mut sizes = self.dir_sizes.snapshot_in(self.panels[idx].path());
         // inside an archive every folder's size is known from the archive's index
         if let Some(a) = self.panels[idx].archive.as_ref().filter(|a| a.index.complete) {
             for e in self.panels[idx].entries().iter().filter(|e| e.kind == EntryKind::Dir) {
@@ -2461,6 +2512,7 @@ impl App {
 
     // ---------------------------------------------------------------- dialogs
 
+    /// The open dialog, in its window, and what its buttons do.
     fn dialogs(&mut self, ctx: &egui::Context) {
         let mut dialog = std::mem::replace(&mut self.dialog, Dialog::None);
         let (mut enter, mut escape) = ctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
@@ -2473,7 +2525,7 @@ impl App {
         if matches!(dialog, Dialog::None) {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !JOB_WINDOWS.contains(&k));
         }
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None };
         // dialog windows are sized from the main window, not from themselves
         let main_h = ctx.screen_rect().height();
         // 0 = keep open, 1 = ok, 2 = cancel
@@ -2951,7 +3003,7 @@ impl App {
                 let font_filter = &mut self.font_filter;
                 let mut captured = false;
                 // fixed width: the scroll areas inside take all the width they are given
-                dw.show(ctx, &mut self.dialog_places, "settings", tr("Settings"), 860.0, &mut enter, &mut escape, &mut |ui| {
+                dw.with_icon(sal_ui::icon::settings).show(ctx, &mut self.dialog_places, "settings", tr("Settings"), 860.0, &mut enter, &mut escape, &mut |ui| {
                     if let Some(action) = *recording {
                         // capture the next key combination; Esc cancels
                         let pressed = ui.input(|i| {
@@ -3048,28 +3100,16 @@ impl App {
                                     ui.end_row();
 
                                     ui.label(tr("Accent color")).on_hover_text(tr("The color of what is selected or active: the cursor, the active path bar, selected tabs and buttons; panels a plugin shows are tinted with it"));
-                                    ui.horizontal(|ui| {
-                                        let before = cfg.accent_color;
-                                        let own = if ui.visuals().dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() }.selection.bg_fill;
-                                        let mut custom = cfg.accent_color.is_some();
-                                        if ui.radio_value(&mut custom, false, tr("From the theme (default)")).changed() {
-                                            cfg.accent_color = None;
+                                    ui.vertical(|ui| {
+                                        let before = (cfg.accent_light, cfg.accent_dark);
+                                        for (theme, label, slot) in [
+                                            (egui::Theme::Light, tr("Light theme:"), &mut cfg.accent_light),
+                                            (egui::Theme::Dark, tr("Dark theme:"), &mut cfg.accent_dark),
+                                        ] {
+                                            ui.push_id(label, |ui| accent_choice(ui, label, theme, slot));
                                         }
-                                        if ui.radio_value(&mut custom, true, tr("Custom:")).changed() {
-                                            cfg.accent_color = Some([own.r(), own.g(), own.b()]);
-                                        }
-                                        let mut rgb = cfg.accent_color.unwrap_or([own.r(), own.g(), own.b()]);
-                                        if ui.add_enabled_ui(custom, |ui| ui.color_edit_button_srgb(&mut rgb)).inner.changed() {
-                                            cfg.accent_color = Some(rgb);
-                                        }
-                                        // how the cursor row looks with it
-                                        let sel = ui.visuals().selection;
-                                        let h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
-                                        let (r, _) = ui.allocate_exact_size(egui::vec2(110.0, h), egui::Sense::hover());
-                                        ui.painter().rect_filled(r, 0.0, sel.bg_fill);
-                                        ui.painter().text(r.left_center() + egui::vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, tr("Selected"), egui::TextStyle::Body.resolve(ui.style()), sel.stroke.color);
-                                        if cfg.accent_color != before {
-                                            sal_ui::apply_accent(ctx, cfg.accent_color);
+                                        if (cfg.accent_light, cfg.accent_dark) != before {
+                                            sal_ui::apply_accent(ctx, cfg.accent_light, cfg.accent_dark);
                                         }
                                     });
                                     ui.end_row();
@@ -3608,6 +3648,7 @@ impl App {
         }
     }
 
+    /// OK (Enter) in `dialog`: do what it asked for.
     fn dialog_ok(&mut self, ctx: &egui::Context, dialog: Dialog) {
         let hidden = self.vis();
         match dialog {
@@ -3719,6 +3760,8 @@ impl App {
 
     // ---------------------------------------------------------------- job window
 
+    /// The windows of running operations (progress, questions) and of the
+    /// queue; finished operations are taken care of.
     fn job_ui(&mut self, ctx: &egui::Context) {
         for job in self.jobs.poll(ctx) {
             self.job_finished(job);
@@ -3735,7 +3778,7 @@ impl App {
             return;
         }
         let now = Instant::now();
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None };
         let (mut enter, mut escape) = (false, false);
         let mut act: Option<JobAct> = None;
         let jobs = &self.jobs;
@@ -3823,7 +3866,7 @@ impl App {
 
     /// The question of an operation that hit a conflict or an error, in its own window.
     fn prompt_ui(&mut self, ctx: &egui::Context) {
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None };
         let Some(job) = self.jobs.running.iter_mut().find(|j| j.prompt.is_some()) else {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| k == "prompt");
             return;
@@ -3885,6 +3928,8 @@ impl App {
         }
     }
 
+    /// An operation ended: report how, open an extracted file, read the
+    /// panels again.
     fn job_finished(&mut self, job: Job) {
         if let (JobKind::Archive(FolderOp::Open(how)), Some(Ok(s))) = (job.spec.kind, &job.result) {
             if !s.cancelled {
@@ -3972,6 +4017,7 @@ impl App {
 
     // ---------------------------------------------------------------- chrome
 
+    /// The menu bar.
     fn menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let mut cmd = None;
         let mut toggle_hidden = false;
@@ -4187,6 +4233,7 @@ impl App {
         }
     }
 
+    /// The function-key buttons at the bottom (F1 … F10).
     fn fkey_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let mut cmd = None;
         ui.columns(9, |cols| {
@@ -4279,6 +4326,34 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
             });
             ui.end_row();
         }
+    });
+}
+
+/// One theme's accent color in Settings: the theme's own, or a custom one
+/// with a color button; and how a selected row looks with it.
+fn accent_choice(ui: &mut egui::Ui, label: &str, theme: egui::Theme, slot: &mut Option<[u8; 3]>) {
+    let own = theme.default_visuals().selection.bg_fill;
+    ui.horizontal(|ui| {
+        ui.add_sized([90.0, ui.spacing().interact_size.y], egui::Label::new(label));
+        let mut custom = slot.is_some();
+        if ui.radio_value(&mut custom, false, tr("From the theme (default)")).changed() {
+            *slot = None;
+        }
+        if ui.radio_value(&mut custom, true, tr("Custom:")).changed() {
+            *slot = Some([own.r(), own.g(), own.b()]);
+        }
+        let mut rgb = slot.unwrap_or([own.r(), own.g(), own.b()]);
+        if ui.add_enabled_ui(custom, |ui| ui.color_edit_button_srgb(&mut rgb)).inner.changed() {
+            *slot = Some(rgb);
+        }
+        // a selected row in that theme's colors
+        let fill = slot.map_or(own, |[r, g, b]| Color32::from_rgb(r, g, b));
+        let text = if slot.is_some() { sal_ui::readable_on(fill) } else { theme.default_visuals().selection.stroke.color };
+        let h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
+        let (r, _) = ui.allocate_exact_size(egui::vec2(110.0, h), egui::Sense::hover());
+        ui.painter().rect_filled(r, 0.0, theme.default_visuals().panel_fill);
+        ui.painter().rect_filled(r.shrink(2.0), 0.0, fill);
+        ui.painter().text(r.left_center() + egui::vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, tr("Selected"), egui::TextStyle::Body.resolve(ui.style()), text);
     });
 }
 
@@ -4679,6 +4754,8 @@ struct SuffixEdit {
 }
 
 impl SuffixEdit {
+    /// A form for `rule`, at `index` in the list (`None`: a new one); the
+    /// program command lines start from the ones typed last.
     fn of(index: Option<usize>, rule: SuffixRule, viewer: &str, editor: &str) -> SuffixEdit {
         let program = |w: &Option<OpenWith>, last: &str| match w {
             Some(OpenWith::Program { command }) => command.clone(),
@@ -4763,6 +4840,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: &str, f
 /// Gap between the two panels, with a line drawn in the middle.
 const DIVIDER_WIDTH: f32 = 9.0;
 
+/// The bar between the two panels, in `r`.
 fn paint_divider(ui: &egui::Ui, r: egui::Rect) {
     let v = ui.visuals();
     let p = ui.painter();
@@ -7563,16 +7641,22 @@ mod tests {
         let mut ui = Ui::new(t.path(), t.path());
         crate::fonts::install(&ui.ctx, "", "");
         ui.screen = egui::vec2(1100.0, 1000.0);
-        ui.app.cfg.accent_color = Some([220, 120, 30]);
-        sal_ui::apply_accent(&ui.ctx, ui.app.cfg.accent_color);
+        ui.app.cfg.accent_light = Some([40, 90, 200]);
+        ui.app.cfg.accent_dark = Some([220, 120, 30]);
+        sal_ui::apply_accent(&ui.ctx, ui.app.cfg.accent_light, ui.app.cfg.accent_dark);
+        ui.ctx.set_theme(egui::Theme::Dark);
         ui.frames(2);
         let v = ui.ctx.style().visuals.clone();
-        assert_eq!(v.selection.bg_fill, Color32::from_rgb(220, 120, 30));
+        assert_eq!(v.selection.bg_fill, Color32::from_rgb(220, 120, 30), "the dark theme's");
         let tint = plugin_tint(&v);
         assert!(tint.r() > tint.g() && tint.g() > tint.b(), "{tint:?}");
         ui.text("a.t");
         ui.key(Key::F3);
-        assert_eq!(ui.recorder.opened.lock().unwrap()[0].2["accent"], "#dc781e");
+        {
+            let opened = ui.recorder.opened.lock().unwrap();
+            let o = &opened[0].2;
+            assert_eq!((o["accent_light"].as_str(), o["accent_dark"].as_str()), ("#285ac8", "#dc781e"));
+        }
         ui.key(Key::Escape);
         ui.app.dialog = Dialog::Settings { tab: SettingsTab::General, recording: None };
         ui.frames(10);
@@ -7583,7 +7667,11 @@ mod tests {
             ui.snap.render(&ui.ctx, out, bg, &dir.join("accent_color.png"));
         }
         ui.app.dialog = Dialog::None;
-        sal_ui::apply_accent(&ui.ctx, None);
+        // the light theme has its own
+        ui.ctx.set_theme(egui::Theme::Light);
+        ui.frames(1);
+        assert_eq!(ui.ctx.style().visuals.selection.bg_fill, Color32::from_rgb(40, 90, 200), "the light theme's");
+        sal_ui::apply_accent(&ui.ctx, None, None);
     }
 
     #[test]
@@ -7682,15 +7770,16 @@ mod tests {
             ui.snap.render(&ui.ctx, out, bg, &out_dir.join(name));
         }
         // a custom tint, on the inactive panel too
-        ui.app.cfg.accent_color = Some([220, 120, 30]);
-        sal_ui::apply_accent(&ui.ctx, ui.app.cfg.accent_color);
+        ui.app.cfg.accent_light = Some([220, 120, 30]);
+        ui.app.cfg.accent_dark = Some([220, 120, 30]);
+        sal_ui::apply_accent(&ui.ctx, ui.app.cfg.accent_light, ui.app.cfg.accent_dark);
         ui.app.active = 1;
         ui.frames(10);
         let bg = ui.ctx.style().visuals.panel_fill;
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_panel_tint.png"));
-        ui.app.cfg.accent_color = None;
-        sal_ui::apply_accent(&ui.ctx, None);
+        (ui.app.cfg.accent_light, ui.app.cfg.accent_dark) = (None, None);
+        sal_ui::apply_accent(&ui.ctx, None, None);
         ui.app.active = 0;
         // the connection in the other panel's drive selector, in a low window
         ui.app.cfg.theme = ThemeMode::Light;

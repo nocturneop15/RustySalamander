@@ -30,11 +30,13 @@ pub struct Span {
     pub underline: bool,
 }
 
+/// The syntax definitions, loaded once.
 fn syntaxes() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
     SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
+/// The colors for the dark or the light theme.
 fn theme(dark: bool) -> &'static Theme {
     static THEMES: OnceLock<EmbeddedLazyThemeSet> = OnceLock::new();
     THEMES.get_or_init(two_face::theme::extra).get(if dark { EmbeddedThemeName::OneHalfDark } else { EmbeddedThemeName::OneHalfLight })

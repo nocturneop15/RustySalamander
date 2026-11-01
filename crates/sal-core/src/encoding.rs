@@ -15,6 +15,7 @@ pub enum TextEncoding {
 }
 
 impl TextEncoding {
+    /// The encoding's name in the viewer's list.
     pub fn name(self) -> &'static str {
         match self {
             TextEncoding::Utf8 => "UTF-8",
@@ -106,6 +107,7 @@ pub fn detect(bytes: &[u8]) -> (TextEncoding, usize) {
     }
 }
 
+/// `bytes` as text in `enc`; bytes that aren't valid become U+FFFD.
 pub fn decode(bytes: &[u8], enc: TextEncoding) -> String {
     match enc {
         TextEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
@@ -121,6 +123,7 @@ pub fn decode_auto(bytes: &[u8]) -> (String, TextEncoding) {
     (decode(&bytes[bom..], enc), enc)
 }
 
+/// Whether `c` is written right to left (Hebrew, Arabic, …).
 fn is_rtl_char(c: char) -> bool {
     matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
 }

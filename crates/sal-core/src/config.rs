@@ -84,6 +84,7 @@ pub enum DriveHotkey {
 impl DriveHotkey {
     pub const ALL: [DriveHotkey; 4] = [DriveHotkey::Disabled, DriveHotkey::Shift, DriveHotkey::Alt, DriveHotkey::CtrlShift];
 
+    /// The choice as Settings shows it (translated there).
     pub fn label(self) -> &'static str {
         match self {
             DriveHotkey::Disabled => "Disabled",
@@ -200,10 +201,15 @@ pub struct Config {
     pub quick_search_arrows: bool,
     /// Solid scrollbars that are always shown (instead of thin ones on hover).
     pub always_show_scrollbars: bool,
-    /// The accent color, RGB: what is selected or active (the cursor row,
-    /// the active path bar, selected tabs), and the tint of panels a plugin
-    /// shows. `None` for the theme's own. (0.5.3 called it `plugin_tint`.)
-    #[serde(alias = "plugin_tint")]
+    /// The accent color of the light theme, RGB: what is selected or active
+    /// (the cursor row, the active path bar, selected tabs), and the tint of
+    /// panels a plugin shows. `None` for the theme's own.
+    pub accent_light: Option<[u8; 3]>,
+    /// The accent color of the dark theme, like `accent_light`.
+    pub accent_dark: Option<[u8; 3]>,
+    /// Older configs: one accent color for both themes (0.5.5–0.5.8; 0.5.3
+    /// called it `plugin_tint`). Read, never written.
+    #[serde(alias = "plugin_tint", skip_serializing)]
     pub accent_color: Option<[u8; 3]>,
     /// The function-key command bar at the bottom of the window.
     pub show_fkey_bar: bool,
@@ -259,6 +265,8 @@ impl Default for Config {
             language: String::new(),
             disabled_plugins: Vec::new(),
             always_show_scrollbars: false,
+            accent_light: None,
+            accent_dark: None,
             accent_color: None,
             show_fkey_bar: true,
             system_icons: true,
@@ -316,6 +324,7 @@ pub fn config_source() -> PathBuf {
 }
 
 impl Config {
+    /// The saved settings (see [`config_source`]), or the defaults.
     pub fn load() -> Config {
         let text = fs::read_to_string(config_source()).unwrap_or_default();
         let mut c = Config::parse(&text);
@@ -323,6 +332,7 @@ impl Config {
         c
     }
 
+    /// Settings from TOML text; what older versions saved is carried over.
     fn parse(text: &str) -> Config {
         let mut c: Config = toml::from_str(text).unwrap_or_default();
         // before the editor switch existed, a non-empty editor meant "use it"
@@ -335,6 +345,12 @@ impl Config {
         }
         if !text.contains("edit_with") && c.use_custom_editor && !c.editor.trim().is_empty() {
             c.edit_with = OpenWith::Program { command: c.editor.clone() };
+        }
+        // before each theme had its own accent color
+        if let Some(both) = c.accent_color.take() {
+            if !text.contains("accent_light") && !text.contains("accent_dark") {
+                (c.accent_light, c.accent_dark) = (Some(both), Some(both));
+            }
         }
         c
     }
@@ -402,12 +418,14 @@ mod tests {
         let viewer = Config::parse("viewer = 'v.exe {file}'\nuse_custom_viewer = true");
         assert_eq!(viewer.view_with, OpenWith::Program { command: "v.exe {file}".into() });
         // and the new settings survive saving
-        let mut c2 = Config::default();
-        c2.suffix_rules = vec![
-            SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into() }), edit: None },
-            SuffixRule { suffix: "tar.gz".into(), view: None, edit: Some(OpenWith::Notepad) },
-        ];
-        c2.edit_with = OpenWith::Plugin { plugin: "x".into(), opener: "ini".into() };
+        let c2 = Config {
+            suffix_rules: vec![
+                SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into() }), edit: None },
+                SuffixRule { suffix: "tar.gz".into(), view: None, edit: Some(OpenWith::Notepad) },
+            ],
+            edit_with: OpenWith::Plugin { plugin: "x".into(), opener: "ini".into() },
+            ..Config::default()
+        };
         let text = toml::to_string_pretty(&c2).unwrap();
         assert!(!text.contains("use_custom"), "{text}");
         let back = Config::parse(&text);
@@ -416,11 +434,16 @@ mod tests {
         assert_eq!(suffix_rule(&c2.suffix_rules, "Záloha.TAR.GZ").unwrap().suffix, "tar.gz");
         assert!(suffix_rule(&c2.suffix_rules, "a.gz").is_none() && suffix_rule(&c2.suffix_rules, "md").is_none());
         assert_eq!(SuffixRule::normalize(" *.TXT "), "txt");
-        // the accent color: the theme's unless chosen; 0.5.3's plugin_tint becomes it
-        assert_eq!(c.accent_color, None);
-        let tinted = Config::parse(&toml::to_string_pretty(&Config { accent_color: Some([200, 120, 0]), ..Config::default() }).unwrap());
-        assert_eq!(tinted.accent_color, Some([200, 120, 0]));
-        assert_eq!(Config::parse("plugin_tint = [1, 2, 3]").accent_color, Some([1, 2, 3]));
+        // the accent colors: each theme's own unless chosen
+        assert_eq!((c.accent_light, c.accent_dark), (None, None));
+        let tinted = Config::parse(&toml::to_string_pretty(&Config { accent_light: Some([200, 120, 0]), ..Config::default() }).unwrap());
+        assert_eq!((tinted.accent_light, tinted.accent_dark), (Some([200, 120, 0]), None));
+        // one color from before (0.5.3's plugin_tint, then accent_color) goes to both
+        for old in ["plugin_tint = [1, 2, 3]", "accent_color = [1, 2, 3]"] {
+            let c = Config::parse(old);
+            assert_eq!((c.accent_light, c.accent_dark, c.accent_color), (Some([1, 2, 3]), Some([1, 2, 3]), None), "{old}");
+        }
+        assert!(!toml::to_string_pretty(&Config::parse("accent_color = [1, 2, 3]")).unwrap().contains("accent_color"));
         assert!(!c.always_show_scrollbars && c.show_fkey_bar && c.system_icons);
         let dark: Config = toml::from_str("theme = \"Dark\"").unwrap();
         assert_eq!(dark.theme, ThemeMode::Dark);

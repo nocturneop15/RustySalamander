@@ -62,6 +62,7 @@ fn data_dir(plugin_dir: &Path) -> PathBuf {
     std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("RustySalamander").join("scp")
 }
 
+/// The user's home folder, where `~/.ssh` keys are looked for.
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
 }
@@ -80,6 +81,7 @@ impl Plugin for Scp {
 }
 
 impl Scp {
+    /// Run `f` on the plugin's async runtime and wait for it.
     fn block<F: Future>(&self, f: F) -> F::Output {
         self.rt.as_ref().expect("runtime").block_on(f)
     }
@@ -95,10 +97,12 @@ impl Scp {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, trf("Not connected to {server}. Connect again: Plugins → Connect to server…", &[("server", &authority)])))
     }
 
+    /// The file of the servers' keys the user accepted.
     fn known_hosts(&self) -> PathBuf {
         self.data.join("known_hosts")
     }
 
+    /// The file the last connection's details are kept in (no password).
     fn last_file(&self) -> PathBuf {
         self.data.join("last-connection")
     }
@@ -118,6 +122,8 @@ impl Scp {
         v
     }
 
+    /// Remember the connection's details for the next form (never the
+    /// password or the passphrase).
     fn save_last(&self, v: &Values) {
         let parts: Vec<&str> = ["host", "port", "user", "auth", "key"].iter().map(|k| v.get(*k).map_or("", String::as_str)).collect();
         let _ = std::fs::create_dir_all(&self.data);

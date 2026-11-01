@@ -35,6 +35,7 @@ pub struct Icons {
 }
 
 impl Icons {
+    /// The cache, with a thread that loads icons from Windows.
     pub fn new(ctx: &egui::Context) -> Icons {
         let (tx, worker_rx) = channel::<(IconKey, PathBuf)>();
         let (worker_tx, rx) = channel();
@@ -72,6 +73,8 @@ impl Icons {
         Icons { textures: HashMap::new(), pending: HashSet::new(), tx, rx }
     }
 
+    /// What an item's icon is cached by: its type, or the file itself for
+    /// programs, shortcuts and icons.
     fn key_for(e: &FileEntry) -> IconKey {
         match e.kind {
             EntryKind::File => {
@@ -122,6 +125,7 @@ impl Icons {
         }
     }
 
+    /// What is loaded and what is pending, for test failures.
     #[cfg(test)]
     pub fn debug_state(&self) -> String {
         format!("textures={:?} pending={:?}", self.textures.iter().map(|(k, v)| (k, v.is_some())).collect::<Vec<_>>(), self.pending)
@@ -133,6 +137,7 @@ impl Icons {
     }
 }
 
+/// The shell needs COM on the loading thread.
 #[cfg(windows)]
 fn init_com() {
     unsafe {
@@ -140,9 +145,11 @@ fn init_com() {
     }
 }
 
+/// Elsewhere there is no COM.
 #[cfg(not(windows))]
 fn init_com() {}
 
+/// Handle the thread's window messages (some icon handlers need them).
 #[cfg(windows)]
 fn pump_messages() {
     use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
@@ -155,6 +162,7 @@ fn pump_messages() {
     }
 }
 
+/// Elsewhere there are no window messages.
 #[cfg(not(windows))]
 fn pump_messages() {}
 
@@ -186,11 +194,13 @@ pub fn load(key: &IconKey, path: &Path) -> Option<Rgba> {
     rgba
 }
 
+/// Elsewhere there are no shell icons.
 #[cfg(not(windows))]
 pub fn load(_: &IconKey, _: &Path) -> Option<Rgba> {
     None
 }
 
+/// An icon's pixels, RGBA.
 #[cfg(windows)]
 fn icon_to_rgba(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<Rgba> {
     use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP};

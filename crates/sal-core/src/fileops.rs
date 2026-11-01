@@ -47,7 +47,9 @@ pub enum ErrorAction {
 pub trait OpObserver {
     /// Return false to cancel the operation.
     fn progress(&mut self, p: &Progress) -> bool;
+    /// What to do with `src` when `dst` exists already.
     fn conflict(&mut self, src: &Path, dst: &Path) -> ConflictAction;
+    /// What to do after `err` on `path`.
     fn error(&mut self, path: &Path, err: &io::Error) -> ErrorAction;
 }
 
@@ -109,6 +111,7 @@ pub fn dir_size(root: &Path, cancel: &std::sync::atomic::AtomicBool, report: &mu
 
 /// Count files and bytes below `sources` (for progress totals).
 pub fn measure(sources: &[PathBuf]) -> (u64, u64) {
+    /// Count the files and bytes below `p` (symbolic links are not followed).
     fn walk(p: &Path, files: &mut u64, bytes: &mut u64) {
         match fs::symlink_metadata(p) {
             Ok(md) if md.is_dir() => {
@@ -165,6 +168,8 @@ struct Ctx<'a> {
 type Step = Result<bool, ()>;
 
 impl Ctx<'_> {
+    /// Tell the observer the progress (at most every 50 ms unless `force`);
+    /// `Err` when it cancelled.
     fn report(&mut self, force: bool) -> Result<(), ()> {
         if force || self.last_report.elapsed().as_millis() >= 50 {
             self.last_report = Instant::now();
@@ -230,6 +235,7 @@ impl Ctx<'_> {
         }
     }
 
+    /// Copy one file, after asking about an existing target.
     fn copy_file(&mut self, src: &Path, dst: &Path) -> Step {
         if !self.resolve_conflict(src, dst)? {
             self.summary.skipped += 1;
@@ -257,6 +263,8 @@ impl Ctx<'_> {
         }
     }
 
+    /// Copy the contents, times and attributes of `src` to `dst`, reporting
+    /// progress; the bytes copied.
     fn copy_file_data(&mut self, src: &Path, dst: &Path) -> io::Result<u64> {
         let md = fs::metadata(src)?;
         let mut input = fs::File::open(src)?;
@@ -296,6 +304,7 @@ impl Ctx<'_> {
         Ok(total)
     }
 
+    /// Copy `src` with everything below it.
     fn copy_tree(&mut self, src: &Path, dst: &Path) -> Step {
         let md = match self.attempt(src, |_| fs::symlink_metadata(src))? {
             Some(md) => md,
@@ -331,6 +340,8 @@ impl Ctx<'_> {
         Ok(all_ok)
     }
 
+    /// Move `src` to `dst`: a rename on the same volume, else a copy and a
+    /// delete.
     fn move_item(&mut self, src: &Path, dst: &Path) -> Step {
         if src == dst {
             return Ok(true);
@@ -365,6 +376,8 @@ impl Ctx<'_> {
         }
     }
 
+    /// Move across volumes: copy, then delete the source only when all of it
+    /// was copied.
     fn move_by_copy(&mut self, src: &Path, dst: &Path) -> Step {
         // copy_tree resolves conflicts itself; deleting the source only when
         // everything below it was copied keeps skipped files safe
@@ -382,6 +395,7 @@ impl Ctx<'_> {
         }
     }
 
+    /// Delete `p` with everything below it; `count` adds it to the progress.
     fn delete_tree(&mut self, p: &Path, count: bool) -> Step {
         let md = match self.attempt(p, |_| fs::symlink_metadata(p))? {
             Some(md) => md,
@@ -430,6 +444,7 @@ impl Ctx<'_> {
     }
 }
 
+/// An operation's state, with the totals of `sources` counted first.
 fn new_ctx<'a>(obs: &'a mut dyn OpObserver, sources: &[PathBuf]) -> Ctx<'a> {
     let (files_total, bytes_total) = measure(sources);
     Ctx {
@@ -444,6 +459,8 @@ fn new_ctx<'a>(obs: &'a mut dyn OpObserver, sources: &[PathBuf]) -> Ctx<'a> {
     }
 }
 
+/// Where `src` goes in `dest_dir`: its own name, or the one `mask` makes
+/// (F2-style `*.bak`, or a new name for a single item).
 fn target_for(src: &Path, dest_dir: &Path, mask: &Option<String>) -> PathBuf {
     let name = src.file_name().unwrap_or_default();
     match mask {

@@ -34,6 +34,7 @@ pub struct Place {
 }
 
 impl Place {
+    /// A window not yet placed, with a number of its own.
     fn new() -> Place {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Place {
@@ -62,9 +63,17 @@ pub struct DialogWin {
     /// No other window of the program takes input while the dialog is open
     /// (a question the running operation waits for).
     pub exclusive: bool,
+    /// The window's icon (one of `sal_ui::icon`); `None` for the program's.
+    pub icon: Option<fn() -> std::sync::Arc<egui::IconData>>,
 }
 
 impl DialogWin {
+    /// The same window with an icon of its own (Settings' toothed wheel).
+    pub fn with_icon(self, icon: fn() -> std::sync::Arc<egui::IconData>) -> DialogWin {
+        DialogWin { icon: Some(icon), ..self }
+    }
+
+    /// The same window, keeping the main window from input while open.
     pub fn modal(self) -> DialogWin {
         DialogWin { modal: true, ..self }
     }
@@ -93,7 +102,7 @@ impl DialogWin {
         let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| our_app_is_foreground()));
         let builder = ViewportBuilder::default()
             .with_title(title)
-            .with_icon(sal_ui::icon::program())
+            .with_icon(self.icon.unwrap_or(sal_ui::icon::program)())
             .with_inner_size([width, 160.0])
             .with_position(pos)
             .with_resizable(false)
@@ -193,6 +202,7 @@ fn disable_others(keep: isize) -> Vec<isize> {
     s.found
 }
 
+/// Elsewhere other windows stay usable.
 #[cfg(not(windows))]
 fn disable_others(_: isize) -> Vec<isize> {
     Vec::new()
@@ -240,6 +250,7 @@ pub fn close(places: &mut Places, owner: Option<isize>, which: impl Fn(&str) -> 
     }
 }
 
+/// Let `owner` take input again, or not.
 #[cfg(windows)]
 fn enable(owner: isize, on: bool) {
     use windows::Win32::Foundation::HWND;
@@ -249,6 +260,7 @@ fn enable(owner: isize, on: bool) {
     }
 }
 
+/// Elsewhere windows are always enabled.
 #[cfg(not(windows))]
 fn enable(_: isize, _: bool) {}
 
@@ -274,6 +286,7 @@ fn our_app_is_foreground() -> bool {
     }
 }
 
+/// Bring the window `h` to the front.
 #[cfg(windows)]
 fn set_foreground(h: isize) {
     use windows::Win32::Foundation::HWND;
@@ -294,17 +307,21 @@ fn flash(owner: isize) {
     }
 }
 
+/// Elsewhere the program counts as being in the foreground.
 #[cfg(not(windows))]
 fn our_app_is_foreground() -> bool {
     true
 }
 
+/// Elsewhere nothing to bring forward.
 #[cfg(not(windows))]
 fn set_foreground(_: isize) {}
 
+/// Elsewhere no taskbar to flash.
 #[cfg(not(windows))]
 fn flash(_: isize) {}
 
+/// The window title bars' theme for a theme setting.
 pub fn system_theme(mode: ThemeMode) -> egui::SystemTheme {
     match mode {
         ThemeMode::System => egui::SystemTheme::SystemDefault,
@@ -344,6 +361,7 @@ fn set_owner(owner: isize, title: &str) -> Option<isize> {
     s.found
 }
 
+/// Elsewhere windows have no owners.
 #[cfg(not(windows))]
 fn set_owner(_: isize, _: &str) -> Option<isize> {
     Some(0)

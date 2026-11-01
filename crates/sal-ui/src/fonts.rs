@@ -35,6 +35,7 @@ const MONOSPACE: &[&str] = &["consola.ttf", "cascadiamono.ttf"];
 pub const DEFAULT_UI_FONT: &str = "Segoe UI";
 pub const DEFAULT_MONO_FONT: &str = "Consolas";
 
+/// The Windows fonts folder.
 fn fonts_dir() -> PathBuf {
     let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     Path::new(&windir).join("Fonts")
@@ -105,6 +106,7 @@ pub fn system_fonts() -> Vec<SystemFont> {
     out
 }
 
+/// Elsewhere no installed fonts are listed.
 #[cfg(not(windows))]
 pub fn system_fonts() -> Vec<SystemFont> {
     Vec::new()
@@ -127,6 +129,8 @@ fn parse_entry(reg_name: &str, file: &str, fonts_dir: &Path) -> Option<SystemFon
     Some(SystemFont { name, path })
 }
 
+/// Add the font file `path` (face `index`) to `defs` as `key`; false when
+/// it can't be read.
 fn load(defs: &mut FontDefinitions, key: &str, path: &Path, index: u32) -> bool {
     match font_bytes(path) {
         Some(bytes) => {
@@ -193,6 +197,8 @@ pub fn definitions(ui_font: &str, mono_font: &str, installed: &[SystemFont]) -> 
     defs
 }
 
+/// Use the UI font and the viewer font (names; empty for the defaults),
+/// with the fallbacks and the icons behind them.
 pub fn install(ctx: &egui::Context, ui_font: &str, mono_font: &str) {
     let installed = if ui_font.is_empty() && mono_font.is_empty() { Vec::new() } else { system_fonts() };
     ctx.set_fonts(definitions(ui_font, mono_font, &installed));

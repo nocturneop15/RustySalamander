@@ -112,6 +112,7 @@ pub struct Check {
 }
 
 impl Check {
+    /// Look for updates of the program and of `plugins` on a thread.
     pub fn start(ctx: &egui::Context, manual: bool, plugins: Vec<PluginSource>) -> Check {
         let result = Arc::new(Mutex::new(None));
         let (out, ctx) = (result.clone(), ctx.clone());
@@ -410,6 +411,7 @@ pub fn apply_staged(plugins: &Path) -> (Vec<String>, Vec<String>) {
     (done, failed)
 }
 
+/// The files below `root\rel`, as paths relative to `root`.
 fn list_files(root: &Path, rel: &Path, out: &mut Vec<PathBuf>) {
     let Ok(dir) = fs::read_dir(root.join(rel)) else { return };
     for e in dir.flatten() {
@@ -439,6 +441,8 @@ pub fn unpack_plugin(zip: &[u8], target: &Path) -> Result<(), String> {
     unpack(zip, target, &has_plugin, "the zip has no plugin")
 }
 
+/// Unpack `zip` into `target` through a staging folder, renamed only when
+/// `complete` says the result is whole; else nothing is left behind.
 fn unpack(zip: &[u8], target: &Path, complete: &dyn Fn(&Path) -> bool, incomplete: &str) -> Result<(), String> {
     let entries = zip_entries(zip)?;
     let name = target.file_name().ok_or("no folder name")?.to_string_lossy();
@@ -487,6 +491,7 @@ pub fn migrate(old: &Path, new: &Path) -> io::Result<Vec<String>> {
         fs::copy(old.join("config.toml"), new.join("config.toml"))?;
         copied.push("config.toml".to_owned());
     }
+    /// Copy the settings files below `rel`.
     fn walk(old: &Path, new: &Path, rel: &Path, copied: &mut Vec<String>) -> io::Result<()> {
         let Ok(dir) = fs::read_dir(old.join(rel)) else { return Ok(()) };
         for de in dir.flatten() {
@@ -543,10 +548,12 @@ struct ZipEntry {
     header: usize,
 }
 
+/// A little-endian number in a zip's bytes.
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
 }
 
+/// A little-endian number in a zip's bytes.
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
@@ -672,6 +679,7 @@ fn http_get(url: &str, accept: &str, sink: &mut Sink) -> Result<(), String> {
     }
 }
 
+/// Elsewhere there are no downloads.
 #[cfg(not(windows))]
 fn http_get(url: &str, _accept: &str, _sink: &mut Sink) -> Result<(), String> {
     Err(format!("{url}: downloads work on Windows only"))
