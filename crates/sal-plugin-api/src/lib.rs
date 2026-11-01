@@ -154,7 +154,9 @@ pub trait FolderPlugin: Send + Sync {
     /// `scrollbars` (`solid` or `floating`), `accent_light` and
     /// `accent_dark` (the accent colors of the two themes as `#rrggbb`,
     /// empty for the theme's own; `accent` is the one of the theme chosen,
-    /// for plugins from before); and `temporary` (`1` when the
+    /// for plugins from before); `animations` (`on` or `off`: windows
+    /// fading in and smooth scrolling, `sal_ui::apply_animations`; programs
+    /// before 0.7.1 don't send it); and `temporary` (`1` when the
     /// file is a temporary copy, from an archive or a server: changes to it
     /// are not saved back).
     fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {

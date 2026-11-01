@@ -25,6 +25,21 @@ pub fn apply_scrollbars(ctx: &egui::Context, always: bool) {
     ctx.all_styles_mut(|s| s.spacing.scroll = style);
 }
 
+/// Animated effects on (egui's) or off: windows, menus and tooltips fading
+/// in, collapsing sections, and scrolling to the cursor happen at once.
+pub fn apply_animations(ctx: &egui::Context, on: bool) {
+    let defaults = egui::Style::default();
+    ctx.all_styles_mut(|s| {
+        if on {
+            s.animation_time = defaults.animation_time;
+            s.scroll_animation = defaults.scroll_animation;
+        } else {
+            s.animation_time = 0.0;
+            s.scroll_animation = egui::style::ScrollAnimation::none();
+        }
+    });
+}
+
 /// The accent colors of the light and the dark theme: the color of what is
 /// selected or active (the cursor row, the active path bar, selected tabs
 /// and buttons, text selections), with readable text on it. `None` gives

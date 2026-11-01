@@ -59,7 +59,10 @@ pub fn glyph_button(ui: &mut Ui, icon_glyph: &str, icon_color: Color32, text: &s
     if ui.is_rect_visible(rect) {
         let v = ui.style().interact_selectable(&resp, selected);
         let fill = if selected { ui.visuals().selection.bg_fill } else { v.weak_bg_fill };
-        ui.painter().rect(rect.expand(v.expansion), v.rounding, fill, v.bg_stroke);
+        // not grown when hovered or pressed (as egui's buttons are), and the
+        // frame inside the button, not across its edge: the row sits at the
+        // panel's top, where whatever reaches above is cut off
+        ui.painter().rect(rect.shrink(v.bg_stroke.width / 2.0), v.rounding, fill, v.bg_stroke);
         let ir = Rect::from_min_size(pos2(rect.left() + pad.x, rect.center().y - icon / 2.0), vec2(icon, icon));
         paint_glyph(ui.painter(), ir, icon_glyph, icon_color);
         let tc = if selected { ui.visuals().selection.stroke.color } else { v.text_color() };

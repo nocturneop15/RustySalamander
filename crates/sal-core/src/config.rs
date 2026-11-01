@@ -201,6 +201,9 @@ pub struct Config {
     pub quick_search_arrows: bool,
     /// Solid scrollbars that are always shown (instead of thin ones on hover).
     pub always_show_scrollbars: bool,
+    /// Animated effects: windows and menus fading in, smooth scrolling to
+    /// the cursor (quick search, the cursor keys). Off: everything at once.
+    pub animations: bool,
     /// The accent color of the light theme, RGB: what is selected or active
     /// (the cursor row, the active path bar, selected tabs), and the tint of
     /// panels a plugin shows. `None` for the theme's own.
@@ -265,6 +268,7 @@ impl Default for Config {
             language: String::new(),
             disabled_plugins: Vec::new(),
             always_show_scrollbars: false,
+            animations: true,
             accent_light: None,
             accent_dark: None,
             accent_color: None,

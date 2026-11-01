@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.8-alpha (2026-11-01)
+
+- **Animations can be off:** with View → Animations turned off in the program (RustySalamander 0.7.1-alpha and later), its windows don't fade in or scroll smoothly either.
+
 ## 0.5.7-alpha (2026-11-01)
 
 - **Plugin interface 7:** built for interface 7 (RustySalamander 0.7.0-alpha and later), which lets plugins mark items and show two connections side by side; no change in what it does.

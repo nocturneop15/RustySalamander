@@ -10,7 +10,7 @@
 //! main window is closed while others are open, it takes over the newest of
 //! them (its content and its place), so every window closes on its own. The
 //! windows follow the program's look (`options` of
-//! `FolderPlugin::open_file`): theme, fonts, scroll bars and accent colors.
+//! `FolderPlugin::open_file`): theme, fonts, scroll bars, accent colors and animations.
 
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -200,6 +200,8 @@ impl Look {
         });
         self.solid_bars = get("scrollbars") == "solid";
         sal_ui::apply_scrollbars(ctx, self.solid_bars);
+        // programs before 0.7.1 don't say: animated, as they were
+        sal_ui::apply_animations(ctx, get("animations") != "off");
         // programs before 0.5.9 send one color for both themes
         let one = |k: &str| if options.contains_key(k) { sal_ui::parse_accent(&get(k)) } else { sal_ui::parse_accent(&get("accent")) };
         self.accent = (one("accent_light"), one("accent_dark"));

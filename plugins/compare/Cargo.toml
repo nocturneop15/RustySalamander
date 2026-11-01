@@ -2,7 +2,7 @@
 name = "sal-plugin-compare"
 description = "RustySalamander plugin: compares two files side by side, or two folders in the two panels"
 # the plugin's own version, apart from the program's
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

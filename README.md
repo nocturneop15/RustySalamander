@@ -304,6 +304,7 @@ Copy/Move, Create directory, Rename, Delete, Select by mask and messages are mod
 
 - The two panels are separated by a wider divider with a visible line.
 - **View → Always show scrollbars**: solid, wider scrollbars that are always drawn. By default egui's thin bars appear only when hovered.
+- **View → Animations** (also Settings → General → Layout): turned off, nothing is animated: windows, menus and tooltips appear at once instead of fading in, and moving the cursor (quick search, the cursor keys, Page Down) jumps instead of scrolling smoothly. The Viewer and Compare windows follow it.
 - **View → Show function key bar** shows or hides the F1…F10 buttons at the bottom. Status messages still appear when there's something to report.
 
 Both options are also in **Settings → General → Layout** and are remembered.
@@ -368,7 +369,7 @@ Drive buttons and the drive menu (Alt+F1 / Alt+F2) use an icon per drive type, s
 
 Set these under **Options → Settings…**:
 
-- **Drive buttons**: *Drive selector* (one button for the current drive that opens the selector) or *All drives* (a button for every drive).
+- **Drive buttons**: *Drive selector* (one button for the current drive that opens the selector) or *All drives* (a button for every drive, then a list of the open server sessions, a list of the searches and a button for the comparison, each only when there is one; the comparison's button shows its sides in both panels).
 - **Go to drive**: choose the modifier for the letter shortcuts (Shift by default, Alt, Ctrl+Shift, or disabled). With Shift, a letter still goes into quick search while a search is in progress or when no drive has that letter.
 - **Return to the last directory on that drive**: on by default, as in Salamander. This applies to drive shortcuts, drive buttons and the Alt+F1/F2 menu.
 

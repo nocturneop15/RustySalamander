@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.1-alpha (2026-11-01)
+
+- **Animations can be off:** with View → Animations turned off in the program (RustySalamander 0.7.1-alpha and later), its windows don't fade in or scroll smoothly either.
+
 ## 0.1.0-alpha (2026-11-01)
 
 - **The first version.** Plugins → Compare compares two files or two folders: two items selected in the active panel, else the item selected in each panel, else the items under the two cursors, else the two panels' folders. **Compare files…** and **Compare folders…** ask for them in a form.

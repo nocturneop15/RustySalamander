@@ -57,6 +57,7 @@ enum Cmd {
     /// Dark <-> light (from "system", the opposite of what is shown now).
     ToggleTheme,
     ToggleScrollbars,
+    ToggleAnimations,
     ToggleFkeyBar,
     ToggleQuickSearchMode,
     ToggleIcons,
@@ -272,6 +273,33 @@ impl DriveConn {
     fn group(&self) -> u8 {
         conn_group(self.results, self.paired)
     }
+}
+
+/// A drop-down list of connections beside the drive buttons: a button with
+/// `icon` (selected when the panel is in one of them) opening the list;
+/// nothing when there are none. The (start, root) of the one picked.
+fn connection_list(ui: &mut egui::Ui, salt: (&str, usize), icon: &str, color: Color32, tip: &str, list: &[plugins::Connection], here: &Path) -> Option<(PathBuf, PathBuf)> {
+    if list.is_empty() {
+        return None;
+    }
+    let inside = list.iter().any(|c| here.starts_with(&c.root));
+    // a button like the drives' (the same size, in line with them), with a list below
+    let button = drive_icon::glyph_button(ui, icon, color, sal_ui::mdi::MENU_DOWN, inside).on_hover_text(tip);
+    let popup = ui.make_persistent_id(salt);
+    if button.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup));
+    }
+    let mut picked = None;
+    egui::popup_below_widget(ui, popup, &button, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        ui.set_min_width(220.0);
+        for c in list {
+            let label = if c.name.is_empty() { display_path(&c.root).trim_end_matches('/').to_owned() } else { c.name.clone() };
+            if ui.selectable_label(here.starts_with(&c.root), label).clicked() {
+                picked = Some((c.start.clone(), c.root.clone()));
+            }
+        }
+    });
+    picked
 }
 
 /// The group a connection is listed in: 0 connections (servers), 1
@@ -581,6 +609,7 @@ impl App {
             apply_font_size(ctx, cfg.font_size);
             apply_theme(ctx, cfg.theme);
             sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
+            sal_ui::apply_animations(ctx, cfg.animations);
             sal_ui::apply_accent(ctx, cfg.accent_light, cfg.accent_dark);
         });
         let plugins = time("startup: plugins", || Plugins::load(&cfg.disabled_plugins));
@@ -799,6 +828,21 @@ impl App {
         self.links.push((roots[0].clone(), roots[1].clone()));
         self.linked_at = [self.panels[0].path().to_path_buf(), self.panels[1].path().to_path_buf()];
         self.status = p.name.clone();
+    }
+
+    /// The comparison's sides in their panels, where a panel doesn't show
+    /// its side already.
+    fn show_comparison(&mut self) {
+        let Some((left, right)) = self.links.first().cloned() else { return };
+        let hidden = self.vis();
+        for (i, side) in [left, right].iter().enumerate() {
+            if !self.panels[i].path().starts_with(side) {
+                if let Err(e) = self.panels[i].load(side, hidden, None) {
+                    self.error(e);
+                }
+            }
+        }
+        self.linked_at = [self.panels[0].path().to_path_buf(), self.panels[1].path().to_path_buf()];
     }
 
     /// Linked panels (two folders compared) go into the same folders
@@ -1048,6 +1092,7 @@ impl App {
             ("ui_font", &self.cfg.ui_font),
             ("mono_font", &self.cfg.mono_font),
             ("scrollbars", scrollbars),
+            ("animations", if self.cfg.animations { "on" } else { "off" }),
             ("accent_light", &light),
             ("accent_dark", &dark),
             ("accent", &one),
@@ -1863,6 +1908,11 @@ impl App {
                 sal_ui::apply_scrollbars(ctx, self.cfg.always_show_scrollbars);
                 Ok(())
             }
+            Cmd::ToggleAnimations => {
+                self.cfg.animations = !self.cfg.animations;
+                sal_ui::apply_animations(ctx, self.cfg.animations);
+                Ok(())
+            }
             Cmd::ToggleQuickSearchMode => {
                 self.cfg.quick_search_anywhere = !self.cfg.quick_search_anywhere;
                 self.status = if self.cfg.quick_search_anywhere { tr("Quick search: anywhere in name") } else { tr("Quick search: from first letter") }.into();
@@ -2155,8 +2205,19 @@ impl App {
         let mut crumb_rects = Vec::new();
         let mut drive_clicked = false;
         let mut drive_picked: Option<PathBuf> = None;
+        // a server session or search picked beside the drive buttons: (start, root)
+        let mut conn_picked: Option<(PathBuf, PathBuf)> = None;
+        let mut compare_picked = false;
         let drive_list = self.cached_drives().to_vec();
         let show_all = self.cfg.drive_buttons == DriveButtons::All;
+        // with all drive buttons: the connections, by group, and this panel's side of the comparison
+        let (servers, searches, compare_side) = if show_all {
+            let all = plugins::connections();
+            let group = |g: u8| all.iter().filter(|c| conn_group(c.results, c.paired) == g).cloned().collect::<Vec<_>>();
+            (group(0), group(1), self.links.first().map(|l| if idx == 0 { l.0.clone() } else { l.1.clone() }))
+        } else {
+            (Vec::new(), Vec::new(), None)
+        };
         // a panel a plugin shows is tinted from the path bar to its banner;
         // the tint goes under what is drawn, once the panel's height is known
         let plugin_panel = self.panels[idx].archive.is_some();
@@ -2177,10 +2238,28 @@ impl App {
                         drive_picked = Some(d.root.clone());
                     }
                 }
+                // server sessions and searches, each a list; the comparison, a button
+                let here = self.panels[idx].path().to_path_buf();
+                let network = drive_icon::color(sal_core::drives::DriveType::Network);
+                for (list, icon, tip, salt) in [
+                    (&servers, sal_ui::mdi::SERVER_NETWORK, tr("Server sessions"), "servers"),
+                    (&searches, sal_ui::mdi::MAGNIFY, tr("Searches"), "searches"),
+                ] {
+                    if let Some(p) = connection_list(ui, (salt, idx), icon, network, tip, list, &here) {
+                        conn_picked = Some(p);
+                    }
+                }
+                if let Some(side) = &compare_side {
+                    let tip = tr("The comparison: its sides in both panels");
+                    if drive_icon::glyph_button(ui, sal_ui::mdi::COMPARE_HORIZONTAL, network, "", here.starts_with(side)).on_hover_text(tip).clicked() {
+                        compare_picked = true;
+                    }
+                }
                 ui.spacing_mut().item_spacing.x = 6.0;
             }
-            // the current drive (or UNC share) when not shown among the buttons above
-            if !show_all || !on_listed_drive {
+            // the current drive (or UNC share) when not shown among the buttons
+            // above (a plugin's connection is, in its list or as the comparison)
+            if !show_all || !on_listed_drive && plugins::mount_root_of(&root).is_none() {
                 let named = plugins::mount_root_of(&root).and_then(|(r, id)| Some((plugins::results_name(&r)?, id, plugins::results_icon(&r))));
                 let label = match &named {
                     // results: the plugin's name; the path bar says which
@@ -2645,6 +2724,17 @@ impl App {
             if let Err(e) = self.change_drive(idx, &root) {
                 self.error(e);
             }
+        }
+        if let Some((start, root)) = conn_picked {
+            self.active = idx;
+            let hidden = self.vis();
+            if let Err(e) = self.panels[idx].load(&start, hidden, None).or_else(|_| self.panels[idx].load(&root, hidden, None)) {
+                self.error(e);
+            }
+        }
+        if compare_picked {
+            self.active = idx;
+            self.show_comparison();
         }
         if let Some((i, m, double)) = clicked {
             self.active = idx;
@@ -3275,6 +3365,9 @@ impl App {
                                     ui.vertical(|ui| {
                                         if ui.checkbox(&mut cfg.always_show_scrollbars, tr(LBL_SCROLLBARS)).changed() {
                                             sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
+                                        }
+                                        if ui.checkbox(&mut cfg.animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
+                                            sal_ui::apply_animations(ctx, cfg.animations);
                                         }
                                         ui.checkbox(&mut cfg.show_fkey_bar, tr(LBL_FKEYS));
                                     });
@@ -4207,6 +4300,7 @@ impl App {
         let current_theme = self.cfg.theme;
         let mut theme_pick = None;
         let mut always_bars = self.cfg.always_show_scrollbars;
+        let mut animations = self.cfg.animations;
         let mut fkey_bar = self.cfg.show_fkey_bar;
         let mut sys_icons = self.cfg.system_icons;
         let mut layout_cmd = None;
@@ -4298,6 +4392,10 @@ impl App {
                 ui.separator();
                 if ui.checkbox(&mut always_bars, tr(LBL_SCROLLBARS)).changed() {
                     layout_cmd = Some(Cmd::ToggleScrollbars);
+                    ui.close_menu();
+                }
+                if ui.checkbox(&mut animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
+                    layout_cmd = Some(Cmd::ToggleAnimations);
                     ui.close_menu();
                 }
                 if ui.checkbox(&mut fkey_bar, tr(LBL_FKEYS)).changed() {
@@ -4727,7 +4825,7 @@ fn job_progress_ui(ui: &mut egui::Ui, job: &Job, now: Instant, act: &mut Option<
             if let Some(speed) = job.rate.speed() {
                 parts.push(format!("{}/s", format_size(speed as u64)));
             }
-            parts.push(match job.rate.remaining(p.bytes_done, p.bytes_total) {
+            parts.push(match job.rate.remaining() {
                 Some(d) => trf("about {time} left", &[("time", &format_duration(d))]),
                 None => tr("estimating the time left…").to_owned(),
             });
@@ -4851,6 +4949,8 @@ const LBL_HIDDEN: &str = n_("Show hidden files");
 const LBL_SYSTEM: &str = n_("Show system files");
 const LBL_ICONS: &str = n_("Show Windows file icons");
 const LBL_SCROLLBARS: &str = n_("Always show scrollbars");
+const LBL_ANIMATIONS: &str = n_("Animations");
+const TIP_ANIMATIONS: &str = n_("Windows and menus fading in, smooth scrolling to the cursor (quick search, cursor keys). Off: everything changes at once.");
 const LBL_FKEYS: &str = n_("Show function key bar");
 const LBL_RECYCLE: &str = n_("Delete to Recycle Bin");
 const LBL_QS_PREFIX: &str = n_("From first letter");
@@ -5985,6 +6085,22 @@ mod tests {
             ui.key(Key::Escape);
         }
 
+        // with all drive buttons: the comparison's button brings a panel that
+        // left it back to its side
+        ui.app.cfg.drive_buttons = DriveButtons::All;
+        ui.app.panels[0].load(&l, hidden, None).unwrap();
+        ui.frames(2);
+        assert_eq!(ui.app.panels[1].path(), rroot.as_path(), "the other side stays");
+        if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &dir.join("compare_all_drives.png"));
+        }
+        ui.app.show_comparison();
+        ui.frames(2);
+        assert_eq!((ui.app.panels[0].path(), ui.app.panels[1].path()), (lroot.as_path(), rroot.as_path()));
+        ui.app.cfg.drive_buttons = DriveButtons::default();
+
         // copy the file only the left has into the right side (F5 from the left)
         ui.app.active = 0;
         cursor_to(&mut ui, "only left.txt");
@@ -6098,6 +6214,15 @@ mod tests {
         fs::remove_file(data.join("nová.txt")).unwrap();
 
         // the drive selector's name for them
+        if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+            // with all drive buttons: the searches in a list beside them
+            ui.app.cfg.drive_buttons = DriveButtons::All;
+            ui.frames(3);
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &dir.join("search_all_drives.png"));
+            ui.app.cfg.drive_buttons = DriveButtons::default();
+        }
         let names_of: Vec<String> = plugins::connections().into_iter().filter(|c| c.results && c.plugin == "search").map(|c| c.name).collect();
         assert_eq!(names_of, ["*.txt \"hello\" · data (filtered folders)", "*.txt \"hello\" · data (all in one list)"]);
         // Open (Enter, double-click) opens the file itself; F3 views it
@@ -6234,9 +6359,11 @@ mod tests {
         }
     }
 
-    /// Wait for the plugin command running in the background.
+    /// Wait for the plugin command running in the background (generously:
+    /// the tests run side by side and may keep the machine busy).
     fn wait_plugin(ui: &mut Ui) {
-        for _ in 0..500 {
+        let until = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < until {
             ui.frames(1);
             if ui.app.plugin_task.is_none() {
                 return;
@@ -6920,6 +7047,32 @@ mod tests {
         }
     }
 
+    /// The path bars with all drive buttons, the real drives, at a few
+    /// scales: `cargo test -p sal-app snapshot_all_drive_buttons -- --ignored`
+    #[test]
+    #[ignore]
+    fn snapshot_all_drive_buttons() {
+        let t = tempfile::tempdir().unwrap();
+        let out_dir = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        for ppp in [1.0f32, 1.25, 1.5] {
+            let mut ui = Ui::new(t.path(), t.path());
+            crate::fonts::install(&ui.ctx, "", "");
+            ui.ctx.set_pixels_per_point(ppp);
+            ui.screen = egui::vec2(1000.0, 300.0);
+            ui.app.cfg.drive_buttons = DriveButtons::All;
+            ui.ctx.set_visuals(egui::Visuals::light());
+            let real_c = drives::root_of(t.path());
+            let fake = |l: char, kind| Drive { root: PathBuf::from(format!("{l}:\\")), letter: format!("{l}:"), label: String::new(), kind, remote: None };
+            use sal_core::drives::DriveType;
+            ui.app.drives = vec![Drive { root: real_c, ..fake('C', DriveType::Fixed) }, fake('D', DriveType::Fixed), fake('E', DriveType::Removable), fake('X', DriveType::Network), fake('Y', DriveType::Network), fake('Z', DriveType::Network)];
+            ui.app.drives_loaded = Some(Instant::now() + Duration::from_secs(60));
+            ui.frames(4);
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &out_dir.join(format!("all_drives_{ppp}.png")));
+        }
+    }
+
     fn type_path(ui: &mut Ui, text: &str) {
         ui.app.command(&ui.ctx.clone(), Cmd::ChangeDir);
         ui.frames(2);
@@ -7438,6 +7591,21 @@ mod tests {
         ui.app.command(&ui.ctx.clone(), Cmd::SetTheme(ThemeMode::Light));
         ui.frames(1);
         assert!(!ui.ctx.style().spacing.scroll.floating, "kept across themes");
+
+        // animations off: nothing fades in, scrolling to the cursor is instant
+        assert!(ui.app.cfg.animations && ui.ctx.style().animation_time > 0.0, "on to start with");
+        ui.app.command(&ui.ctx.clone(), Cmd::ToggleAnimations);
+        ui.frames(1);
+        assert!(!ui.app.cfg.animations);
+        let style = ui.ctx.style();
+        assert_eq!(style.animation_time, 0.0);
+        assert_eq!(style.scroll_animation.duration.max, 0.0);
+        ui.app.command(&ui.ctx.clone(), Cmd::SetTheme(ThemeMode::Dark));
+        ui.frames(1);
+        assert_eq!(ui.ctx.style().animation_time, 0.0, "kept across themes");
+        assert_eq!(ui.app.opener_options(false)["animations"], "off", "plugin windows are told");
+        ui.app.command(&ui.ctx.clone(), Cmd::ToggleAnimations);
+        assert!(ui.ctx.style().animation_time > 0.0, "back on");
 
         // hiding the function key bar gives the panels the space
         let before = ui.app.body_rects[0].height();

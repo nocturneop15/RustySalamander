@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.1-alpha (2026-11-01)
+
+- **Calmer copy and move progress:** the speed and the time left are worked out every 2 seconds instead of with every bit of progress, so they no longer jump about; when moving, the progress bars and counts move every 2 seconds too (the name of the file being moved stays current).
+- **All drives shows the connections too:** with Settings → Drive buttons → All drives, the drive buttons are followed by a list of the open server sessions (SCP), a list of the searches and a button for the comparison, each only when there is one. Until now that mode had no way to reach them except the drive selector; a panel in one of them shows it marked, and the comparison's button shows its sides in both panels.
+- **The version in the title bar:** the main window's title says which version runs ("RustySalamander 0.7.1-alpha").
+- **Animations can be turned off:** View → Animations (also Settings → General → Layout). Off, windows, menus and tooltips appear at once instead of fading in, and the list jumps to the cursor (quick search, cursor keys) instead of scrolling smoothly. The plugin windows follow it: the Viewer 0.5.8-alpha and Compare 0.1.1-alpha are bundled.
+- **Drive buttons stay below the menu:** a drive button no longer grows by a pixel when hovered or pressed, which pushed its edge under the main menu.
+
 ## 0.7.0-alpha (2026-11-01)
 
 - **The Compare plugin 0.1.0-alpha** is new and bundled: it compares two files side by side in a window of its own, or two folders in the two panels, with the differences colored. Plugins → Compare takes two selected items, else the selected item of each panel, else the items under the cursors, else the two panels' folders (see README, Comparing files and folders).

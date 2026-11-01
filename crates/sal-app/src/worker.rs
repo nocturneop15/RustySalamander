@@ -140,15 +140,20 @@ pub struct Rate {
     paused_at: Option<Instant>,
     /// (active time, bytes done), the last few seconds of them.
     samples: VecDeque<(Duration, u64)>,
+    /// What is shown: (active time it was worked out at, speed, time left),
+    /// worked out again every [`RATE_REFRESH`] so the numbers stay still.
+    shown: Option<(Duration, f64, Duration)>,
 }
 
 /// Speed is measured over this much of the most recent active time.
 const RATE_WINDOW: Duration = Duration::from_secs(8);
+/// The speed and time left shown are worked out this often.
+const RATE_REFRESH: Duration = Duration::from_secs(2);
 
 impl Rate {
     /// A rate measured from `now`.
     pub fn new(now: Instant) -> Rate {
-        Rate { started: now, paused_for: Duration::ZERO, paused_at: None, samples: VecDeque::new() }
+        Rate { started: now, paused_for: Duration::ZERO, paused_at: None, samples: VecDeque::new(), shown: None }
     }
 
     /// Time the operation has been running, without pauses.
@@ -175,26 +180,37 @@ impl Rate {
         }
     }
 
-    /// `bytes` done by `now`; old samples beyond the window are dropped.
-    pub fn sample(&mut self, now: Instant, bytes: u64) {
+    /// `bytes` of `total` done by `now`; old samples beyond the window are
+    /// dropped. The speed and time left shown follow every [`RATE_REFRESH`].
+    pub fn sample(&mut self, now: Instant, bytes: u64, total: u64) {
         let t = self.elapsed(now);
         self.samples.push_back((t, bytes));
         while self.samples.len() > 2 && self.samples.front().is_some_and(|&(s, _)| t.saturating_sub(s) > RATE_WINDOW) {
             self.samples.pop_front();
         }
+        if self.shown.is_none_or(|(at, _, _)| t.saturating_sub(at) >= RATE_REFRESH) {
+            if let Some(speed) = self.measured() {
+                let left = Duration::from_secs_f64(total.saturating_sub(bytes) as f64 / speed);
+                self.shown = Some((t, speed, left));
+            }
+        }
     }
 
     /// Bytes per second over the recent samples (needs a second of data).
-    pub fn speed(&self) -> Option<f64> {
+    fn measured(&self) -> Option<f64> {
         let (&(t0, b0), &(t1, b1)) = (self.samples.front()?, self.samples.back()?);
         let span = (t1 - t0).as_secs_f64();
         (span >= 1.0 && b1 > b0).then(|| (b1 - b0) as f64 / span)
     }
 
-    /// Estimated time to copy the rest.
-    pub fn remaining(&self, done: u64, total: u64) -> Option<Duration> {
-        let speed = self.speed()?;
-        Some(Duration::from_secs_f64(total.saturating_sub(done) as f64 / speed))
+    /// The speed shown, bytes per second.
+    pub fn speed(&self) -> Option<f64> {
+        self.shown.map(|(_, speed, _)| speed)
+    }
+
+    /// The estimated time to copy the rest, shown.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.shown.map(|(_, _, left)| left)
     }
 }
 
@@ -210,7 +226,14 @@ pub fn format_duration(d: Duration) -> String {
 
 pub struct Job {
     pub spec: Spec,
+    /// The progress shown. A move's counts and bars follow the operation
+    /// every [`RATE_REFRESH`] (the file name at once), so they don't jump
+    /// about; other operations' at once.
     pub progress: Progress,
+    /// When the shown counts were last brought up to date.
+    shown_at: Option<Instant>,
+    /// Progress newer than the shown, not shown yet.
+    latest: Option<Progress>,
     pub prompt: Option<Prompt>,
     pub result: Option<Result<OpSummary, String>>,
     pub rate: Rate,
@@ -298,7 +321,7 @@ impl Job {
         if paused.load(Ordering::Relaxed) {
             rate.pause(Instant::now());
         }
-        Job { spec, progress: Progress::default(), prompt: None, result: None, rate, paused_by: None, rx, reply: reply_tx, cancel, paused }
+        Job { spec, progress: Progress::default(), shown_at: None, latest: None, prompt: None, result: None, rate, paused_by: None, rx, reply: reply_tx, cancel, paused }
     }
 
     /// Drain messages from the worker. Returns true once the job is finished.
@@ -307,15 +330,29 @@ impl Job {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::Progress(p) => {
-                    self.rate.sample(now, p.bytes_done);
-                    self.progress = p;
+                    self.rate.sample(now, p.bytes_done, p.bytes_total);
+                    let moving = matches!(self.spec.kind, JobKind::Transfer(OpKind::Move) | JobKind::Archive(FolderOp::Transfer(OpKind::Move)));
+                    if !moving || self.shown_at.is_none_or(|at| now.saturating_duration_since(at) >= RATE_REFRESH) {
+                        self.progress = p;
+                        self.shown_at = Some(now);
+                        self.latest = None;
+                    } else {
+                        self.progress.current = p.current.clone();
+                        self.latest = Some(p);
+                    }
                 }
                 Msg::Prompt(p) => {
                     // waiting for an answer doesn't count as transfer time
                     self.rate.pause(now);
                     self.prompt = Some(p);
                 }
-                Msg::Done(r) => self.result = Some(r),
+                Msg::Done(r) => {
+                    // the end shows where it got to
+                    if let Some(p) = self.latest.take() {
+                        self.progress = p;
+                    }
+                    self.result = Some(r);
+                }
             }
         }
         self.result.is_some()
@@ -514,7 +551,7 @@ impl Jobs {
         for j in &self.running {
             done += j.progress.bytes_done;
             total += j.progress.bytes_total;
-            if let Some(r) = j.rate.remaining(j.progress.bytes_done, j.progress.bytes_total) {
+            if let Some(r) = j.rate.remaining() {
                 left = Some(left.map_or(r, |l| l.max(r)));
             }
         }
@@ -531,23 +568,31 @@ mod tests {
     fn rate_and_estimate() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let total = 100_000_000;
         let mut r = Rate::new(t0);
-        r.sample(at(0), 0);
-        r.sample(at(500), 5_000_000);
+        r.sample(at(0), 0, total);
+        r.sample(at(500), 5_000_000, total);
         assert_eq!(r.speed(), None, "too little data");
-        r.sample(at(2000), 20_000_000);
+        r.sample(at(2000), 20_000_000, total);
         assert_eq!(r.speed(), Some(10_000_000.0));
-        assert_eq!(r.remaining(20_000_000, 100_000_000), Some(Duration::from_secs(8)));
+        assert_eq!(r.remaining(), Some(Duration::from_secs(8)));
+        // within two seconds the numbers shown stay as they were
+        r.sample(at(3000), 40_000_000, total);
+        assert_eq!((r.speed(), r.remaining()), (Some(10_000_000.0), Some(Duration::from_secs(8))));
+        r.sample(at(4000), 40_000_000, total);
+        assert_eq!(r.speed(), Some(10_000_000.0), "worked out again after two seconds");
+        assert_eq!(r.remaining(), Some(Duration::from_secs(6)));
+        r.sample(at(4000), 20_000_000, total);
         // a pause neither counts as running time nor lowers the speed
         r.pause(at(2000));
         assert!(r.is_paused());
         r.resume(at(62_000));
         assert_eq!(r.elapsed(at(63_000)), Duration::from_secs(3));
-        r.sample(at(63_000), 30_000_000);
-        assert_eq!(r.speed(), Some(10_000_000.0));
+        r.sample(at(63_000), 30_000_000, total);
+        assert_eq!(r.speed(), Some(10_000_000.0), "the pause doesn't count");
         // old samples drop out of the window: the speed follows the recent rate
         for s in 1..=20u64 {
-            r.sample(at(63_000 + s * 1000), 30_000_000 + s * 1_000_000);
+            r.sample(at(63_000 + s * 1000), 30_000_000 + s * 1_000_000, total);
         }
         let v = r.speed().unwrap();
         assert!((v - 1_000_000.0).abs() < 1.0, "{v}");
