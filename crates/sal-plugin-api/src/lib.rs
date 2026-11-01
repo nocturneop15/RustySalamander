@@ -43,7 +43,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::SystemTime;
 
 pub use export::{n_, tr, trf};
-pub use ui::{Command, Field, FieldKind, Form, Mount, OpenKind, Opener, Reply, Results, Values};
+pub use ui::{Command, Field, FieldKind, Form, ItemMark, Mount, OpenKind, Opener, Panels, Reply, Results, Values};
 
 /// The attribute bit of folders (`FILE_ATTRIBUTE_DIRECTORY`).
 pub const ATTR_DIRECTORY: u32 = 0x10;
@@ -97,9 +97,19 @@ pub trait FolderPlugin: Send + Sync {
     }
     /// Run `command` (from [`FolderPlugin::commands`], or the
     /// [`Form::command`] of a form the plugin showed) with `input`: the
-    /// form's values, plus `panel` (the active panel's path) and `mount`
-    /// (the root of the plugin's connection shown in it, if any). It runs
-    /// in the background, so it may take a while (connecting to a server).
+    /// form's values, plus what the program adds:
+    ///
+    /// - `panel`: the active panel's path; `mount`: the root of the
+    ///   plugin's connection shown in it, if any;
+    /// - `side`: which panel is active, `left` or `right`;
+    /// - `cursor` and `selected`: the item under the active panel's cursor
+    ///   (empty on `..`) and its selected items (paths encoded with
+    ///   [`ui::encode`]);
+    /// - `other`, `other_cursor` and `other_selected`: the same of the other
+    ///   panel.
+    ///
+    /// It runs in the background, so it may take a while (connecting to a
+    /// server).
     fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
         let _ = input;
         Err(io::Error::new(io::ErrorKind::Unsupported, format!("unknown command \"{command}\"")))
@@ -150,6 +160,15 @@ pub trait FolderPlugin: Send + Sync {
     fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {
         let _ = (file, options);
         Err(io::Error::new(io::ErrorKind::Unsupported, format!("unknown opener \"{opener}\"")))
+    }
+
+    /// How the items in `folder` compare with something else, by name: the
+    /// panel colors them by these marks (a comparison of two folders,
+    /// [`Reply::Panels`]). Asked for each time the panel lists the folder;
+    /// the default is none.
+    fn marks(&self, file: &Path, folder: &str) -> Vec<(String, ItemMark)> {
+        let _ = (file, folder);
+        Vec::new()
     }
 }
 

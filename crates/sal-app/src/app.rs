@@ -260,9 +260,37 @@ struct DriveConn {
     start: PathBuf,
     /// Results a plugin filled (a search): closed, not disconnected.
     results: bool,
+    /// One side of two folders compared (listed under Comparisons).
+    paired: bool,
     /// The plugin command that fills results again; empty for none.
     refresh: String,
     plugin: String,
+}
+
+impl DriveConn {
+    /// Its group in the drive selector: connections, searches, comparisons.
+    fn group(&self) -> u8 {
+        conn_group(self.results, self.paired)
+    }
+}
+
+/// The group a connection is listed in: 0 connections (servers), 1
+/// searches, 2 comparisons.
+fn conn_group(results: bool, paired: bool) -> u8 {
+    match (results, paired) {
+        (_, true) => 2,
+        (true, false) => 1,
+        _ => 0,
+    }
+}
+
+/// The heading of a group of connections (see `conn_group`).
+fn conn_group_name(group: u8) -> &'static str {
+    match group {
+        2 => tr("Comparisons"),
+        1 => tr("Searches"),
+        _ => tr("Connections"),
+    }
 }
 
 /// A plugin command running in the background, and where its reply arrives.
@@ -282,6 +310,11 @@ pub struct App {
     kept_results: Vec<Vec<PathBuf>>,
     /// The suffix form open in Settings → Viewers and editors.
     suffix_edit: Option<SuffixEdit>,
+    /// Connections shown side by side (left root, right root): the panels
+    /// go into their folders together ([`App::follow_links`]).
+    links: Vec<(PathBuf, PathBuf)>,
+    /// The panels' folders when the links were last followed.
+    linked_at: [PathBuf; 2],
     /// Results being filled again (Refresh): their plugin, connections and
     /// since when; panels showing them follow until the plugin is done.
     refreshing: Vec<(Arc<dyn FolderPlugin>, Vec<PathBuf>, Instant)>,
@@ -570,6 +603,8 @@ impl App {
             results: None,
             kept_results: Vec::new(),
             suffix_edit: None,
+            links: Vec::new(),
+            linked_at: Default::default(),
             refreshing: Vec::new(),
             refresh_polled: None,
             panels,
@@ -666,6 +701,19 @@ impl App {
         }
         let here = self.act().path().to_path_buf();
         values.insert("panel".into(), sal_plugin_api::ui::path_value(&here));
+        // both panels' folders, cursors and selections
+        let item = |p: &Panel| p.current().filter(|e| e.kind != EntryKind::UpDir).map(|e| sal_plugin_api::ui::path_value(&e.path)).unwrap_or_default();
+        let selected = |p: &Panel| {
+            let list: Vec<String> = p.entries().iter().filter(|e| e.selected).map(|e| sal_plugin_api::ui::path_value(&e.path)).collect();
+            sal_plugin_api::ui::encode(&list)
+        };
+        let (act, other) = (&self.panels[self.active], &self.panels[1 - self.active]);
+        values.insert("side".into(), (if self.active == 0 { "left" } else { "right" }).into());
+        values.insert("cursor".into(), item(act));
+        values.insert("selected".into(), selected(act));
+        values.insert("other".into(), sal_plugin_api::ui::path_value(other.path()));
+        values.insert("other_cursor".into(), item(other));
+        values.insert("other_selected".into(), selected(other));
         match plugins::mount_root_of(&here) {
             Some((root, id)) if id == plugin.id() => values.insert("mount".into(), sal_plugin_api::ui::path_value(&root)),
             _ => values.remove("mount"),
@@ -703,6 +751,7 @@ impl App {
             }
             Ok(plugins::Reply::Mount(m)) => self.open_connection(&plugin, &m),
             Ok(plugins::Reply::Results(r)) => self.open_results(plugin, r),
+            Ok(plugins::Reply::Panels(p)) => self.open_panels(&plugin, p),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => self.open_dialog(Dialog::Message { title: name, text: e.to_string() }),
         }
@@ -724,6 +773,75 @@ impl App {
                 self.error(e);
             }
         }
+    }
+
+    /// Show two connections side by side (two folders compared): the left
+    /// one in the left panel, the right one in the right; they are linked,
+    /// so the panels go into the same folders together.
+    fn open_panels(&mut self, plugin: &Arc<dyn FolderPlugin>, p: plugins::Panels) {
+        // one comparison at a time: the one before closes (both its sides)
+        for c in plugins::connections().into_iter().filter(|c| c.paired) {
+            self.close_connection(&c.root);
+        }
+        let hidden = self.vis();
+        let mut roots = Vec::new();
+        for (i, (m, side)) in [(&p.left, tr("left")), (&p.right, tr("right"))].into_iter().enumerate() {
+            let root = m.root();
+            let start = if m.folder.is_empty() { root.clone() } else { root.join(&m.folder) };
+            plugins::add_mount(&root, plugin.id(), &start, Some((&format!("{} ({side})", p.name), &p.refresh)));
+            plugins::set_paired(&root);
+            if let Err(e) = self.panels[i].load(&start, hidden, None).or_else(|_| self.panels[i].load(&root, hidden, None)) {
+                self.error(e);
+            }
+            roots.push(root);
+        }
+        self.links.retain(|(l, r)| !roots.contains(l) && !roots.contains(r));
+        self.links.push((roots[0].clone(), roots[1].clone()));
+        self.linked_at = [self.panels[0].path().to_path_buf(), self.panels[1].path().to_path_buf()];
+        self.status = p.name.clone();
+    }
+
+    /// Linked panels (two folders compared) go into the same folders
+    /// together: when one panel moved inside its connection, the other
+    /// follows to the same place in its own.
+    fn follow_links(&mut self) {
+        let now = [self.panels[0].path().to_path_buf(), self.panels[1].path().to_path_buf()];
+        if now == self.linked_at {
+            return;
+        }
+        let hidden = self.vis();
+        let mut now = now;
+        for (left, right) in self.links.clone() {
+            let roots = [left, right];
+            // a side shown in the other panel (typed, from history, panels
+            // swapped): each panel keeps its own side, at the same place
+            for i in 0..2 {
+                if let Ok(inner) = now[i].strip_prefix(&roots[1 - i]) {
+                    let own = roots[i].join(inner);
+                    if self.panels[i].load(&own, hidden, None).is_err() {
+                        let _ = self.panels[i].load(&roots[i], hidden, None);
+                    }
+                    now[i] = self.panels[i].path().to_path_buf();
+                }
+            }
+            let inside: Vec<Option<PathBuf>> = (0..2).map(|i| now[i].strip_prefix(&roots[i]).ok().map(Path::to_path_buf)).collect();
+            let (Some(a), Some(b)) = (&inside[0], &inside[1]) else { continue };
+            if a == b {
+                continue;
+            }
+            // the panel that moved leads; when both did, the active one
+            let leader = if now[0] != self.linked_at[0] && now[1] == self.linked_at[1] {
+                0
+            } else if now[1] != self.linked_at[1] && now[0] == self.linked_at[0] {
+                1
+            } else {
+                self.active
+            };
+            let target = roots[1 - leader].join(inside[leader].as_ref().unwrap());
+            let focus = now[1 - leader].file_name().map(|n| n.to_string_lossy().into_owned());
+            let _ = self.panels[1 - leader].load(&target, hidden, focus.as_deref());
+        }
+        self.linked_at = [self.panels[0].path().to_path_buf(), self.panels[1].path().to_path_buf()];
     }
 
     /// Show a plugin's results (a connection it fills, such as a search) in
@@ -813,7 +931,13 @@ impl App {
         }
         let values: plugins::Values = [("results".to_owned(), sal_plugin_api::ui::path_value(root))].into();
         self.run_plugin_command(ctx, plugin.clone(), command, values);
-        let roots = self.kept_results.iter().find(|set| set.iter().any(|r| r == root)).cloned().unwrap_or_else(|| vec![root.to_path_buf()]);
+        let mut roots = self.kept_results.iter().find(|set| set.iter().any(|r| r == root)).cloned().unwrap_or_else(|| vec![root.to_path_buf()]);
+        // two folders compared are filled again together
+        for (l, r) in &self.links {
+            if l == root || r == root {
+                roots = vec![l.clone(), r.clone()];
+            }
+        }
         if let Some(win) = self.results.as_mut().filter(|w| roots.contains(&w.root)) {
             win.refreshing();
         }
@@ -989,6 +1113,12 @@ impl App {
     /// before, and the plugin releases it in the background.
     fn close_connection(&mut self, root: &Path) {
         let Some((_, id)) = plugins::mount_root_of(root) else { return };
+        // two folders compared go together
+        if let Some(at) = self.links.iter().position(|(l, r)| l == root || r == root) {
+            let (l, r) = self.links.remove(at);
+            let partner = if l == root { r } else { l };
+            self.close_connection(&partner);
+        }
         let results = plugins::is_results(root);
         plugins::remove_mount(root);
         let hidden = self.vis();
@@ -1820,11 +1950,14 @@ impl App {
                         root: c.root,
                         start: c.start,
                         results: c.results,
+                        paired: c.paired,
                         refresh: c.refresh,
                         plugin: c.plugin,
                     })
+                    // a comparison's side belongs to its own panel only
+                    .filter(|c| !c.paired || self.links.iter().any(|link| [&link.0, &link.1][panel] == &c.root))
                     .collect();
-                conns.sort_by_key(|c| c.results);
+                conns.sort_by_key(DriveConn::group);
                 let cursor = match conns.iter().position(|c| self.panels[panel].path().starts_with(&c.root)) {
                     Some(i) => drives.len() + i,
                     None => drives.iter().position(|d| d.root == root).unwrap_or(0),
@@ -2048,10 +2181,10 @@ impl App {
             }
             // the current drive (or UNC share) when not shown among the buttons above
             if !show_all || !on_listed_drive {
-                let named = plugins::mount_root_of(&root).and_then(|(r, id)| Some((plugins::results_name(&r)?, id)));
+                let named = plugins::mount_root_of(&root).and_then(|(r, id)| Some((plugins::results_name(&r)?, id, plugins::results_icon(&r))));
                 let label = match &named {
                     // results: the plugin's name; the path bar says which
-                    Some((_, id)) => format!("{} {}", sal_ui::mdi::MAGNIFY, self.plugins.name_of(id)),
+                    Some((_, id, _)) => self.plugins.name_of(id),
                     None => display_path(&root).trim_end_matches(['\\', '/']).to_owned(),
                 };
                 let tip = match drive_list.iter().find(|d| d.root == root) {
@@ -2063,7 +2196,7 @@ impl App {
                 let tip = if menu_key.is_empty() { tip } else { format!("{tip}\n{}", trf("Drive menu: {key}", &[("key", &menu_key)])) };
                 // a plugin's connection: a server, or a search's magnifier
                 let (glyph, color) = match (&named, plugins::mount_root_of(&root)) {
-                    (Some(_), _) => (sal_ui::mdi::MAGNIFY, drive_icon::color(sal_core::drives::DriveType::Network)),
+                    (Some((_, _, icon)), _) => (*icon, drive_icon::color(sal_core::drives::DriveType::Network)),
                     (None, Some(_)) => (sal_ui::mdi::SERVER_NETWORK, drive_icon::color(sal_core::drives::DriveType::Network)),
                     (None, None) => (drive_icon::glyph(root_kind), drive_icon::color(root_kind)),
                 };
@@ -2154,7 +2287,14 @@ impl App {
 
         let footer_h = row_h + 4.0;
         // a panel a plugin shows: tinted, with the plugin's name below the list
-        let banner = self.panels[idx].archive.as_ref().map(|a| plugin_banner(&self.plugins.name_of(a.plugin.id()), &a.file));
+        let banner = self.panels[idx].archive.as_ref().map(|a| {
+            let b = plugin_banner(&self.plugins.name_of(a.plugin.id()), &a.file);
+            if a.marks.is_empty() {
+                b
+            } else {
+                format!("{b}  ·  {}", tr("amber: different · green: only here · grey: only on the other side"))
+            }
+        });
         let banner_h = if banner.is_some() { row_h } else { 0.0 };
         let body_h = (ui.available_height() - footer_h - banner_h).max(row_h * 3.0);
         if plugin_panel {
@@ -2173,6 +2313,8 @@ impl App {
             }
         }
         let use_icons = self.cfg.system_icons;
+        let marks = self.panels[idx].archive.as_ref().map(|a| a.marks.clone()).filter(|m| !m.is_empty());
+        let (weak, dark) = (ui.visuals().weak_text_color(), ui.visuals().dark_mode);
         let icons = &mut self.icons;
         let panel = &mut self.panels[idx];
         let scroll_to = if panel.scroll_to_cursor { Some(panel.cursor) } else { None };
@@ -2246,7 +2388,17 @@ impl App {
                             let i = row.index();
                             let e = &entries[i];
                             row.set_selected(active && i == cursor);
-                            let color = if e.selected { Some(SELECTED_COLOR) } else { None };
+                            let mark = marks.as_ref().and_then(|m| m.get(&e.name)).copied();
+                            let missing = mark == Some(sal_plugin_api::ItemMark::Missing);
+                            let color = if e.selected { Some(SELECTED_COLOR) } else if missing { Some(weak) } else { None };
+                            let mark_bg = mark.and_then(|m| mark_fill(m, dark));
+                            // the mark's color behind each cell of the row
+                            let shade = |ui: &mut egui::Ui| {
+                                if let Some(bg) = mark_bg {
+                                    let r = ui.max_rect().expand2(egui::vec2(ui.spacing().item_spacing.x / 2.0, 0.0));
+                                    ui.painter().rect_filled(r, 0.0, bg);
+                                }
+                            };
                             let text = |s: String| {
                                 let mut t = RichText::new(s);
                                 if let Some(c) = color {
@@ -2255,6 +2407,7 @@ impl App {
                                 t
                             };
                             row.col(|ui| {
+                                shade(ui);
                                 let tex = if use_icons && e.kind != EntryKind::UpDir { icons.get(e) } else { None };
                                 match tex {
                                     Some(t) => {
@@ -2304,9 +2457,11 @@ impl App {
                                 }
                             });
                             row.col(|ui| {
+                                shade(ui);
                                 ui.label(text(if e.kind == EntryKind::File { display_name(e.ext()).into_owned() } else { String::new() }));
                             });
                             row.col(|ui| {
+                                shade(ui);
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     match (e.kind, sizes.get(&e.path)) {
                                         (EntryKind::Dir, Some(si)) => {
@@ -2332,6 +2487,7 @@ impl App {
                                         }
                                         (kind, _) => {
                                             ui.label(text(match kind {
+                                                EntryKind::File if missing => String::new(),
                                                 EntryKind::File => format_thousands(e.size),
                                                 EntryKind::Dir => tr("DIR").into(),
                                                 // the up-dir row needs no text: its name says it
@@ -2342,9 +2498,11 @@ impl App {
                                 });
                             });
                             row.col(|ui| {
+                                shade(ui);
                                 ui.label(text(fmt_time(e.modified)));
                             });
                             row.col(|ui| {
+                                shade(ui);
                                 ui.label(text(if e.kind == EntryKind::UpDir { String::new() } else { e.attr_string() }));
                             });
                             let r = row.response();
@@ -2712,13 +2870,13 @@ impl App {
                                         outcome = 1;
                                     }
                                 }
-                                // servers a plugin is connected to, then searches
+                                // servers a plugin is connected to, then searches, then comparisons
                                 if !conns.is_empty() {
                                     for (k, c) in conns.iter().enumerate() {
-                                        if k == 0 || c.results != conns[k - 1].results {
+                                        if k == 0 || c.group() != conns[k - 1].group() {
                                             ui.add_space(4.0);
                                             ui.separator();
-                                            ui.label(RichText::new(if c.results { tr("Searches") } else { tr("Connections") }).small().weak());
+                                            ui.label(RichText::new(conn_group_name(c.group())).small().weak());
                                         }
                                         let i = drives.len() + k;
                                         let tip = format!(
@@ -2730,7 +2888,7 @@ impl App {
                                         );
                                         let refreshable = !c.refresh.is_empty();
                                         let reserve = button_w + 8.0 + if refreshable { refresh_w + 4.0 } else { 0.0 };
-                                        let icon = if c.results { sal_ui::mdi::MAGNIFY } else { sal_ui::mdi::SERVER_NETWORK };
+                                        let icon = if c.results { plugins::results_icon(&c.root) } else { sal_ui::mdi::SERVER_NETWORK };
                                         let r = drive_icon::connection_row(ui, icon, &c.label, i == *cursor, reserve).on_hover_text(tip);
                                         keep_visible(&r, i);
                                         // compact buttons inside the row's right end; they take their clicks
@@ -2739,11 +2897,16 @@ impl App {
                                             egui::pos2(r.rect.right() - 4.0, r.rect.bottom() - 3.0),
                                         );
                                         let refresh_at = egui::Rect::from_min_max(egui::pos2(at.left() - 4.0 - refresh_w, at.top()), egui::pos2(at.left() - 4.0, at.bottom()));
-                                        let (label, tip) = if c.results { (tr("Close"), tr("Close these results")) } else { (tr("Disconnect"), tr("Close this connection")) };
+                                        let (label, tip) = match c.group() {
+                                            2 => (tr("Close"), tr("Close this comparison (both panels)")),
+                                            1 => (tr("Close"), tr("Close these results")),
+                                            _ => (tr("Disconnect"), tr("Close this connection")),
+                                        };
+                                        let refresh_tip = if c.paired { tr("Compare again") } else { tr("Search again with the same settings") };
                                         if row_button(ui, at, label, &small, ("disconnect", k)).on_hover_text(tip).clicked() {
                                             drive_disconnect = Some(c.root.clone());
                                         } else if refreshable
-                                            && row_button(ui, refresh_at, tr("Refresh"), &small, ("refresh", k)).on_hover_text(tr("Search again with the same settings")).clicked()
+                                            && row_button(ui, refresh_at, tr("Refresh"), &small, ("refresh", k)).on_hover_text(refresh_tip).clicked()
                                         {
                                             drive_refresh = Some((c.plugin.clone(), c.root.clone(), c.refresh.clone()));
                                         } else if r.clicked() {
@@ -4158,14 +4321,14 @@ impl App {
                     }
                     ui.separator();
                 }
-                for results in [false, true] {
-                    let list: Vec<&plugins::Connection> = connections.iter().filter(|c| c.results == results).collect();
+                for group in 0..3 {
+                    let list: Vec<&plugins::Connection> = connections.iter().filter(|c| conn_group(c.results, c.paired) == group).collect();
                     if list.is_empty() {
                         continue;
                     }
-                    ui.label(RichText::new(if results { tr("Searches") } else { tr("Connections") }).small().weak());
+                    ui.label(RichText::new(conn_group_name(group)).small().weak());
                     for c in list {
-                        let label = if results {
+                        let label = if group > 0 {
                             trf("Close {where}", &[("where", &c.name)])
                         } else {
                             trf("Disconnect from {where}", &[("where", &display_path(&c.root).trim_end_matches('/'))])
@@ -4375,6 +4538,19 @@ fn accent_choice(ui: &mut egui::Ui, label: &str, theme: egui::Theme, slot: &mut 
     });
 }
 
+/// The color behind an item marked `m` (folders compared): amber for
+/// different, green for only here; none for the same and for placeholders
+/// (those are greyed instead).
+fn mark_fill(m: sal_plugin_api::ItemMark, dark: bool) -> Option<Color32> {
+    use sal_plugin_api::ItemMark;
+    let a = if dark { 13 } else { 16 };
+    match m {
+        ItemMark::Different | ItemMark::Newer | ItemMark::Older => Some(Color32::from_rgba_unmultiplied(230, 160, 30, a)),
+        ItemMark::OnlyHere => Some(Color32::from_rgba_unmultiplied(60, 180, 90, a)),
+        ItemMark::Same | ItemMark::Missing => None,
+    }
+}
+
 /// The background tint of a panel a plugin shows: a faint wash of the
 /// accent color (the selection color, see `sal_ui::apply_accent`).
 fn plugin_tint(v: &egui::Visuals) -> Color32 {
@@ -4385,9 +4561,9 @@ fn plugin_tint(v: &egui::Visuals) -> Color32 {
 /// name instead of their address.
 fn path_crumbs(path: &Path) -> Vec<(String, PathBuf)> {
     let mut crumbs = location::breadcrumbs(path);
-    if let Some(name) = plugins::mount_root_of(path).and_then(|(root, _)| plugins::results_name(&root)) {
-        if let Some(first) = crumbs.first_mut() {
-            first.0 = format!("{} {name}", sal_ui::mdi::MAGNIFY);
+    if let Some((root, _)) = plugins::mount_root_of(path) {
+        if let (Some(name), Some(first)) = (plugins::results_name(&root), crumbs.first_mut()) {
+            first.0 = format!("{} {name}", plugins::results_icon(&root));
         }
     }
     crumbs
@@ -5078,6 +5254,7 @@ impl App {
             plugins::cleanup_temp();
         }
         self.poll_plugin_task(ctx);
+        self.follow_links();
 
         timing.mark("before menu");
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ctx, ui));
@@ -5713,6 +5890,135 @@ mod tests {
         }
     }
 
+    /// The Compare plugin (the real DLL) compares the two panels' folders:
+    /// both panels show the comparison, marked; going into a folder in one
+    /// takes the other there too; copying across makes an item the same;
+    /// closing one side closes both. SNAPSHOT_DIR set: also saved as
+    /// compare_panels.png.
+    #[test]
+    fn compare_plugin_folders_in_both_panels() {
+        use sal_plugin_api::ItemMark;
+        let Some(built) = built_library().filter(|d| d.join("compare").join("compare.spl").is_file()) else {
+            eprintln!("compare plugin not built; skipping");
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let (l, r) = (t.path().join("levá"), t.path().join("pravá"));
+        for d in [&l, &r] {
+            fs::create_dir_all(d.join("docs 🦎")).unwrap();
+            fs::write(d.join("same.txt"), "stejné").unwrap();
+        }
+        // the same times, so size and date match
+        let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for d in [&l, &r] {
+            fs::File::options().write(true).open(d.join("same.txt")).unwrap().set_modified(when).unwrap();
+        }
+        fs::write(l.join("only left.txt"), "x").unwrap();
+        fs::write(l.join("docs 🦎").join("inner.txt"), "nový obsah").unwrap();
+        fs::write(r.join("docs 🦎").join("inner.txt"), "starý").unwrap();
+        let dir = t.path().join("plugins");
+        fs::create_dir_all(dir.join("compare").join("lang")).unwrap();
+        fs::copy(built.join("compare").join("compare.spl"), dir.join("compare").join("compare.spl")).unwrap();
+        let mut found = plugins::Plugins::scan(Some(&dir));
+        found.start(&[]);
+        let compare = found.get("compare").expect("the compare plugin starts").clone();
+
+        let mut ui = Ui::new(&l, &r);
+        ui.app.plugins = found;
+        ui.keep_recorder();
+        for p in &mut ui.app.panels {
+            p.plugins = ui.app.plugins.active.clone();
+        }
+        crate::fonts::install(&ui.ctx, "", "");
+        ui.screen = egui::vec2(1100.0, 500.0);
+        let ctx = ui.ctx.clone();
+        // nothing selected, the cursors on ..: the two panels' folders
+        ui.app.active = 0;
+        ui.app.run_plugin_command(&ctx, compare.clone(), "compare".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        assert!(matches!(ui.app.dialog, Dialog::None), "{:?}", ui.app.status);
+        let (lroot, rroot) = (sal_plugin_api::mount_root("compare", "1-left"), sal_plugin_api::mount_root("compare", "1-right"));
+        assert_eq!((ui.app.panels[0].path(), ui.app.panels[1].path()), (lroot.as_path(), rroot.as_path()));
+        // both list everything either side has, marked
+        let names = |ui: &Ui, i: usize| ui.app.panels[i].entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&ui, 0), names(&ui, 1), "the lists line up");
+        let mark = |ui: &Ui, i: usize, name: &str| ui.app.panels[i].archive.as_ref().unwrap().marks.get(name).copied();
+        assert_eq!(mark(&ui, 0, "only left.txt"), Some(ItemMark::OnlyHere));
+        assert_eq!(mark(&ui, 1, "only left.txt"), Some(ItemMark::Missing));
+        assert_eq!(mark(&ui, 0, "same.txt"), Some(ItemMark::Same));
+        assert_eq!(mark(&ui, 0, "docs 🦎"), Some(ItemMark::Different), "a folder with a difference inside");
+        ui.frames(3);
+        if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &dir.join("compare_panels.png"));
+        }
+
+        // into the folder on the left: the right follows
+        cursor_to(&mut ui, "docs 🦎");
+        ui.key(Key::Enter);
+        ui.frames(2);
+        assert_eq!(ui.app.panels[0].path(), lroot.join("docs 🦎"));
+        assert_eq!(ui.app.panels[1].path(), rroot.join("docs 🦎"), "the other panel follows");
+        // and back up in the right one: the left follows
+        ui.app.active = 1;
+        ui.key(Key::Backspace);
+        ui.frames(2);
+        assert_eq!((ui.app.panels[0].path(), ui.app.panels[1].path()), (lroot.as_path(), rroot.as_path()));
+
+        // the right side in the left panel: the left panel keeps its own side
+        let hidden = ui.app.vis();
+        ui.app.panels[0].load(&rroot.join("docs 🦎"), hidden, None).unwrap();
+        ui.frames(2);
+        assert_eq!(ui.app.panels[0].path(), lroot.join("docs 🦎"));
+        assert_eq!(ui.app.panels[1].path(), rroot.join("docs 🦎"), "and the right one follows");
+        ui.app.panels[0].load(&lroot, hidden, None).unwrap();
+        ui.frames(2);
+        assert_eq!(ui.app.panels[1].path(), rroot.as_path());
+        // each panel's drive selector offers its own side only
+        for (panel, own) in [(0, &lroot), (1, &rroot)] {
+            ui.app.command(&ctx, Cmd::DriveMenu(panel));
+            ui.frames(1);
+            let Dialog::Drive { conns, .. } = &ui.app.dialog else { panic!("drive menu not open") };
+            let sides: Vec<&PathBuf> = conns.iter().filter(|c| c.paired).map(|c| &c.root).collect();
+            assert_eq!(sides, [own]);
+            ui.key(Key::Escape);
+        }
+
+        // copy the file only the left has into the right side (F5 from the left)
+        ui.app.active = 0;
+        cursor_to(&mut ui, "only left.txt");
+        ui.key(Key::F5);
+        ui.key(Key::Enter);
+        ui.wait_job();
+        ui.frames(2);
+        assert_eq!(fs::read_to_string(r.join("only left.txt")).unwrap(), "x", "the real right folder");
+        let hidden = ui.app.vis();
+        ui.app.panels[1].reload(hidden);
+        assert_eq!(mark(&ui, 1, "only left.txt"), Some(ItemMark::Same));
+
+        // listed as a comparison, not a search
+        assert!(plugins::connections().iter().filter(|c| c.root.starts_with(sal_plugin_api::mount_root("compare", ""))).all(|c| conn_group(c.results, c.paired) == 2));
+
+        // one comparison at a time: a second one replaces the first
+        let mut v = plugins::Values::new();
+        v.insert("left".into(), l.join("docs 🦎").display().to_string());
+        v.insert("right".into(), r.join("docs 🦎").display().to_string());
+        ui.app.run_plugin_command(&ctx, compare.clone(), "folders".into(), v);
+        wait_plugin(&mut ui);
+        let (lroot, rroot) = (sal_plugin_api::mount_root("compare", "2-left"), sal_plugin_api::mount_root("compare", "2-right"));
+        let open: Vec<PathBuf> = plugins::mounts().into_iter().filter(|(_, id)| id == "compare").map(|(m, _)| m).collect();
+        assert_eq!(open, [lroot.clone(), rroot.clone()], "only the new comparison");
+        assert_eq!(ui.app.links.len(), 1);
+        assert_eq!((ui.app.panels[0].path(), ui.app.panels[1].path()), (lroot.as_path(), rroot.as_path()));
+
+        // closing one side closes both: the panels go back
+        ui.app.close_connection(&lroot);
+        assert!(!plugins::mounts().iter().any(|(m, _)| *m == lroot || *m == rroot));
+        assert!(ui.app.links.is_empty());
+        assert_eq!((ui.app.panels[0].path(), ui.app.panels[1].path()), (l.as_path(), r.as_path()));
+    }
+
     /// The search plugin (the DLL the build made) end to end: the form, the
     /// results window filling, going to a result, the results as a folder,
     /// and opening a result opens the real file. SNAPSHOT_DIR set: the
@@ -5792,7 +6098,7 @@ mod tests {
         fs::remove_file(data.join("nová.txt")).unwrap();
 
         // the drive selector's name for them
-        let names_of: Vec<String> = plugins::connections().into_iter().filter(|c| c.results).map(|c| c.name).collect();
+        let names_of: Vec<String> = plugins::connections().into_iter().filter(|c| c.results && c.plugin == "search").map(|c| c.name).collect();
         assert_eq!(names_of, ["*.txt \"hello\" · data (filtered folders)", "*.txt \"hello\" · data (all in one list)"]);
         // Open (Enter, double-click) opens the file itself; F3 views it
         ui.app.results_act(&ctx, Act::Open("poznámky.txt".into()));
@@ -6049,10 +6355,12 @@ mod tests {
         ui.app.command(&ctx, Cmd::DriveMenu(1));
         ui.frames(2);
         let Dialog::Drive { conns, .. } = &ui.app.dialog else { panic!("drive menu not open") };
-        assert_eq!(conns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["mem://test-ui", "mem://test-ui-2"]);
+        // (other tests running at the same time may have connections of their own)
+        let mem = |conns: &[DriveConn]| conns.iter().map(|c| c.label.clone()).filter(|l| l.starts_with("mem://")).collect::<Vec<_>>();
+        assert_eq!(mem(conns), ["mem://test-ui", "mem://test-ui-2"]);
         ui.key(Key::Delete);
         let Dialog::Drive { conns, .. } = &ui.app.dialog else { panic!("the selector stays open") };
-        assert_eq!(conns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["mem://test-ui"]);
+        assert_eq!(mem(conns), ["mem://test-ui"]);
         assert!(plugins::mount_root_of(&second).is_none());
         assert_eq!(ui.app.panels[1].path(), local.as_path(), "the panel left the closed session");
         assert_eq!(ui.app.panels[0].path(), root.as_path(), "the other session stays");
@@ -6061,7 +6369,7 @@ mod tests {
         // disconnecting returns the panel to where it was, and closes the connection
         ui.app.close_connection(&root);
         ui.app.command(&ctx, Cmd::DriveMenu(1));
-        assert!(matches!(&ui.app.dialog, Dialog::Drive { conns, .. } if conns.is_empty()), "gone from the drive selector");
+        assert!(matches!(&ui.app.dialog, Dialog::Drive { conns, .. } if mem(conns).is_empty()), "gone from the drive selector");
         ui.key(Key::Escape);
         assert_eq!(ui.app.panels[0].path(), local.as_path());
         assert!(plugins::mount_root_of(&root).is_none());

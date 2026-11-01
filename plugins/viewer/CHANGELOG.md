@@ -2,6 +2,11 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.5.7-alpha (2026-11-01)
+
+- **Plugin interface 7:** built for interface 7 (RustySalamander 0.7.0-alpha and later), which lets plugins mark items and show two connections side by side; no change in what it does.
+- **Its windows come from `sal-window`,** the window code the Viewer and Compare plugins share; they look and behave as before.
+
 ## 0.5.6-alpha (2026-11-01)
 
 - **Plugin interface 6:** built for interface 6 (RustySalamander 0.6.0-alpha and later), which lets plugins say which program versions they work with; no change in what it does.

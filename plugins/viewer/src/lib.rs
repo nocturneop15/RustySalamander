@@ -16,7 +16,7 @@ use sal_plugin_api::{export_plugin, n_, tr, FolderPlugin, Index, OpenKind, Opene
 const TEXT: &str = "text";
 
 pub struct Viewer {
-    windows: window::Windows,
+    windows: sal_window::Windows,
 }
 
 export_plugin!(Viewer);
@@ -29,7 +29,7 @@ impl Plugin for Viewer {
     const DESCRIPTION: &'static str = n_("Shows files as text, in the encoding it detects or one you choose, or as hex (F3).");
 
     fn start(_dir: &Path) -> Result<Self, String> {
-        Ok(Viewer { windows: window::Windows::default() })
+        Ok(Viewer { windows: sal_window::Windows::new(sal_ui::icon::viewer, [900.0, 650.0]) })
     }
 }
 
@@ -78,7 +78,8 @@ impl FolderPlugin for Viewer {
         if opener != TEXT {
             return Err(unsupported());
         }
-        self.windows.open(file.to_path_buf(), options.clone())
+        let file = file.to_path_buf();
+        self.windows.open(Box::new(move || Box::new(window::ViewerWin { doc: doc::Doc::open(&file) })), options.clone())
     }
 }
 

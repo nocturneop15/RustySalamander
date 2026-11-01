@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0-alpha (2026-11-01)
+
+- **The Compare plugin 0.1.0-alpha** is new and bundled: it compares two files side by side in a window of its own, or two folders in the two panels, with the differences colored. Plugins → Compare takes two selected items, else the selected item of each panel, else the items under the cursors, else the two panels' folders (see README, Comparing files and folders).
+- **Folders compared in both panels:** a plugin can open two connections side by side, one in each panel. Going into a folder or up in one takes the other along, each side stays in its own panel (the drive selector offers a panel only its own side), Refresh refreshes both, and closing one closes both. Their rows are colored by what the plugin says about each item (different, newer, older, only here; what only the other side has is grey and shows no size), and the banner says what the colors mean. The drive selector and the Plugins menu list them under **Comparisons**, with a comparison icon. There is one comparison at a time: a new one closes the one before.
+- **Plugin interface 7:** plugins can mark items (`marks`), open two connections side by side (`Reply::Panels`), and are told more about the panels when a command runs (which side is active, the item under each cursor, the selected items of both panels). Plugins built for interfaces 5 and 6 keep working.
+- **Copying into a plugin's folder** doesn't ask about overwriting an item the plugin shows only as a placeholder.
+- **The plugins** are built for interface 7: 7-Zip, SCP and Search 0.5.2-alpha, Viewer 0.5.7-alpha (its window code is now shared with the Compare plugin, in `crates/sal-window`).
+
 ## 0.6.0-alpha (2026-11-01)
 
 - **Update all:** when more than one update can be installed, the update window has an **Update all** button that starts them all.

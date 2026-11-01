@@ -1,0 +1,43 @@
+# RustySalamander UI strings — the template for translations.
+# Generated from the source; copy to <code>.toml, set [language] and translate the values.
+# Keys with "|" are plural forms: give as many forms as the language's plural rule has.
+
+[language]
+code = "en"
+name = "English"
+plural = "en"
+
+[strings]
+"A file and a folder can't be compared." = "A file and a folder can't be compared."
+"Binary files" = "Binary files"
+"Cancelled." = "Cancelled."
+"Choose what to compare: two items, or the two panels' folders." = "Choose what to compare: two items, or the two panels' folders."
+"Compare" = "Compare"
+"Compare (selection, cursors or panels)" = "Compare (selection, cursors or panels)"
+"Compare again" = "Compare again"
+"Compare files" = "Compare files"
+"Compare files…" = "Compare files…"
+"Compare folders" = "Compare folders"
+"Compare folders…" = "Compare folders…"
+"Compares two files side by side, or two folders in the two panels, with the differences marked. Start with Plugins → Compare." = "Compares two files side by side, or two folders in the two panels, with the differences marked. Start with Plugins → Compare."
+"Comparing…" = "Comparing…"
+"Difference {at} of {n}" = "Difference {at} of {n}"
+"Files are the same when:" = "Files are the same when:"
+"Fill in both, the left and the right." = "Fill in both, the left and the right."
+"Ignore spaces" = "Ignore spaces"
+"Items can't be renamed in a comparison; rename them in their folder." = "Items can't be renamed in a comparison; rename them in their folder."
+"Left:" = "Left:"
+"Lines differing only in spaces and tabs count as the same" = "Lines differing only in spaces and tabs count as the same"
+"Next" = "Next"
+"Previous" = "Previous"
+"Read the files again" = "Read the files again"
+"Right:" = "Right:"
+"The files are the same." = "The files are the same."
+"The files differ from byte {at} on." = "The files differ from byte {at} on."
+"The texts are the same." = "The texts are the same."
+"Their contents are (slower)" = "Their contents are (slower)"
+"Their size and date are" = "Their size and date are"
+"Windows could not move the items to the Recycle Bin (error {code})." = "Windows could not move the items to the Recycle Bin (error {code})."
+"{bytes} bytes" = "{bytes} bytes"
+"{name} is only on the other side." = "{name} is only on the other side."
+"{path} is not a file or folder on disk; only those can be compared." = "{path} is not a file or folder on disk; only those can be compared."

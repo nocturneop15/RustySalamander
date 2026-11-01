@@ -107,6 +107,63 @@ pub enum Reply {
     /// ([`crate::FolderPlugin::real_path`]) or opens the connection in a
     /// panel.
     Results(Results),
+    /// Show two connections side by side, one in each panel (two folders
+    /// being compared); going into a folder in one panel takes the other to
+    /// the same folder. Their items are marked ([`crate::FolderPlugin::marks`]).
+    Panels(Panels),
+}
+
+/// Two connections in the two panels ([`Reply::Panels`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Panels {
+    /// A name for them in the drive selector, the path bar and the banner
+    /// (`Documents ↔ Backup`); a suffix says which side.
+    pub name: String,
+    /// The connection for the left panel.
+    pub left: Mount,
+    /// The connection for the right panel.
+    pub right: Mount,
+    /// The command the drive selector's "Refresh" runs, with `results` (the
+    /// root of `left`) in its values; empty for no such button.
+    pub refresh: String,
+}
+
+/// How an item compares with its counterpart ([`crate::FolderPlugin::marks`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemMark {
+    /// The same on both sides.
+    Same,
+    /// Different on the two sides (a folder: something inside differs).
+    Different,
+    /// Different, and this side is newer.
+    Newer,
+    /// Different, and this side is older.
+    Older,
+    /// Only on this side.
+    OnlyHere,
+    /// Only on the other side: the item stands in for it, so the two lists
+    /// line up. Copying an item of that name here asks nothing: it isn't
+    /// there.
+    Missing,
+}
+
+impl ItemMark {
+    /// Its name in the text the interface carries.
+    fn code(self) -> &'static str {
+        match self {
+            ItemMark::Same => "same",
+            ItemMark::Different => "different",
+            ItemMark::Newer => "newer",
+            ItemMark::Older => "older",
+            ItemMark::OnlyHere => "only",
+            ItemMark::Missing => "missing",
+        }
+    }
+
+    /// The mark of a name from [`ItemMark::code`].
+    fn of(code: &str) -> Option<ItemMark> {
+        [ItemMark::Same, ItemMark::Different, ItemMark::Newer, ItemMark::Older, ItemMark::OnlyHere, ItemMark::Missing].into_iter().find(|m| m.code() == code)
+    }
 }
 
 /// A results window ([`Reply::Results`]).
@@ -271,6 +328,16 @@ pub(crate) fn decode_openers(s: &str) -> Vec<Opener> {
 }
 
 /// Values as text: name and value of each.
+/// Marks as text: name and mark of each.
+pub(crate) fn encode_marks(marks: &[(String, ItemMark)]) -> String {
+    encode(&marks.iter().flat_map(|(n, m)| [n.as_str(), m.code()]).collect::<Vec<_>>())
+}
+
+/// Marks from [`encode_marks`]; unknown marks are left out.
+pub(crate) fn decode_marks(s: &str) -> Vec<(String, ItemMark)> {
+    decode(s).unwrap_or_default().as_chunks::<2>().0.iter().filter_map(|c| Some((c[0].clone(), ItemMark::of(&c[1])?))).collect()
+}
+
 pub(crate) fn encode_values(values: &Values) -> String {
     encode(&values.iter().flat_map(|(k, v)| [k.as_str(), v.as_str()]).collect::<Vec<_>>())
 }
@@ -322,6 +389,7 @@ pub(crate) fn encode_reply(r: &Reply) -> String {
         Reply::Message(text) => encode(&["message", text]),
         Reply::Mount(m) => encode(&["mount", &m.scheme, &m.authority, &m.folder]),
         Reply::Results(r) => encode(&["results", &r.title, &r.mount.scheme, &r.mount.authority, &r.mount.folder, &r.flat, &r.again, &r.name, &r.refresh]),
+        Reply::Panels(p) => encode(&["panels", &p.name, &p.left.scheme, &p.left.authority, &p.left.folder, &p.right.scheme, &p.right.authority, &p.right.folder, &p.refresh]),
         Reply::Form(f) => {
             let mut parts = vec!["form".to_owned(), f.title.clone(), f.ok.clone(), f.command.clone()];
             parts.extend(f.fields.iter().map(encode_field));
@@ -343,6 +411,12 @@ pub(crate) fn decode_reply(s: &str) -> Option<Reply> {
             flat: p.get(5)?.clone(),
             again: p.get(6)?.clone(),
             name: p.get(7)?.clone(),
+            refresh: p.get(8)?.clone(),
+        }),
+        "panels" => Reply::Panels(Panels {
+            name: p.get(1)?.clone(),
+            left: Mount { scheme: p.get(2)?.clone(), authority: p.get(3)?.clone(), folder: p.get(4)?.clone() },
+            right: Mount { scheme: p.get(5)?.clone(), authority: p.get(6)?.clone(), folder: p.get(7)?.clone() },
             refresh: p.get(8)?.clone(),
         }),
         "form" => Reply::Form(Form {
@@ -407,7 +481,17 @@ mod tests {
             again: "find".into(),
             refresh: "refresh".into(),
         });
+        let panels = Reply::Panels(Panels {
+            name: "Dokumenty ↔ Záloha".into(),
+            left: Mount { scheme: "compare".into(), authority: "1-left".into(), folder: "a\\b".into() },
+            right: Mount { scheme: "compare".into(), authority: "1-right".into(), folder: String::new() },
+            refresh: "again".into(),
+        });
+        let marks = vec![("a 🦎.txt".to_owned(), ItemMark::Newer), ("b".to_owned(), ItemMark::Missing), ("c".to_owned(), ItemMark::Same)];
+        assert_eq!(decode_marks(&encode_marks(&marks)), marks);
+        assert_eq!(decode_marks(&encode(&["x", "strange", "y", "only"])), [("y".to_owned(), ItemMark::OnlyHere)]);
         for r in [
+            panels,
             Reply::Done,
             Reply::Message("Hotovo, 🦎".into()),
             Reply::Mount(Mount { scheme: "scp".into(), authority: "me@host:22".into(), folder: "home\\me".into() }),

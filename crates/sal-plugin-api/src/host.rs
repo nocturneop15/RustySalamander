@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::abi::*;
-use crate::{Activity, Command, FolderPlugin, Index, Item, Opener, Progress, Reply, Values};
+use crate::{Activity, Command, FolderPlugin, Index, Item, ItemMark, Opener, Progress, Reply, Values};
 
 /// Who a plugin is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -260,6 +260,16 @@ impl FolderPlugin for Remote {
         let options = crate::ui::encode_values(options);
         call(|e| unsafe { (self.vt.open_file)(self.this, Str::new(opener), Wide::of(&file), Str::new(&options), e) })
     }
+
+    fn marks(&self, file: &Path, folder: &str) -> Vec<(String, ItemMark)> {
+        if !self.has(7) {
+            return Vec::new();
+        }
+        let file = Wide::encode(file);
+        let mut s = String::new();
+        unsafe { (self.vt.marks)(self.this, Wide::of(&file), Str::new(folder), &StrOut::new(&mut s)) };
+        crate::ui::decode_marks(&s)
+    }
 }
 
 #[cfg(test)]
@@ -356,6 +366,9 @@ mod tests {
         }
         fn openers(&self) -> Vec<Opener> {
             vec![Opener { id: "mem".into(), kind: crate::OpenKind::View, label: "Paměť".into(), masks: "*.mem".into() }]
+        }
+        fn marks(&self, _: &Path, folder: &str) -> Vec<(String, ItemMark)> {
+            vec![(format!("{folder} 🦎"), ItemMark::Different)]
         }
         fn open_file(&self, opener: &str, file: &Path, options: &Values) -> io::Result<()> {
             if opener != "mem" {
@@ -467,6 +480,8 @@ mod tests {
         assert!(!p.activity(&root).running);
         assert_eq!(p.real_path(&root, "složka\\日本.txt"), Some(PathBuf::from(r"D:\data\složka\日本.txt")));
         assert_eq!(p.real_path(&root, ""), None);
+        // marks of a folder's items
+        assert_eq!(p.marks(file, "složka"), [("složka 🦎".to_owned(), ItemMark::Different)]);
         // viewers and editors
         assert_eq!(p.openers()[0].masks, "*.mem");
         p.open_file("mem", Path::new(r"C:\x\a 🦎.mem"), &[("theme".to_owned(), "dark".to_owned())].into()).unwrap();

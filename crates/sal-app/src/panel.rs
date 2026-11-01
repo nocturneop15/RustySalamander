@@ -24,6 +24,9 @@ pub struct ArchiveView {
     pub file: PathBuf,
     pub inner: String,
     pub index: Arc<Index>,
+    /// How the items shown compare with their counterparts, by name (a
+    /// comparison of two folders); empty for most plugins.
+    pub marks: Arc<std::collections::HashMap<String, sal_plugin_api::ItemMark>>,
     stamp: (Option<SystemTime>, u64),
 }
 
@@ -189,11 +192,12 @@ impl Panel {
     /// the file has changed, a connection's folder every time.
     fn archive_view(&mut self, plugin: &Arc<dyn FolderPlugin>, file: &Path, inner: String) -> Result<ArchiveView, String> {
         let stamp = stamp_of(file);
+        let marks = Arc::new(plugin.marks(file, &inner).into_iter().collect());
         if let Some(v) = self.archive.as_ref().filter(|v| v.index.complete && v.file == file && v.stamp == stamp && v.plugin.id() == plugin.id()) {
-            return Ok(ArchiveView { inner, ..v.clone() });
+            return Ok(ArchiveView { inner, marks, ..v.clone() });
         }
         let index = plugin.list(file, &inner).map_err(|e| format!("{}: {e}", display_path(&file.join(&inner))))?;
-        Ok(ArchiveView { plugin: plugin.clone(), file: file.to_path_buf(), inner, index: Arc::new(index), stamp })
+        Ok(ArchiveView { plugin: plugin.clone(), file: file.to_path_buf(), inner, index: Arc::new(index), marks, stamp })
     }
 
     /// What tells a change of the shown folder: the directory itself, or the archive file.

@@ -190,6 +190,7 @@ All methods take `&self` and may be called **from several threads at once**: the
 | `commands()` | When the Plugins menu opens | The plugin's menu commands (optional; none by default). |
 | `run(command, values)` | A menu command is chosen, or a form's OK | What to show next: see below. Runs on a background thread. |
 | `close(root)` | The user disconnects, the plugin is turned off, or the program ends | Release the connection with this root. |
+| `marks(file, folder)` | When the panel lists a folder of the plugin (interface 7) | How items compare to another side: `(name, ItemMark)` pairs for the items in `folder` (optional; none by default). The program colors the rows. See [Two panels](#two-panels). |
 | `openers()` | When F3/F4 is pressed, and for Settings → Plugins | The plugin's viewers and editors (optional; none by default). |
 | `open_file(opener, file, options)` | F3/F4 on a file an opener matches | Show the file in a window of your own and return at once. See [Viewers and editors](#viewers-and-editors). |
 
@@ -214,6 +215,7 @@ A plugin can add commands to the **Plugins** menu (`commands()`), each with an i
 | `Form(form)` | Shows the form as a dialog. OK runs `form.command` with the values entered. |
 | `Mount(mount)` | Opens the connection in the active panel, at `mount.folder`. |
 | `Results(results)` | Opens a results window for the connection `results.mount`, titled `results.title`, which the plugin may still be filling (see [Results windows](#results-windows)). |
+| `Panels(panels)` | Opens two connections side by side, `panels.left` in the left panel and `panels.right` in the right (interface 7; see [Two panels](#two-panels)). |
 
 An error from `run` is shown as a message, except `Interrupted`.
 
@@ -232,10 +234,16 @@ An error from `run` is shown as a message, except `Interrupted`.
 
 `enabled_if: Some((id, value))` greys a field out unless another field has that value. For example, the SCP plugin enables its key file only when "Private key" is chosen. `Hidden` fields carry state from one form to the next. The SCP plugin's "unknown server" question carries everything entered before, plus the fingerprint the user is asked to accept.
 
-**Values.** `run` gets the form's values by field id, plus two that the program adds:
+**Values.** `run` gets the form's values by field id, plus some that the program adds:
 
 - `panel`: the active panel's path;
-- `mount`: the root of this plugin's connection shown there, if any (`sal_plugin_api::ui::mount_value`).
+- `mount`: the root of this plugin's connection shown there, if any (`sal_plugin_api::ui::mount_value`);
+- `side`: which panel is active, `left` or `right`;
+- `cursor`: the path of the item under the active panel's cursor (empty on `..`);
+- `selected`: the paths of the items selected in the active panel, as an encoded list (`sal_plugin_api::ui::decode`);
+- `other`, `other_cursor`, `other_selected`: the same for the other panel.
+
+`side` and the values after it come from interface 7; older programs don't send them, so read them with a default.
 
 **Connections.** `Reply::Mount(Mount { scheme, authority, folder })` opens a connection:
 
@@ -260,6 +268,16 @@ Three methods of `FolderPlugin` serve it; each has a default, so other plugins i
 A search runs on a thread of the plugin's own, started by `run`, which returns at once. The search plugin keeps its searches in a `Mutex<HashMap<authority, Arc<Job>>>`, with atomic counters and a `Mutex<Vec<Found>>` the search thread fills and `list` and `activity` read.
 
 **Security.** Passwords reach the plugin only in `values`; don't log them, put them in error messages, or save them (the SCP plugin saves the last server, port, user and key path, never a password). Check what a server proves about itself (the SCP plugin verifies host keys against `known_hosts` and asks before trusting a new one), and treat every name a server sends as untrusted (see [Rules and pitfalls](#rules-and-pitfalls)).
+
+### Two panels
+
+`Reply::Panels(Panels { name, left, right, refresh })` opens two connections of the plugin at once, one in each panel, for showing two things against each other (the Compare plugin shows two folders compared). The program registers both like results (listed in the drive selector and the Plugins menu under **Comparisons** by `name` plus ` (left)` or ` (right)`, with a comparison icon, **Refresh** running `refresh` with `results` set to the side's root, and **Close**), and links them. There is one such pair at a time: a new `Panels` reply first closes the pair before (both sides, whichever plugin opened it). The two are linked:
+
+- each side stays in its own panel: the drive selector offers a panel only its own side, and a side shown in the other panel is replaced by the same folder of the panel's own side;
+- going into a folder or up in one panel takes the other to the same inner path, if the other side has it (`list` may list placeholders so it does);
+- refreshing one refreshes both, and closing one closes both (each side is closed once with `close(root)`, so a plugin keeping one job behind both counts them).
+
+`marks(file, folder)` colors the rows: `Same` (no color), `Different` and `Newer`/`Older` (amber), `OnlyHere` (green) and `Missing` (grey text, no size: a placeholder for what only the other side has). Copying an item onto a `Missing` placeholder asks nothing, since nothing is really there. Marks are asked for each time the panel lists the folder, so update them when the files change (after `add`, `delete` and `mkdir`). An item whose `real_path` is `None` (a placeholder) can't be opened or copied out; `extract` should fail with a message saying why.
 
 ## Viewers and editors
 
@@ -397,7 +415,7 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 
 Commands, replies, forms and values cross the interface as text: lists of strings, each encoded as `<length>:<bytes>,` (`sal_plugin_api::ui::encode`). This way forms can gain new kinds of fields without changing the function table.
 
-**Versioning.** `abi::VERSION` is the interface version (now 6: the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
+**Versioning.** `abi::VERSION` is the interface version (now 7: item marks, `marks` in the function table, and the reply `panels`; 6 added the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
 
 ## Checklist
 

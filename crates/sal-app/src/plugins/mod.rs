@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use sal_core::location;
 use sal_plugin_api::abi::{self, Descriptor, HostApi, Str, StrOut};
 use sal_plugin_api::host::{self, Info};
-pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Reply, Results, Values};
+pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Panels, Reply, Results, Values};
 
 use crate::i18n::trf;
 
@@ -45,6 +45,8 @@ pub struct Connection {
     pub name: String,
     /// The plugin command that fills results again (`Results::refresh`).
     pub refresh: String,
+    /// One of two connections shown side by side (folders compared).
+    pub paired: bool,
 }
 
 /// Open connections, in the order they were opened.
@@ -63,7 +65,24 @@ pub fn add_mount(root: &Path, id: &str, start: &Path, results: Option<(&str, &st
         results: results.is_some(),
         name: name.to_owned(),
         refresh: refresh.to_owned(),
+        paired: false,
     });
+}
+
+/// Mark the connection `root` as one of two shown side by side.
+pub fn set_paired(root: &Path) {
+    for c in MOUNTS.lock().unwrap().iter_mut().filter(|c| c.root == root) {
+        c.paired = true;
+    }
+}
+
+/// The icon of results at `root`: a comparison's, or a search's.
+pub fn results_icon(root: &Path) -> &'static str {
+    if MOUNTS.lock().unwrap().iter().any(|c| c.root == root && c.paired) {
+        sal_ui::mdi::COMPARE_HORIZONTAL
+    } else {
+        sal_ui::mdi::MAGNIFY
+    }
 }
 
 /// Forget the connections of these plugins (turned off: stopping a plugin

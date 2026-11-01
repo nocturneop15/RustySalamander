@@ -77,6 +77,7 @@ pub const fn vtable<T: Plugin>() -> VTable {
         real_path: real_path::<T>,
         openers: openers::<T>,
         open_file: open_file::<T>,
+        marks: marks::<T>,
     }
 }
 
@@ -273,6 +274,12 @@ unsafe extern "C" fn openers<T: Plugin>(this: *mut c_void, out: *const StrOut) {
 /// [`VTable::open_file`].
 unsafe extern "C" fn open_file<T: Plugin>(this: *mut c_void, opener: Str, file: Wide, options: Str, error: *const StrOut) -> i32 {
     run(error, || me::<T>(this).open_file(opener.get(), &file.path(), &crate::ui::decode_values(options.get())))
+}
+
+/// [`VTable::marks`].
+unsafe extern "C" fn marks<T: Plugin>(this: *mut c_void, file: Wide, folder: Str, out: *const StrOut) {
+    let list = catch_unwind(|| me::<T>(this).marks(&file.path(), folder.get())).unwrap_or_default();
+    (*out).send(&crate::ui::encode_marks(&list));
 }
 
 /// [`VTable::real_path`].

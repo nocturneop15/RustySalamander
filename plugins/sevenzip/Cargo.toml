@@ -2,7 +2,7 @@
 name = "sal-plugin-7zip"
 description = "RustySalamander plugin: archives as folders through 7-Zip's library (7z.dll)"
 # the plugin's own version, apart from the program's
-version = "0.5.1-alpha"
+version = "0.5.2-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

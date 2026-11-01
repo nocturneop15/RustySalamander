@@ -70,6 +70,7 @@ plugins/scp       the SCP plugin (plugins\scp\scp.spl): SSH servers in a panel
   remote.rs       server paths, shell quoting, reading ls output
 plugins/search    the search plugin (plugins\search\search.spl): Find files, results windows
 plugins/viewer    the Viewer plugin (plugins\viewer\viewer.spl): F3 text/hex viewer in windows of its own
+plugins/compare   the Compare plugin (plugins\compare\compare.spl): files side by side, folders in both panels
   doc.rs          a file as text in an encoding, or as hex
   window.rs       the viewer windows, on a thread and event loop of the plugin's own
 plugins/*/CHANGELOG.md   each plugin's own changelog (its own versions)
@@ -189,6 +190,21 @@ The results can also be browsed in a panel, in two ways:
 
 The path bar names them by what was searched for (`🔍 *.txt "hello" · Documents (filtered folders) › docs`); `search://1/docs` is their address, shown in tooltips and accepted when typed. In both, Enter, F3 and F4 open, view and edit the real files, F5 copies the results out (in the filtered folders, with the folders between), F8 moves them to the Recycle Bin and F2 renames them. Closing the window ends the results unless a panel shows them; then they stay in the drive selector under **Searches**, by name (`🔍 *.txt "hello" · Documents (all in one list)`), with **Refresh** (the same search again) and **Close** (or Delete), until closed there or in the Plugins menu, or until the Search plugin is turned off. A new search replaces the one in the results window: the earlier results stay only where a panel shows them; a session keeps the last 10, closing the oldest.
 
+## Comparing files and folders (the Compare plugin)
+
+**Plugins → Compare** compares what is chosen in the panels: two items selected in the active panel; else the item selected in each panel; else the items under the two cursors (both files or both folders); else the two panels' folders. The left panel's is the left side. **Compare files…** and **Compare folders…** ask for the two paths in a form; the folder form also asks when files count as the same: when their size and date are (two seconds apart allowed, for FAT), or when their contents are (slower). Only files and folders on disk can be compared, not items inside archives or on servers.
+
+**Two files** open in a window of their own, side by side and lined up line by line, with line numbers. Changed lines are amber, lines only the left file has red, lines only the right file has green. The toolbar says which difference of how many is shown; **Next** and **Previous** (F8 and Shift+F8, or Alt+↓ and Alt+↑) go between them. **Ignore spaces** treats lines that differ only in spaces and tabs as the same, and **Compare again** reads the files again. Text is compared by its characters, whatever its encoding. Binary files, and files over 32 MB, show their sizes and the first byte where they differ.
+
+**Two folders** open in both panels at once, the left folder in the left panel and the right one in the right (`compare://1-left`, `compare://1-right`). Each panel lists everything either side has, so the two lists line up, and the rows are colored:
+
+- **amber:** different (a folder: something inside differs);
+- **green:** only this side has it;
+- **grey text, no size:** only the other side has it; it stands in so the lists line up;
+- **no color:** the same.
+
+Going into a folder or up in one panel takes the other panel along. Each side stays in its own panel: the drive selector offers a panel only its own side, and the other side typed or swapped into it turns into the same folder of its own side. The items are the real files: Enter, F3 and F4 open, view and edit them; F5 from one panel copies into the other side's real folder, F8 moves items to the Recycle Bin and F7 creates a folder, and the colors follow. Renaming isn't offered. **Refresh** in the drive selector, where the comparison is listed under **Comparisons**, compares again (after changes made elsewhere), and closing either side closes both, the panels going back to where they were. There is one comparison at a time: a new one closes the one before.
+
 ## Plugins
 
 Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each lives in its own folder under `plugins` next to `rustysalamander.exe`, with whatever it needs (`plugins\7zip\7zip.spl` and `7z.dll`). When the program starts, it looks at `plugins\*.spl` and `plugins\<folder>\*.spl`, so a plugin is installed by copying its folder there and removed by deleting it. Files that aren't usable plugins (not a DLL, made for another version of the interface, an id already taken) are listed in Settings with the reason. `RUSTYSALAMANDER_PLUGINS` names another plugins folder.
@@ -201,7 +217,7 @@ Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each 
 - **Viewers and editors:** any plugin can register as the viewer (F3) or editor (F4) of files whose names match its masks (`*.txt;*.log`, or `*` for all). Settings → Viewers and editors offers them as the default viewer or editor, or for a file suffix (see [Viewers and editors](#viewers-and-editors)). Settings → Plugins shows what each plugin views or edits.
 - **Versions of their own:** each plugin has its own version (Settings → Plugins shows it, with the interface it was built for) and its own releases, so a plugin is updated without a new program (see [Updates](#updates)). The program runs plugins built for its interface version or an older one it still supports.
 - **Interface:** the program and a plugin talk only through a C interface (`crates/sal-plugin-api`), so each plugin is built on its own. Each plugin brings its own language files in its `lang` folder (`plugins\7zip\lang\cs.toml`).
-- **Shipped:** the 7-Zip archive plugin, the SCP plugin, the search plugin and the Viewer plugin (the F3 viewer). `plugins/example-filelist` is a small example for plugin authors and isn't installed.
+- **Shipped:** the 7-Zip archive plugin, the SCP plugin, the search plugin, the Viewer plugin (the F3 viewer) and the Compare plugin. `plugins/example-filelist` is a small example for plugin authors and isn't installed.
 - **Writing a plugin:** see [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ## Portable mode

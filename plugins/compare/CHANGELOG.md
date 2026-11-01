@@ -1,0 +1,10 @@
+# Compare plugin: changelog
+
+The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
+
+## 0.1.0-alpha (2026-11-01)
+
+- **The first version.** Plugins → Compare compares two files or two folders: two items selected in the active panel, else the item selected in each panel, else the items under the two cursors, else the two panels' folders. **Compare files…** and **Compare folders…** ask for them in a form.
+- **Files side by side:** a window of its own shows the two texts lined up line by line, with line numbers; changed lines amber, lines only the left has red, lines only the right has green. F8 and Shift+F8 (or Alt+↓ and Alt+↑) go from one difference to the next. **Ignore spaces** treats lines differing only in spaces and tabs as the same; **Compare again** reads the files again. Texts in any encoding the viewer reads compare by their text (a UTF-8 file and the same text in UTF-16 are the same). Binary files, and files over 32 MB, show their sizes and where their bytes first differ.
+- **Folders in both panels:** the left folder opens in the left panel and the right one in the right, each listing everything either side has, so the lists line up. Items are colored: amber when they differ (folders too, when something inside differs), green when only this side has them; what only the other side has is grey, as a placeholder. Going into a folder or up in one panel takes the other along; each side stays in its own panel. Files are the same when their size and date are (two seconds apart allowed), or, chosen in the form, their contents.
+- **The real files:** copying (F5) from one side to the other, deleting (F8, to the Recycle Bin) and new folders (F7) change the real folders, and the comparison follows; Enter, F3 and F4 open, view and edit the real files. **Refresh** in the drive selector (under Comparisons) compares again. Closing either side closes both. One comparison at a time: a new one closes the one before.

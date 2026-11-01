@@ -200,12 +200,14 @@ fn pack(o: &Op, obs: &mut dyn OpObserver, file: &Path, inner: &str, sources: &[P
     o.writable(file)?;
     // a connection always exists; an archive may be created by this copy
     let ix = if file.exists() || sal_core::location::virtual_parts(file).is_some() { o.index(file, inner)? } else { Index::default() };
+    // placeholders for what only another side has (folders compared) are not there
+    let placeholders: Vec<String> = o.plugin.marks(file, inner).into_iter().filter(|(_, m)| *m == sal_plugin_api::ItemMark::Missing).map(|(n, _)| n).collect();
     let (mut overwrite_all, mut skip_all) = (false, false);
     let mut chosen = Vec::new();
     for s in sources {
         let name = s.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let at = super::join_inner(inner, &name);
-        if !overwrite_all && ix.exists(&at) {
+        if !overwrite_all && ix.exists(&at) && !placeholders.contains(&name) {
             let action = if skip_all { ConflictAction::Skip } else { obs.conflict(s, &file.join(&at)) };
             match action {
                 ConflictAction::Overwrite => {}

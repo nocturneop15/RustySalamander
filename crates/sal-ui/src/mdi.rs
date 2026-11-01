@@ -56,6 +56,7 @@ pub const DOTS_HORIZONTAL: &str = "\u{F01D8}";
 
 // marks
 pub const MAGNIFY: &str = "\u{F0349}";
+pub const COMPARE_HORIZONTAL: &str = "\u{F1492}";
 pub const PUZZLE_OUTLINE: &str = "\u{F0A66}";
 pub const MENU_UP: &str = "\u{F0360}";
 pub const MENU_DOWN: &str = "\u{F035D}";
