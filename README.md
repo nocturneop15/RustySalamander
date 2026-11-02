@@ -8,6 +8,7 @@ The original is ~1.3 million lines of ANSI C++ (`char*` + `MAX_PATH`), so files 
 
 Documentation:
 
+- [docs/USER-MANUAL.md](docs/USER-MANUAL.md): **the user manual**: everyday use, every setting, menu and key
 - [docs/PLUGINS.md](docs/PLUGINS.md): writing plugins
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing and contributing
 - [docs/ANALYSIS.md](docs/ANALYSIS.md): the original code and the rewrite plan
