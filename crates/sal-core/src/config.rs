@@ -131,6 +131,8 @@ pub enum ContextMenuStyle {
     /// Compact Windows 11 style menu with "Show more options".
     #[default]
     Windows11,
+    /// The Windows 11 style commands and every shell extension in one menu.
+    Windows11Full,
     /// The full classic shell menu (Windows 10 style, all shell extensions).
     Classic,
 }
@@ -216,6 +218,9 @@ pub struct Config {
     pub accent_color: Option<[u8; 3]>,
     /// The function-key command bar at the bottom of the window.
     pub show_fkey_bar: bool,
+    /// The commands on the function-key bar, by shortcut action id
+    /// ("copy", "find", …); `None` for the default F1…F10 set.
+    pub fkey_bar: Option<Vec<String>>,
     /// Windows file icons by type (otherwise simple drawn icons).
     pub system_icons: bool,
     pub context_menu_trigger: ContextMenuTrigger,
@@ -273,6 +278,7 @@ impl Default for Config {
             accent_dark: None,
             accent_color: None,
             show_fkey_bar: true,
+            fkey_bar: None,
             system_icons: true,
             context_menu_trigger: ContextMenuTrigger::ShortClick,
             context_menu_style: ContextMenuStyle::Windows11,

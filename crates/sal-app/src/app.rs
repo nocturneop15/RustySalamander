@@ -27,7 +27,7 @@ use crate::keymap::{self, Action, Section};
 use crate::panel::Panel;
 use crate::plugins::ops::{FolderOp, OpenAs};
 use crate::plugins::{self, FolderPlugin, Plugins};
-use crate::shellmenu::{self, Picked};
+use crate::shellmenu::{self, Merged, Picked};
 use crate::shortcut::{key_letter, Shortcut};
 use crate::worker::{format_duration, Job, JobKind, Jobs, Placement, PluginRef, Prompt, Reply};
 use sal_plugin_api::{OpenKind, Opener};
@@ -78,6 +78,11 @@ enum Cmd {
     DriveMenu(usize),
     Terminal,
     CopyPaths,
+    /// The selected items (or the cursor item) on the clipboard, to copy
+    /// or (`true`) to move, as Explorer's Ctrl+C / Ctrl+X do.
+    ClipboardPut(bool),
+    /// Files on the clipboard pasted into the panel's folder (Ctrl+V).
+    ClipboardPaste,
     History(bool),
     HotPathGo(usize),
     HotPathSet(usize),
@@ -218,6 +223,9 @@ fn action_cmd(a: Action) -> Cmd {
         Action::SelectCalcSize => Cmd::SelectCalcSize,
         Action::SwapPanels => Cmd::SwapPanels,
         Action::CopyPaths => Cmd::CopyPaths,
+        Action::ClipboardCopy => Cmd::ClipboardPut(false),
+        Action::ClipboardCut => Cmd::ClipboardPut(true),
+        Action::ClipboardPaste => Cmd::ClipboardPaste,
         Action::Find => Cmd::Find,
         Action::SortName => Cmd::Sort(SortKey::Name),
         Action::SortExt => Cmd::Sort(SortKey::Ext),
@@ -275,10 +283,22 @@ impl DriveConn {
     }
 }
 
+/// What was clicked in a list of connections beside the drive buttons.
+#[derive(Debug, Clone, PartialEq)]
+enum ConnPick {
+    /// Go there: (start, root).
+    Open(PathBuf, PathBuf),
+    /// Fill the results again: (plugin id, root, command).
+    Refresh(String, PathBuf, String),
+    /// Disconnect, or close the results: root.
+    Close(PathBuf),
+}
+
 /// A drop-down list of connections beside the drive buttons: a button with
 /// `icon` (selected when the panel is in one of them) opening the list;
-/// nothing when there are none. The (start, root) of the one picked.
-fn connection_list(ui: &mut egui::Ui, salt: (&str, usize), icon: &str, color: Color32, tip: &str, list: &[plugins::Connection], here: &Path) -> Option<(PathBuf, PathBuf)> {
+/// nothing when there are none. Each row has the drive selector's buttons:
+/// Disconnect for a server, Refresh (when it can) and Close for results.
+fn connection_list(ui: &mut egui::Ui, salt: (&str, usize), icon: &str, color: Color32, tip: &str, list: &[plugins::Connection], here: &Path) -> Option<ConnPick> {
     if list.is_empty() {
         return None;
     }
@@ -292,12 +312,26 @@ fn connection_list(ui: &mut egui::Ui, salt: (&str, usize), icon: &str, color: Co
     let mut picked = None;
     egui::popup_below_widget(ui, popup, &button, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(220.0);
-        for c in list {
-            let label = if c.name.is_empty() { display_path(&c.root).trim_end_matches('/').to_owned() } else { c.name.clone() };
-            if ui.selectable_label(here.starts_with(&c.root), label).clicked() {
-                picked = Some((c.start.clone(), c.root.clone()));
+        // name | Refresh | Close or Disconnect, the buttons in columns
+        egui::Grid::new((salt, "rows")).num_columns(3).spacing([6.0, 4.0]).show(ui, |ui| {
+            for c in list {
+                let label = if c.name.is_empty() { display_path(&c.root).trim_end_matches('/').to_owned() } else { c.name.clone() };
+                let row_tip = display_path(&c.start).trim_end_matches('/').to_owned();
+                if ui.selectable_label(here.starts_with(&c.root), label).on_hover_text(row_tip).clicked() {
+                    picked = Some(ConnPick::Open(c.start.clone(), c.root.clone()));
+                }
+                if c.refresh.is_empty() {
+                    ui.label("");
+                } else if ui.small_button(tr("Refresh")).on_hover_text(tr("Search again with the same settings")).clicked() {
+                    picked = Some(ConnPick::Refresh(c.plugin.clone(), c.root.clone(), c.refresh.clone()));
+                }
+                let (close, close_tip) = if c.results { (tr("Close"), tr("Close these results")) } else { (tr("Disconnect"), tr("Close this connection")) };
+                if ui.small_button(close).on_hover_text(close_tip).clicked() {
+                    picked = Some(ConnPick::Close(c.root.clone()));
+                }
+                ui.end_row();
             }
-        }
+        });
     });
     picked
 }
@@ -396,13 +430,20 @@ pub struct App {
     /// ([`JOB_DONE_SHOWN`]) instead of "No operations running".
     job_done: Option<(String, Instant)>,
     ctx_menu: Option<CtxMenu>,
+    /// When the SAL_DIAG_SEARCH diagnostics started their search.
+    diag_since: Option<Instant>,
+    /// Whether Windows animates the main window (minimizing, closing), as
+    /// last set: it follows the Animations setting.
+    transitions: Option<bool>,
     rmb: Option<RightPress>,
     /// Row rectangles of the last frame (screen points), per panel.
     row_hits: [Vec<(egui::Rect, usize)>; 2],
     /// File list area of each panel.
     body_rects: [egui::Rect; 2],
-    /// Width each panel's table was laid out for.
-    table_widths: [f32; 2],
+    /// Each panel's Ext, Size and Date widths (the user may drag them).
+    col_widths: [Option<[f32; 3]>; 2],
+    /// Each panel's column headers as last drawn (Name, Ext, Size, Date, Attr).
+    header_rects: [Vec<egui::Rect>; 2],
     /// Free space of the panels' drives, read in the background.
     free: crate::freespace::FreeSpace,
 }
@@ -668,10 +709,13 @@ impl App {
             hwnd: None,
             job_done: None,
             ctx_menu: None,
+            diag_since: None,
+            transitions: None,
             rmb: None,
             row_hits: [Vec::new(), Vec::new()],
             body_rects: [egui::Rect::NOTHING; 2],
-            table_widths: [0.0; 2],
+            col_widths: [None; 2],
+            header_rects: [Vec::new(), Vec::new()],
             free: Default::default(),
         }
     }
@@ -1246,7 +1290,7 @@ impl App {
     fn open_dialog(&mut self, d: Dialog) {
         // a new dialog window opens centred on the main window again; the
         // windows of running operations stay as they are
-        dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !JOB_WINDOWS.contains(&k));
+        dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !OWN_WINDOWS.contains(&k));
         self.dialog = d;
         self.focus_dialog = true;
     }
@@ -1417,34 +1461,63 @@ impl App {
         match (self.cfg.context_menu_style, self.hwnd) {
             (ContextMenuStyle::Classic, _) => self.show_classic(ctx, menu.items, menu.dir, pos, from_mouse),
             (ContextMenuStyle::Windows11, Some(h)) => {
-                let (top, rows) = self.menu_model(&menu);
-                let mut actions = Vec::new();
-                let mut native = Vec::new();
-                let mut add = |e: &ctxmenu::Entry, native: &mut Vec<Option<(u32, String, String, bool)>>| {
-                    actions.push(e.action);
-                    native.push(Some((actions.len() as u32, e.label.clone(), e.shortcut.clone(), e.enabled)));
-                };
-                for e in &top {
-                    add(e, &mut native);
-                }
-                if !top.is_empty() {
-                    native.push(None);
-                }
-                for row in &rows {
-                    match row {
-                        ctxmenu::Row::Entry(e) => add(e, &mut native),
-                        ctxmenu::Row::Separator => native.push(None),
-                    }
-                }
+                let (actions, native) = self.native_rows(&menu, false);
                 let at = self.menu_point(ctx, h, pos, from_mouse);
                 let id = shellmenu::show_native(h, &native, at);
                 if id > 0 {
                     self.run_menu_action(ctx, menu, actions[id as usize - 1]);
                 }
             }
+            (ContextMenuStyle::Windows11Full, Some(h)) => {
+                let (actions, native) = self.native_rows(&menu, true);
+                let at = self.menu_point(ctx, h, pos, from_mouse);
+                let targets = if menu.items.is_empty() { vec![menu.dir.clone()] } else { menu.items.clone() };
+                // the shell's copies of what our part already has
+                let skip: &[&str] = if menu.items.is_empty() {
+                    &["paste", "properties"]
+                } else {
+                    &["open", "openas", "cut", "copy", "paste", "delete", "rename", "properties", "copyaspath"]
+                };
+                let extended = ctx.input(|i| i.modifiers.shift);
+                match shellmenu::show_merged(h, &native, &targets, &menu.dir, at, extended, skip) {
+                    Ok(Merged::Ours(id)) => self.run_menu_action(ctx, menu, actions[id as usize - 1]),
+                    Ok(Merged::Shell(picked)) => self.shell_picked(ctx, Ok(picked), menu.items, targets),
+                    Err(e) => self.error(e),
+                }
+            }
             // no native window (tests): the menu drawn by the app
-            (ContextMenuStyle::Windows11, None) => self.ctx_menu = Some(menu),
+            (ContextMenuStyle::Windows11 | ContextMenuStyle::Windows11Full, None) => self.ctx_menu = Some(menu),
         }
+    }
+
+    /// The Windows 11 style menu as native menu rows (ids from 1) and the
+    /// action of each id; `full`: without "Show more options", for the menu
+    /// that has the shell's items below.
+    fn native_rows(&self, menu: &CtxMenu, full: bool) -> (Vec<MenuAction>, Vec<shellmenu::NativeRow>) {
+        let (top, rows) = self.menu_model(menu);
+        let mut actions = Vec::new();
+        let mut native = Vec::new();
+        let mut add = |e: &ctxmenu::Entry, native: &mut Vec<shellmenu::NativeRow>| {
+            actions.push(e.action);
+            native.push(Some((actions.len() as u32, e.label.clone(), e.shortcut.clone(), e.enabled)));
+        };
+        for e in &top {
+            add(e, &mut native);
+        }
+        if !top.is_empty() {
+            native.push(None);
+        }
+        for row in &rows {
+            match row {
+                ctxmenu::Row::Entry(e) if full && e.action == MenuAction::MoreOptions => {}
+                ctxmenu::Row::Entry(e) => add(e, &mut native),
+                ctxmenu::Row::Separator => native.push(None),
+            }
+        }
+        while native.last().is_some_and(Option::is_none) {
+            native.pop();
+        }
+        (actions, native)
     }
 
     /// Where a context menu opens, in screen pixels: at the mouse, or at the
@@ -1467,7 +1540,14 @@ impl App {
         let targets = if items.is_empty() { vec![dir.clone()] } else { items.clone() };
         let at = self.menu_point(ctx, h, pos, from_mouse);
         let extended = ctx.input(|i| i.modifiers.shift);
-        match shellmenu::show_classic(h, &targets, &dir, at, extended) {
+        let picked = shellmenu::show_classic(h, &targets, &dir, at, extended);
+        self.shell_picked(ctx, picked, items, targets);
+    }
+
+    /// Do what was picked among the shell's items: rename and delete are
+    /// the panel's own, whatever the shell ran may have changed sizes.
+    fn shell_picked(&mut self, ctx: &egui::Context, picked: Result<Picked, String>, items: Vec<PathBuf>, targets: Vec<PathBuf>) {
+        match picked {
             Ok(Picked::Rename) if items.len() == 1 => {
                 let name = items[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.open_dialog(Dialog::Rename { path: items[0].clone(), name });
@@ -1491,9 +1571,9 @@ impl App {
         let single_file = n == 1 && kinds[0] == EntryKind::File;
         let single_dir = n == 1 && kinds[0] == EntryKind::Dir;
         if n > 0 {
-            let mut top = vec![entry(MenuAction::Cut, tr("Cut"), "Ctrl+X".into(), true), entry(MenuAction::Copy, tr("Copy"), "Ctrl+C".into(), true)];
+            let mut top = vec![entry(MenuAction::Cut, tr("Cut"), key(Cmd::ClipboardPut(true)), true), entry(MenuAction::Copy, tr("Copy"), key(Cmd::ClipboardPut(false)), true)];
             if menu.can_paste && single_dir {
-                top.push(entry(MenuAction::Paste, tr("Paste into folder"), "Ctrl+V".into(), true));
+                top.push(entry(MenuAction::Paste, tr("Paste into folder"), key(Cmd::ClipboardPaste), true));
             }
             top.push(entry(MenuAction::Rename, tr("Rename"), key(Cmd::Rename), n == 1));
             top.push(entry(MenuAction::Delete, tr("Delete"), key(Cmd::Delete { permanent: false }), true));
@@ -1516,11 +1596,11 @@ impl App {
         } else {
             let mut top = Vec::new();
             if menu.can_paste {
-                top.push(entry(MenuAction::Paste, tr("Paste"), "Ctrl+V".into(), true));
+                top.push(entry(MenuAction::Paste, tr("Paste"), key(Cmd::ClipboardPaste), true));
             }
             let rows = vec![
                 ctxmenu::Row::Entry(entry(MenuAction::NewFolder, tr("New folder"), key(Cmd::MkDir), true)),
-                ctxmenu::Row::Entry(entry(MenuAction::Paste, tr("Paste"), "Ctrl+V".into(), menu.can_paste)),
+                ctxmenu::Row::Entry(entry(MenuAction::Paste, tr("Paste"), key(Cmd::ClipboardPaste), menu.can_paste)),
                 ctxmenu::Row::Entry(entry(MenuAction::Refresh, tr("Refresh"), key(Cmd::Refresh), true)),
                 ctxmenu::Row::Entry(entry(MenuAction::SelectAll, tr("Select all"), key(Cmd::SelectAll), true)),
                 ctxmenu::Row::Separator,
@@ -2036,6 +2116,24 @@ impl App {
                 }
                 Ok(())
             }
+            Cmd::ClipboardPut(_) | Cmd::ClipboardPaste if self.act().archive.is_some() => Err(tr("The clipboard isn't available in plugin panels.").into()),
+            Cmd::ClipboardPut(cut) => {
+                let items = self.act().targets();
+                if items.is_empty() {
+                    return;
+                }
+                let dir = self.act().path().to_path_buf();
+                self.shell_verb(&items, &dir, if cut { "cut" } else { "copy" }).map(|()| {
+                    let what = plural(items.len(), "item");
+                    self.status = if cut { trf("{items} cut to the clipboard", &[("items", &what)]) } else { trf("{items} copied to the clipboard", &[("items", &what)]) };
+                })
+            }
+            Cmd::ClipboardPaste => {
+                let dir = self.act().path().to_path_buf();
+                let r = self.shell_verb(std::slice::from_ref(&dir), &dir, "paste");
+                self.dir_sizes.clear();
+                r
+            }
             Cmd::HotPathSet(n) => {
                 self.cfg.hot_paths[n] = display_path(self.panels[self.active].path());
                 self.status = trf("Hot path {n} set to {path}", &[("n", &n), ("path", &self.cfg.hot_paths[n])]);
@@ -2059,8 +2157,10 @@ impl App {
     // ---------------------------------------------------------------- keyboard
 
     /// This frame's key presses and typed text, when no dialog has them.
-    fn handle_keys(&mut self, ctx: &egui::Context) {
-        let events = ctx.input(|i| i.events.clone());
+    fn handle_keys(&mut self, ctx: &egui::Context, raw: Vec<(Key, Modifiers)>) {
+        // the keys egui turns into clipboard events (see rawkeys), as keys
+        let mut events: Vec<Event> = raw.into_iter().map(|(key, modifiers)| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }).collect();
+        events.extend(ctx.input(|i| i.events.clone()));
         for ev in events {
             match ev {
                 Event::Key { key, pressed: true, modifiers, .. } => self.on_key(ctx, key, modifiers),
@@ -2210,7 +2310,7 @@ impl App {
         let mut drive_clicked = false;
         let mut drive_picked: Option<PathBuf> = None;
         // a server session or search picked beside the drive buttons: (start, root)
-        let mut conn_picked: Option<(PathBuf, PathBuf)> = None;
+        let mut conn_picked: Option<ConnPick> = None;
         let mut compare_picked = false;
         let drive_list = self.cached_drives().to_vec();
         let show_all = self.cfg.drive_buttons == DriveButtons::All;
@@ -2420,10 +2520,26 @@ impl App {
         let qs_anywhere = self.cfg.quick_search_anywhere;
         let entries = &panel.listing.entries;
         let width = ui.available_width();
-        // egui_extras keeps column widths between frames and won't shrink them
-        // when the panel gets narrower: lay the columns out again on a resize
-        let relayout = (width - self.table_widths[idx]).abs() > 0.5;
-        self.table_widths[idx] = width;
+        // the columns, packed against the right edge: Attr exactly as wide as all
+        // its letters (or its title), Ext three letters to start with, Size and
+        // Date at their usual widths (scaled down in a narrow panel). Ext, Size
+        // and Date keep the widths the user drags them to; Name always takes the
+        // rest, so there is never room left over after the columns
+        let name_min = (width * 0.3).min(120.0);
+        let gap = ui.spacing().item_spacing.x;
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let text_w = |s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x).ceil() + 2.0;
+        let titled = |title: &str| text_w(&format!("{title} {}", sal_ui::mdi::MENU_DOWN));
+        let attr_w = text_w("RHSACE").max(titled(tr("Attr")));
+        let ext_w = text_w("www").max(titled(tr("Ext")));
+        let room = width - gap * 4.0 - ui.spacing().scroll.allocated_width() - 4.0 - name_min - attr_w;
+        let mins = [(ext_w / 3.0).ceil(), 40.0, 40.0];
+        let k = ((room - ext_w) / (95.0 + 120.0)).clamp(0.2, 1.0);
+        let defaults = [ext_w, (95.0 * k).max(mins[1]), (120.0 * k).max(mins[2])];
+        // the user's widths while they fit, else the usual ones
+        let widths = self.col_widths[idx].filter(|w| w.iter().sum::<f32>() <= room).unwrap_or(defaults);
+        self.col_widths[idx] = Some(widths);
+        let mut header_rects = Vec::new();
 
         let mut row_hits = Vec::new();
         let body =
@@ -2433,28 +2549,22 @@ impl App {
                 let solid_bars = !ui.style().spacing.scroll.floating;
                 ui.push_id((idx, solid_bars), |ui| {
                     let bars = scroll_bar_visibility(ui);
-                    // Ext, Size, Date, Attr at their usual widths when there is room,
-                    // scaled down in a narrow panel so the table never overflows it
-                    let name_min = (width * 0.3).min(120.0);
-                    let gaps = ui.spacing().item_spacing.x * 5.0 + ui.spacing().scroll.allocated_width() + 4.0;
-                    let k = ((width - gaps - name_min) / (55.0 + 95.0 + 120.0 + 42.0)).clamp(0.2, 1.0);
-                    let fixed = |w: f32, min: f32| Column::initial(w * k).at_least(min.min(w * k)).clip(true);
+                    // exact widths, none resizable by egui_extras: it can only move a
+                    // column's right edge, and Name (the remainder, on the left)
+                    // would push that edge back. The edges are dragged below instead
                     let mut tb = TableBuilder::new(ui)
                         .scroll_bar_visibility(bars)
                         .striped(true)
-                        .resizable(true)
+                        .resizable(false)
                         .auto_shrink([false, false])
                         .sense(Sense::click())
                         .max_scroll_height(body_h)
                         .cell_layout(Layout::left_to_right(Align::Center))
                         .column(Column::remainder().at_least(name_min).clip(true))
-                        .column(fixed(55.0, 30.0))
-                        .column(fixed(95.0, 40.0))
-                        .column(fixed(120.0, 40.0))
-                        .column(fixed(42.0, 20.0));
-                    if relayout {
-                        tb.reset();
-                    }
+                        .column(Column::exact(widths[0]).clip(true))
+                        .column(Column::exact(widths[1]).clip(true))
+                        .column(Column::exact(widths[2]).clip(true))
+                        .column(Column::exact(attr_w));
                     if let Some(r) = scroll_to {
                         tb = tb.scroll_to_row(r, None);
                     }
@@ -2463,7 +2573,10 @@ impl App {
                             [(SortKey::Name, tr("Name")), (SortKey::Ext, tr("Ext")), (SortKey::Size, tr("Size")), (SortKey::Time, tr("Date")), (SortKey::Attr, tr("Attr"))]
                         {
                             // the whole cell sorts, not only its title
+                            let mut column = egui::Rect::NOTHING;
                             let (_, cell) = h.col(|ui| {
+                                // the column's own room (the response's rect is wider)
+                                column = ui.max_rect();
                                 let arrow = if sort.key == key {
                                     if sort.reverse {
                                         sal_ui::mdi::MENU_UP
@@ -2475,6 +2588,7 @@ impl App {
                                 };
                                 ui.add(egui::Label::new(RichText::new(format!("{title} {arrow}")).strong()).selectable(false));
                             });
+                            header_rects.push(column);
                             if cell.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                 sort_click = Some(key);
                             }
@@ -2621,6 +2735,35 @@ impl App {
             ui.painter().text(r.center_top() + egui::vec2(0.0, row_h * 2.0), egui::Align2::CENTER_CENTER, tr("Loading…"), egui::TextStyle::Body.resolve(ui.style()), weak);
         }
         self.row_hits[idx] = row_hits;
+        // the left edges of Ext, Size and Date, dragged in the header: the column
+        // on the right gets wider or narrower, Name the other way
+        if header_rects.len() == 5 {
+            // a divider after every column, from the header down through the list
+            // (as egui_extras draws them for resizable columns)
+            let full = header_rects[0].top()..=body.response.rect.bottom();
+            for r in &header_rects {
+                ui.painter().vline(r.right() + gap / 2.0, full.clone(), ui.visuals().widgets.noninteractive.bg_stroke);
+            }
+            let mut widths = widths;
+            for c in 1..=3 {
+                let x = header_rects[c].left() - gap / 2.0;
+                let grab = ui.style().interaction.resize_grab_radius_side;
+                let line = egui::Rect::from_min_max(egui::pos2(x - grab, header_rects[c].top()), egui::pos2(x + grab, header_rects[c].bottom()));
+                let r = ui.interact(line, ui.id().with(("column_edge", idx, c)), Sense::drag());
+                if r.hovered() || r.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                    let stroke = if r.dragged() { ui.visuals().widgets.active.bg_stroke } else { ui.visuals().widgets.hovered.bg_stroke };
+                    ui.painter().vline(x, full.clone(), stroke);
+                }
+                if r.dragged() {
+                    let name_spare = (header_rects[0].width() - name_min).max(0.0);
+                    let dx = r.drag_delta().x;
+                    widths[c - 1] = (widths[c - 1] - dx).clamp(mins[c - 1], (widths[c - 1] + name_spare).max(mins[c - 1]));
+                }
+            }
+            self.col_widths[idx] = Some(widths);
+            self.header_rects[idx] = header_rects;
+        }
         if let Some(text) = banner {
             let fill = plugin_tint(ui.visuals()).gamma_multiply(2.5);
             egui::Frame::none().fill(fill).inner_margin(egui::Margin::symmetric(6.0, 1.0)).show(ui, |ui| {
@@ -2743,12 +2886,22 @@ impl App {
                 self.error(e);
             }
         }
-        if let Some((start, root)) = conn_picked {
-            self.active = idx;
-            let hidden = self.vis();
-            if let Err(e) = self.panels[idx].load(&start, hidden, None).or_else(|_| self.panels[idx].load(&root, hidden, None)) {
-                self.error(e);
+        match conn_picked {
+            Some(ConnPick::Open(start, root)) => {
+                self.active = idx;
+                let hidden = self.vis();
+                if let Err(e) = self.panels[idx].load(&start, hidden, None).or_else(|_| self.panels[idx].load(&root, hidden, None)) {
+                    self.error(e);
+                }
             }
+            Some(ConnPick::Refresh(id, root, command)) => {
+                if let Some(plugin) = self.plugins.get(&id).cloned() {
+                    let ctx = ui.ctx().clone();
+                    self.refresh_results(&ctx, plugin, &root, command);
+                }
+            }
+            Some(ConnPick::Close(root)) => self.close_connection(&root),
+            None => {}
         }
         if compare_picked {
             self.active = idx;
@@ -2789,7 +2942,7 @@ impl App {
         }
         let focus = std::mem::take(&mut self.focus_dialog);
         if matches!(dialog, Dialog::None) {
-            dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !JOB_WINDOWS.contains(&k));
+            dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !OWN_WINDOWS.contains(&k));
         }
         let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
         // dialog windows are sized from the main window, not from themselves
@@ -3292,7 +3445,7 @@ impl App {
                 let font_filter = &mut self.font_filter;
                 let mut captured = false;
                 // fixed width: the scroll areas inside take all the width they are given
-                dw.with_icon(sal_ui::icon::settings).show(ctx, &mut self.dialog_places, "settings", tr("Settings"), 860.0, &mut enter, &mut escape, &mut |ui| {
+                dw.with_icon(sal_ui::icon::settings).modal().show(ctx, &mut self.dialog_places, "settings", tr("Settings"), 860.0, &mut enter, &mut escape, &mut |ui| {
                     if let Some(action) = *recording {
                         // capture the next key combination; Esc cancels
                         let pressed = ui.input(|i| {
@@ -3354,43 +3507,6 @@ impl App {
                                     });
                                     ui.end_row();
 
-                                    ui.label(tr("Font size"));
-                                    // applying while dragging would resize the dialog and move the
-                                    // slider under the pointer: apply when the drag ends (clicks and
-                                    // arrow keys still apply at once)
-                                    let r = ui.add(egui::Slider::new(&mut cfg.font_size, 10.0..=24.0).step_by(1.0).suffix(" pt"));
-                                    slider_rect = Some(r.rect);
-                                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                                        apply_font_size(ctx, cfg.font_size);
-                                    }
-                                    ui.end_row();
-
-                                    ui.label(tr("Font"));
-                                    let (changed, rect) = font_picker(ui, "ui_font", &mut cfg.ui_font, crate::fonts::DEFAULT_UI_FONT, font_list, font_filter);
-                                    fonts_changed |= changed;
-                                    font_button_rect = Some(rect);
-                                    ui.end_row();
-
-                                    ui.label(tr("Viewer font"));
-                                    fonts_changed |= font_picker(ui, "mono_font", &mut cfg.mono_font, crate::fonts::DEFAULT_MONO_FONT, font_list, font_filter).0;
-                                    ui.end_row();
-
-                                    ui.label(tr("File icons"));
-                                    ui.checkbox(&mut cfg.system_icons, tr(LBL_ICONS));
-                                    ui.end_row();
-
-                                    ui.label(tr("Layout"));
-                                    ui.vertical(|ui| {
-                                        if ui.checkbox(&mut cfg.always_show_scrollbars, tr(LBL_SCROLLBARS)).changed() {
-                                            sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
-                                        }
-                                        if ui.checkbox(&mut cfg.animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
-                                            sal_ui::apply_animations(ctx, cfg.animations);
-                                        }
-                                        ui.checkbox(&mut cfg.show_fkey_bar, tr(LBL_FKEYS));
-                                    });
-                                    ui.end_row();
-
                                     ui.label(tr("Accent color")).on_hover_text(tr("The color of what is selected or active: the cursor, the active path bar, selected tabs and buttons; panels a plugin shows are tinted with it"));
                                     ui.vertical(|ui| {
                                         let before = (cfg.accent_light, cfg.accent_dark);
@@ -3403,6 +3519,43 @@ impl App {
                                         if (cfg.accent_light, cfg.accent_dark) != before {
                                             sal_ui::apply_accent(ctx, cfg.accent_light, cfg.accent_dark);
                                         }
+                                    });
+                                    ui.end_row();
+
+                                    ui.label(tr("Font"));
+                                    let (changed, rect) = font_picker(ui, "ui_font", &mut cfg.ui_font, crate::fonts::DEFAULT_UI_FONT, font_list, font_filter);
+                                    fonts_changed |= changed;
+                                    font_button_rect = Some(rect);
+                                    ui.end_row();
+
+                                    ui.label(tr("Font size"));
+                                    // applying while dragging would resize the dialog and move the
+                                    // slider under the pointer: apply when the drag ends (clicks and
+                                    // arrow keys still apply at once)
+                                    let r = ui.add(egui::Slider::new(&mut cfg.font_size, 10.0..=24.0).step_by(1.0).suffix(" pt"));
+                                    slider_rect = Some(r.rect);
+                                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                                        apply_font_size(ctx, cfg.font_size);
+                                    }
+                                    ui.end_row();
+
+                                    ui.label(tr("Viewer font"));
+                                    fonts_changed |= font_picker(ui, "mono_font", &mut cfg.mono_font, crate::fonts::DEFAULT_MONO_FONT, font_list, font_filter).0;
+                                    ui.end_row();
+
+                                    ui.label(tr("File icons"));
+                                    ui.checkbox(&mut cfg.system_icons, tr(LBL_ICONS));
+                                    ui.end_row();
+
+                                    ui.label(tr("Misc"));
+                                    ui.vertical(|ui| {
+                                        if ui.checkbox(&mut cfg.always_show_scrollbars, tr(LBL_SCROLLBARS)).changed() {
+                                            sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
+                                        }
+                                        if ui.checkbox(&mut cfg.animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
+                                            sal_ui::apply_animations(ctx, cfg.animations);
+                                        }
+                                        ui.checkbox(&mut cfg.show_fkey_bar, tr(LBL_FKEYS));
                                     });
                                     ui.end_row();
                                 });
@@ -3487,6 +3640,11 @@ impl App {
                                             &mut cfg.context_menu_style,
                                             ContextMenuStyle::Windows11,
                                             tr("Windows 11 (compact native menu, \"Show more options\" for the full one)"),
+                                        );
+                                        ui.radio_value(
+                                            &mut cfg.context_menu_style,
+                                            ContextMenuStyle::Windows11Full,
+                                            tr("Windows 11, full (the compact menu's commands with all shell extensions below them)"),
                                         );
                                         ui.radio_value(&mut cfg.context_menu_style, ContextMenuStyle::Classic, tr("Classic system menu (Windows 10 style, all shell extensions)"));
                                     });
@@ -3714,15 +3872,20 @@ impl App {
                                         ui.label(RichText::new(tr(section.label())).size(ui.text_style_height(&egui::TextStyle::Body) * 1.15).strong());
                                         ui.label(RichText::new(tr(section.description())).small().weak());
                                         ui.separator();
+                                        let bar = keymap::bar_actions(&cfg.shortcuts, cfg.fkey_bar.as_deref());
                                         egui::Grid::new(("keymap", section.label())).striped(true).num_columns(3).spacing([12.0, 6.0]).min_col_width(200.0).show(ui, |ui| {
-                                            ui.label(RichText::new(tr("Command")).small().weak());
+                                            ui.label(RichText::new(tr("Command")).small().weak())
+                                                .on_hover_text(tr("Tick a command to give it a button on the function key bar, labelled with its first shortcut"));
                                             ui.label(RichText::new(tr("Preset")).small().weak());
                                             ui.label(RichText::new(tr("Shortcuts (click to remove)")).small().weak());
                                             ui.end_row();
                                             for a in section.actions() {
                                                 let info = a.info();
                                                 let cur = keymap::bindings(&cfg.shortcuts, a);
-                                                ui.label(tr(info.label));
+                                                let mut on = bar.contains(&a);
+                                                if ui.checkbox(&mut on, tr(info.label)).on_hover_text(tr("Show on the function key bar")).changed() {
+                                                    keymap::set_in_bar(&mut cfg.fkey_bar, a, on);
+                                                }
                                                 let preset = keymap::preset_label(&cfg.shortcuts, a);
                                                 egui::ComboBox::from_id_salt(("preset", info.id)).width(210.0).truncate().selected_text(preset.clone()).show_ui(ui, |ui| {
                                                     for (label, set) in keymap::presets(a) {
@@ -3790,10 +3953,15 @@ impl App {
                                 }
                             });
                             ui.add_space(4.0);
-                            if ui.button(tr("Reset all shortcuts to defaults")).clicked() {
-                                edit = Some(KeyEdit::ResetAll);
-                            }
-                            ui.small(tr("Configured shortcuts take precedence over fixed keys."));
+                            ui.horizontal(|ui| {
+                                if ui.button(tr("Reset all shortcuts to defaults")).clicked() {
+                                    edit = Some(KeyEdit::ResetAll);
+                                }
+                                if ui.add_enabled(cfg.fkey_bar.is_some(), egui::Button::new(tr("Reset function key bar"))).clicked() {
+                                    cfg.fkey_bar = None;
+                                }
+                            });
+                            ui.small(tr("Configured shortcuts take precedence over fixed keys. Ticked commands have a button on the function key bar."));
                         }
                     }
                     ui.add_space(6.0);
@@ -4553,25 +4721,29 @@ impl App {
         }
     }
 
-    /// The function-key buttons at the bottom (F1 … F10).
+    /// The function-key buttons at the bottom: the commands ticked in
+    /// Settings → Keyboard shortcuts (F1 … F10 by default), each with its
+    /// first shortcut.
     fn fkey_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let actions = keymap::bar_actions(&self.cfg.shortcuts, self.cfg.fkey_bar.as_deref());
+        if actions.is_empty() {
+            return;
+        }
+        let buttons: Vec<(String, String, Action)> = actions
+            .into_iter()
+            .map(|a| {
+                let key = keymap::bindings(&self.cfg.shortcuts, a).into_iter().next().unwrap_or_default();
+                let text = if key.is_empty() { tr(keymap::bar_label(a)).to_owned() } else { format!("{key} {}", tr(keymap::bar_label(a))) };
+                (text, tr(a.info().label).to_owned(), a)
+            })
+            .collect();
         let mut cmd = None;
-        ui.columns(9, |cols| {
-            for (col, (k, label, c)) in cols.iter_mut().zip([
-                ("F1", tr("Help"), Cmd::Help),
-                ("F2", tr("Rename"), Cmd::Rename),
-                ("F3", tr("View"), Cmd::View),
-                ("F4", tr("Edit"), Cmd::Edit),
-                ("F5", tr("Copy"), Cmd::Copy),
-                ("F6", tr("Move"), Cmd::Move),
-                ("F7", tr("MkDir"), Cmd::MkDir),
-                ("F8", tr("Delete"), Cmd::Delete { permanent: false }),
-                ("F10", tr("Exit"), Cmd::Exit),
-            ]) {
+        ui.columns(buttons.len(), |cols| {
+            for (col, (text, tip, a)) in cols.iter_mut().zip(buttons) {
                 // one line: a label too long for a narrow window is cut, not wrapped
-                let b = egui::Button::new(RichText::new(format!("{k} {label}"))).wrap_mode(egui::TextWrapMode::Truncate).min_size(egui::vec2(col.available_width(), 0.0));
-                if col.add(b).clicked() {
-                    cmd = Some(c);
+                let b = egui::Button::new(RichText::new(text)).wrap_mode(egui::TextWrapMode::Truncate).min_size(egui::vec2(col.available_width(), 0.0));
+                if col.add(b).on_hover_text(tip).clicked() {
+                    cmd = Some(action_cmd(a));
                 }
             }
         });
@@ -4581,8 +4753,11 @@ impl App {
     }
 }
 
-/// Dialog windows that belong to the running operations, not to `self.dialog`.
-const JOB_WINDOWS: [&str; 2] = ["job", "prompt"];
+/// Dialog windows with a life of their own, not `self.dialog`'s: those of
+/// the running operations, and the results window. Closing or opening a
+/// dialog leaves them alone (forgetting one every frame would make it hide,
+/// show and take the focus again and again).
+const OWN_WINDOWS: [&str; 3] = ["job", "prompt", "results"];
 
 /// The fields of a plugin's form: a label and an input per row. The first
 /// text input takes the focus when the dialog opens; `browse` is set to the
@@ -5273,9 +5448,16 @@ impl eframe::App for App {
             if let Ok(h) = frame.window_handle() {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
                     self.hwnd = Some(w.hwnd.get());
+                    crate::rawkeys::install(w.hwnd.get());
                     apply_theme(ctx, self.cfg.theme);
+                    // the shell extensions load in the background, not on the first right-click
+                    shellmenu::warm_up(self.panels.iter().filter(|p| p.archive.is_none()).map(|p| p.path().to_path_buf()).collect());
                 }
             }
+        }
+        if let Some(h) = self.hwnd.filter(|_| self.transitions != Some(self.cfg.animations)) {
+            sal_ui::native::set_transitions(h, self.cfg.animations);
+            self.transitions = Some(self.cfg.animations);
         }
         self.frame(ctx);
         self.diag_menu(ctx);
@@ -5342,6 +5524,28 @@ impl App {
     /// SAL_DIAG_MENU=1: after start-up, open the classic menu for the first
     /// file, let a timer close it, log what happened, then quit.
     fn diag_menu(&mut self, ctx: &egui::Context) {
+        // SAL_DIAG_SEARCH=<folder>: search it for "*.dll" containing a text that
+        // isn't there (a long search), watch the results window, then quit
+        if let (Some(dir), Some(_)) = (std::env::var_os("SAL_DIAG_SEARCH"), self.hwnd) {
+            let frame = ctx.cumulative_pass_nr();
+            if frame == 30 {
+                if let Some(p) = self.plugins.get("search").cloned() {
+                    let values: plugins::Values = [
+                        ("dir".to_owned(), dir.to_string_lossy().into_owned()),
+                        ("names".to_owned(), "*.dll".to_owned()),
+                        ("text".to_owned(), "zzqqxx-not-there".to_owned()),
+                        ("subfolders".to_owned(), "1".to_owned()),
+                    ]
+                    .into();
+                    self.run_plugin_command(ctx, p, "search".into(), values);
+                }
+                self.diag_since = Some(Instant::now());
+            }
+            if self.diag_since.is_some_and(|t| t.elapsed() > Duration::from_secs(6)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ctx.request_repaint();
+        }
         #[cfg(windows)]
         if std::env::var_os("SAL_DIAG_MENU").is_some() && self.hwnd.is_some() {
             let frame = ctx.cumulative_pass_nr();
@@ -5391,6 +5595,8 @@ impl App {
         let no_dialog = matches!(self.dialog, Dialog::None);
         let editing_path = self.path_edit.iter().any(Option::is_some);
         let menu_open = self.ctx_menu.is_some();
+        // taken every frame: one pressed while a dialog was open is dropped
+        let raw_keys = crate::rawkeys::take();
         if no_dialog && !editing_path && !menu_open {
             self.handle_right_button(ctx);
         }
@@ -5401,7 +5607,7 @@ impl App {
                     m.surrender_focus(id);
                 }
             });
-            self.handle_keys(ctx);
+            self.handle_keys(ctx, raw_keys);
             timing.mark("keys");
             let hidden = self.vis();
             for p in &mut self.panels {
@@ -6203,6 +6409,69 @@ mod tests {
         assert_eq!((ui.app.panels[0].path(), ui.app.panels[1].path()), (l.as_path(), r.as_path()));
     }
 
+    /// The lists beside all drive buttons: a row's name goes there, its
+    /// right-hand button disconnects (a server) or closes (results), and
+    /// results that can be filled again have Refresh. SNAPSHOT_DIR set: the
+    /// open list is saved as connection_list.png.
+    #[test]
+    fn connection_list_buttons() {
+        let conn = |name: &str, results: bool, refresh: &str| plugins::Connection {
+            root: PathBuf::from(format!("scp://{name}/")),
+            plugin: "scp".into(),
+            start: PathBuf::from(format!("scp://{name}/home")),
+            results,
+            name: name.into(),
+            refresh: refresh.into(),
+            paired: false,
+        };
+        let list = vec![conn("me@server", false, ""), conn("*.txt \"hello\" · data", true, "refresh")];
+        let mut ui = Ui::new(Path::new("."), Path::new("."));
+        crate::fonts::install(&ui.ctx, "", "");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 300.0));
+        let popup = std::cell::Cell::new(egui::Id::NULL);
+        let pass = |ui: &mut Ui, events: Vec<Event>| {
+            let mut picked = None;
+            let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let out = ui.ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let id = ui.make_persistent_id(("test", 0));
+                        popup.set(id);
+                        if !ui.memory(|m| m.is_popup_open(id)) {
+                            ui.memory_mut(|m| m.open_popup(id));
+                        }
+                        picked = connection_list(ui, ("test", 0), sal_ui::mdi::SERVER_NETWORK, Color32::GRAY, "tip", &list, Path::new("scp://me@server/home"));
+                    });
+                });
+            });
+            ui.snap.apply(&out);
+            ui.last = Some(out);
+            picked
+        };
+        for _ in 0..3 {
+            pass(&mut ui, Vec::new());
+        }
+        if let Some(out) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let frame = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, frame, bg, &out.join("connection_list.png"));
+        }
+        let area = ui.ctx.memory(|m| m.area_rect(popup.get())).expect("the list is open");
+        let rows = area.shrink(ui.ctx.style().spacing.menu_margin.sum().y / 2.0);
+        let row_h = rows.height() / 2.0;
+        let click = |ui: &mut Ui, at: egui::Pos2| {
+            pass(ui, vec![Event::PointerMoved(at)]);
+            pass(ui, vec![Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+            pass(ui, vec![Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }])
+        };
+        // the last column starts where Disconnect, its widest button, does
+        let right = |row: f32| egui::pos2(rows.right() - 75.0, rows.top() + row_h * (row + 0.5));
+        let left = |row: f32| egui::pos2(rows.left() + 20.0, rows.top() + row_h * (row + 0.5));
+        assert_eq!(click(&mut ui, right(0.0)), Some(ConnPick::Close(PathBuf::from("scp://me@server/"))), "Disconnect");
+        assert_eq!(click(&mut ui, right(1.0)), Some(ConnPick::Close(PathBuf::from("scp://*.txt \"hello\" · data/"))), "Close");
+        assert_eq!(click(&mut ui, left(0.0)), Some(ConnPick::Open(PathBuf::from("scp://me@server/home"), PathBuf::from("scp://me@server/"))));
+    }
+
     /// The search plugin (the DLL the build made) end to end: the form, the
     /// results window filling, going to a result, the results as a folder,
     /// and opening a result opens the real file. SNAPSHOT_DIR set: the
@@ -6258,6 +6527,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(rows, ["poznámky.txt", "docs\\staré\\dopis 🦎.txt"]);
+        // the window stays the same window: frames without a dialog, and a
+        // dialog opening and closing, leave it alone (forgotten every frame,
+        // it hid, showed and took the focus again and again: it flickered)
+        let serial = dialogwin::serial(&ui.app.dialog_places, "results");
+        assert!(serial.is_some());
+        ui.frames(3);
+        ui.app.open_dialog(Dialog::Message { title: "x".into(), text: "y".into() });
+        ui.frames(2);
+        ui.app.dialog = Dialog::None;
+        ui.frames(2);
+        assert_eq!(dialogwin::serial(&ui.app.dialog_places, "results"), serial);
         ui.frames(3);
         if let Some(out) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
             let bg = ui.ctx.style().visuals.panel_fill;
@@ -7141,6 +7421,51 @@ mod tests {
         }
     }
 
+    /// Columns: Attr just fits its letters and isn't resizable, Ext starts
+    /// three letters wide; whatever column is dragged narrower or wider,
+    /// Name takes the difference and the columns still end at the panel's
+    /// right edge (no empty space after them).
+    #[test]
+    fn resized_columns_give_name_the_room() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a.txt"), "x").unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        crate::fonts::install(&ui.ctx, "", "");
+        ui.frames(3);
+        let heads = |ui: &Ui| ui.app.header_rects[0].clone();
+        let before = heads(&ui);
+        assert_eq!(before.len(), 5);
+        let font = egui::TextStyle::Body.resolve(&ui.ctx.style());
+        let w = |s: &str| ui.ctx.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x);
+        assert!(before[4].width() >= w("RHSACE") && before[4].width() < w("RHSACE") + w("Attr") , "Attr fits its letters: {}", before[4].width());
+        assert!(before[1].width() >= w("www") && before[1].width() < w("wwwww"), "Ext about three letters: {}", before[1].width());
+        let right_edge = before[4].right();
+
+        // drag the edge between Size and Date (Date's left edge), left then right
+        let gap = ui.ctx.style().spacing.item_spacing.x;
+        let drag = |ui: &mut Ui, from: egui::Pos2, by: f32| {
+            let to = from + egui::vec2(by, 0.0);
+            ui.run(vec![Event::PointerMoved(from)], Modifiers::NONE);
+            ui.run(vec![Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }], Modifiers::NONE);
+            for i in 1..=5 {
+                ui.run(vec![Event::PointerMoved(from + egui::vec2(by * i as f32 / 5.0, 0.0))], Modifiers::NONE);
+            }
+            ui.run(vec![Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }], Modifiers::NONE);
+            ui.frames(3);
+        };
+        for by in [-30.0, 50.0] {
+            let was = heads(&ui);
+            let edge = egui::pos2(was[3].left() - gap / 2.0, was[3].center().y);
+            drag(&mut ui, edge, by);
+            let now = heads(&ui);
+            assert!((now[3].width() - (was[3].width() - by)).abs() < 2.0, "Date resized by {by}: {} -> {}", was[3].width(), now[3].width());
+            assert!((now[2].width() - was[2].width()).abs() < 0.5, "Size as it was");
+            assert!((now[3].left() - gap / 2.0 - (edge.x + by)).abs() < 2.0, "the edge followed the pointer");
+            assert!((now[0].width() - (was[0].width() + by)).abs() < 2.0, "Name takes the difference: {} -> {}", was[0].width(), now[0].width());
+            assert!((now[4].right() - right_edge).abs() < 1.0, "no space after the columns: {} vs {right_edge}", now[4].right());
+        }
+    }
+
     /// Clicking a column header sorts the panel by that column, and again
     /// in reverse; anywhere in the header cell counts, not only its title.
     /// Sorted by size, folders go by their calculated sizes.
@@ -7164,22 +7489,19 @@ mod tests {
         let names = |ui: &Ui| ui.app.panels[0].entries().iter().skip(1).map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&ui), ["aa", "zz", "a.zip", "b.txt", "c.doc"]);
 
-        // the header row is the top row of the list; its cells from the right:
-        // Attr 42, Date 120, Size 95, Ext 55 wide (plus the spacing)
-        let body = ui.app.body_rects[0];
-        let row_h = ui.ctx.style().text_styles[&egui::TextStyle::Body].size + 6.0;
-        let y = body.top() + row_h / 2.0;
-        let mut edges = vec![body.right()];
-        for w in [42.0, 120.0, 95.0, 55.0] {
-            let last = *edges.last().unwrap();
-            edges.push(last - w - 8.0);
-        }
-        let cell = |key: SortKey| match key {
-            SortKey::Attr => (edges[1], edges[0]),
-            SortKey::Time => (edges[2], edges[1]),
-            SortKey::Size => (edges[3], edges[2]),
-            SortKey::Ext => (edges[4], edges[3]),
-            SortKey::Name => (body.left(), edges[4]),
+        // the header row is the top row of the list: Name, Ext, Size, Date, Attr
+        let heads = ui.app.header_rects[0].clone();
+        assert_eq!(heads.len(), 5);
+        let y = heads[0].center().y;
+        let cell = |key: SortKey| {
+            let r = match key {
+                SortKey::Name => heads[0],
+                SortKey::Ext => heads[1],
+                SortKey::Size => heads[2],
+                SortKey::Time => heads[3],
+                SortKey::Attr => heads[4],
+            };
+            (r.left(), r.right())
         };
         let click = |ui: &mut Ui, x: f32| {
             let pos = egui::pos2(x, y);
@@ -7684,6 +8006,26 @@ mod tests {
         right_release(&mut ui, at);
         assert!(ui.app.ctx_menu.is_none());
         assert!(matches!(ui.app.dialog, Dialog::Message { .. }), "headless: no window for the native menu");
+    }
+
+    /// Ctrl+C, Ctrl+X and Ctrl+V in a panel run the shell's copy, cut and
+    /// paste, as the context menu does (headless there is no window for
+    /// them, which proves they got there without touching the clipboard).
+    #[test]
+    fn clipboard_keys_reach_the_shell() {
+        let t = tempfile::tempdir().unwrap();
+        menu_files(t.path());
+        let mut ui = Ui::new(t.path(), t.path());
+        let p = &mut ui.app.panels[0];
+        let i = p.entries().iter().position(|e| e.name == "a.txt").unwrap();
+        p.set_cursor(i);
+        for (key, verb) in [(Key::C, "copy"), (Key::X, "cut"), (Key::V, "paste")] {
+            ui.app.dialog = Dialog::None;
+            ui.frames(1);
+            ui.key_mod(key, Modifiers::CTRL);
+            let Dialog::Message { text, .. } = &ui.app.dialog else { panic!("Ctrl+{key:?} did nothing") };
+            assert!(text.contains(&format!("\"{verb}\"")), "{text}");
+        }
     }
 
     /// `cargo test -p sal-app snapshot_context_menu -- --ignored` (set SNAPSHOT_DIR)

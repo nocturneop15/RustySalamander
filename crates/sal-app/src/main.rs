@@ -36,6 +36,7 @@ mod icons;
 mod keymap;
 mod panel;
 mod plugins;
+mod rawkeys;
 mod results;
 mod shellmenu;
 mod shortcut;

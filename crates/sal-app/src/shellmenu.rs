@@ -15,6 +15,18 @@ pub enum Picked {
     Delete,
 }
 
+/// A row of a native menu: `Some((id, label, shortcut, enabled))`, `None` for a separator.
+pub type NativeRow = Option<(u32, String, String, bool)>;
+
+/// What was picked in the merged menu ([`show_merged`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Merged {
+    /// One of our own rows, by id.
+    Ours(u32),
+    /// A shell item, or nothing.
+    Shell(Picked),
+}
+
 #[cfg(windows)]
 mod imp {
     use super::*;
@@ -89,24 +101,35 @@ mod imp {
     }
 
     /// The verb ("open", "properties") of the menu item `id`, if it has one.
+    #[cfg(test)]
     fn verb_of(menu: &IContextMenu, id: u32) -> Option<String> {
-        if id < FIRST_ID {
+        verb_at(menu, id, FIRST_ID)
+    }
+
+    /// Like [`verb_of`] for a menu whose shell items start at `first`.
+    fn verb_at(menu: &IContextMenu, id: u32, first: u32) -> Option<String> {
+        if id < first {
             return None;
         }
         let mut buf = [0u16; 256];
-        unsafe { menu.GetCommandString((id - FIRST_ID) as usize, GCS_VERBW, None, PSTR(buf.as_mut_ptr().cast()), buf.len() as u32) }.ok()?;
+        unsafe { menu.GetCommandString((id - first) as usize, GCS_VERBW, None, PSTR(buf.as_mut_ptr().cast()), buf.len() as u32) }.ok()?;
         let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
         (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
     }
 
     /// Run a menu item (by id) or a verb on the menu's items.
     fn invoke(menu: &IContextMenu, owner: HWND, verb: Result<u32, &str>, dir: &Path, pt: POINT) -> Result<(), String> {
+        invoke_at(menu, owner, verb, dir, pt, FIRST_ID)
+    }
+
+    /// Like [`invoke`] for a menu whose shell items start at `first`.
+    fn invoke_at(menu: &IContextMenu, owner: HWND, verb: Result<u32, &str>, dir: &Path, pt: POINT, first: u32) -> Result<(), String> {
         let dir_w = wide(&sal_core::encoding::display_path(dir));
         let verb_a: Vec<u8>;
         let verb_w: Vec<u16>;
         let (lp_verb, lp_verb_w) = match verb {
             // MAKEINTRESOURCE: the command offset in place of a pointer
-            Ok(id) => (PCSTR((id - FIRST_ID) as usize as *const u8), PCWSTR((id - FIRST_ID) as usize as *const u16)),
+            Ok(id) => (PCSTR((id - first) as usize as *const u8), PCWSTR((id - first) as usize as *const u16)),
             Err(name) => {
                 verb_a = name.bytes().chain(std::iter::once(0)).collect();
                 verb_w = wide(name);
@@ -175,46 +198,172 @@ mod imp {
         (pt.x, pt.y)
     }
 
+    /// Show `hmenu`, whose shell items belong to `menu`, at `at`; the chosen id (0 = none).
+    fn track(owner: HWND, hmenu: HMENU, menu: &IContextMenu, at: (i32, i32)) -> u32 {
+        ACTIVE.with(|a| *a.borrow_mut() = Some(menu.clone()));
+        let id = unsafe {
+            let _ = SetWindowSubclass(owner, Some(subclass), 0x5A1A, 0);
+            release_capture(owner);
+            let fg = SetForegroundWindow(owner);
+            let n = windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(hmenu);
+            diag(&format!("track: hwnd={:?} items={n} at={at:?} foreground={}", owner.0, fg.as_bool()));
+            let t0 = std::time::Instant::now();
+            let id = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.0, at.1, owner, None).0 as u32;
+            let err = windows::Win32::Foundation::GetLastError();
+            diag(&format!("track returned id={id} after {:?}, last error={:?}", t0.elapsed(), err));
+            let _ = RemoveWindowSubclass(owner, Some(subclass), 0x5A1A);
+            id
+        };
+        ACTIVE.with(|a| *a.borrow_mut() = None);
+        id
+    }
+
+    /// What picking the shell item `id` (shell items start at `first`) means:
+    /// rename and delete are the panel's, anything else the shell runs.
+    fn pick(menu: &IContextMenu, owner: HWND, id: u32, first: u32, dir: &Path, at: (i32, i32)) -> Result<Picked, String> {
+        let verb = verb_at(menu, id, first).unwrap_or_default();
+        match verb.to_ascii_lowercase().as_str() {
+            "rename" => Ok(Picked::Rename),
+            "delete" => Ok(Picked::Delete),
+            _ => {
+                invoke_at(menu, owner, Ok(id), dir, POINT { x: at.0, y: at.1 }, first)?;
+                Ok(Picked::Invoked(verb))
+            }
+        }
+    }
+
     /// Show the shell's own context menu for `items` at `at`; what was picked.
     pub fn show_classic(owner: isize, items: &[PathBuf], dir: &Path, at: (i32, i32), extended: bool) -> Result<Picked, String> {
         let owner = hwnd(owner);
+        let t0 = std::time::Instant::now();
         let (menu, _pidls) = context_menu(owner, items)?;
         let hmenu: HMENU = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
         let flags = CMF_NORMAL | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
         let result = (|| {
             unsafe { menu.QueryContextMenu(hmenu, 0, FIRST_ID, LAST_ID, flags) }.map_err(|e| e.message().to_string())?;
-            ACTIVE.with(|a| *a.borrow_mut() = Some(menu.clone()));
-            let id = unsafe {
-                let _ = SetWindowSubclass(owner, Some(subclass), 0x5A1A, 0);
-                release_capture(owner);
-                let fg = SetForegroundWindow(owner);
-                let n = windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount(hmenu);
-                diag(&format!("track: hwnd={:?} items={n} at={at:?} foreground={}", owner.0, fg.as_bool()));
-                let t0 = std::time::Instant::now();
-                let id = TrackPopupMenuEx(hmenu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, at.0, at.1, owner, None).0 as u32;
-                let err = windows::Win32::Foundation::GetLastError();
-                diag(&format!("track returned id={id} after {:?}, last error={:?}", t0.elapsed(), err));
-                let _ = RemoveWindowSubclass(owner, Some(subclass), 0x5A1A);
-                id
-            };
-            ACTIVE.with(|a| *a.borrow_mut() = None);
-            if id == 0 {
-                return Ok(Picked::Nothing);
-            }
-            let verb = verb_of(&menu, id).unwrap_or_default();
-            match verb.to_ascii_lowercase().as_str() {
-                "rename" => Ok(Picked::Rename),
-                "delete" => Ok(Picked::Delete),
-                _ => {
-                    invoke(&menu, owner, Ok(id), dir, POINT { x: at.0, y: at.1 })?;
-                    Ok(Picked::Invoked(verb))
-                }
+            diag(&format!("classic menu built in {:?}", t0.elapsed()));
+            match track(owner, hmenu, &menu, at) {
+                0 => Ok(Picked::Nothing),
+                id => pick(&menu, owner, id, FIRST_ID, dir, at),
             }
         })();
         unsafe {
             let _ = DestroyMenu(hmenu);
         }
         result
+    }
+
+    /// Where the shell's items start in the merged menu (ours are below).
+    const MERGED_FIRST: u32 = 0x100;
+
+    /// One menu: our `rows` (as in [`show_native`]) and below them the
+    /// shell's items for `items`, without those whose verb is in `skip`
+    /// (lowercase; the commands we already have).
+    pub fn show_merged(
+        owner: isize,
+        rows: &[Option<(u32, String, String, bool)>],
+        items: &[PathBuf],
+        dir: &Path,
+        at: (i32, i32),
+        extended: bool,
+        skip: &[&str],
+    ) -> Result<Merged, String> {
+        use windows::Win32::UI::WindowsAndMessaging::{DeleteMenu, GetMenuItemCount, GetMenuItemID, GetMenuState, MF_BYPOSITION, MF_SEPARATOR};
+        let owner = hwnd(owner);
+        let t0 = std::time::Instant::now();
+        let (menu, _pidls) = context_menu(owner, items)?;
+        let hmenu: HMENU = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
+        let flags = CMF_NORMAL | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
+        let result = (|| {
+            append_rows(hmenu, rows);
+            let ours = unsafe { GetMenuItemCount(hmenu) }.max(0) as u32;
+            unsafe { windows::Win32::UI::WindowsAndMessaging::AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) }.map_err(|e| e.message().to_string())?;
+            unsafe { menu.QueryContextMenu(hmenu, ours + 1, MERGED_FIRST, LAST_ID, flags) }.map_err(|e| e.message().to_string())?;
+            // the shell's copies of our commands go
+            let mut i = unsafe { GetMenuItemCount(hmenu) } - 1;
+            while i > ours as i32 {
+                let id = unsafe { GetMenuItemID(hmenu, i) };
+                if id != u32::MAX && id >= MERGED_FIRST {
+                    if let Some(v) = verb_at(&menu, id, MERGED_FIRST) {
+                        if skip.contains(&v.to_ascii_lowercase().as_str()) {
+                            unsafe {
+                                let _ = DeleteMenu(hmenu, i as u32, MF_BYPOSITION);
+                            }
+                        }
+                    }
+                }
+                i -= 1;
+            }
+            // no separators doubled or at the end
+            let is_sep = |i: i32| unsafe { GetMenuState(hmenu, i as u32, MF_BYPOSITION) } & MF_SEPARATOR.0 != 0;
+            let mut i = unsafe { GetMenuItemCount(hmenu) } - 1;
+            while i >= 0 {
+                let last = i == unsafe { GetMenuItemCount(hmenu) } - 1;
+                if is_sep(i) && (i == 0 || last || is_sep(i - 1)) {
+                    unsafe {
+                        let _ = DeleteMenu(hmenu, i as u32, MF_BYPOSITION);
+                    }
+                }
+                i -= 1;
+            }
+            diag(&format!("merged menu built in {:?}", t0.elapsed()));
+            match track(owner, hmenu, &menu, at) {
+                0 => Ok(Merged::Shell(Picked::Nothing)),
+                id if id < MERGED_FIRST => Ok(Merged::Ours(id)),
+                id => pick(&menu, owner, id, MERGED_FIRST, dir, at).map(Merged::Shell),
+            }
+        })();
+        unsafe {
+            let _ = DestroyMenu(hmenu);
+        }
+        result
+    }
+
+    /// Build the shell menus of the folders `dirs` and of a file in each once
+    /// on a background thread, so the shell extensions are loaded before the
+    /// first context menu opens.
+    pub fn warm_up(dirs: Vec<PathBuf>) {
+        if cfg!(test) {
+            return;
+        }
+        let _ = std::thread::Builder::new().name("shell-menu-warm-up".into()).spawn(move || {
+            let t0 = std::time::Instant::now();
+            let mut paths = Vec::new();
+            for d in dirs {
+                let file = std::fs::read_dir(&d).ok().and_then(|it| it.flatten().find(|e| e.file_type().is_ok_and(|t| t.is_file())).map(|e| e.path()));
+                paths.push(d);
+                paths.extend(file);
+            }
+            paths.dedup();
+            for p in &paths {
+                let Ok((menu, _pidls)) = context_menu(HWND::default(), std::slice::from_ref(p)) else { continue };
+                if let Ok(hmenu) = unsafe { CreatePopupMenu() } {
+                    unsafe {
+                        let _ = menu.QueryContextMenu(hmenu, 0, FIRST_ID, LAST_ID, CMF_NORMAL | CMF_CANRENAME);
+                        let _ = DestroyMenu(hmenu);
+                    }
+                }
+            }
+            diag(&format!("shell menus warmed up in {:?}", t0.elapsed()));
+        });
+    }
+
+    /// Our rows (see [`show_native`]) appended to `hmenu`.
+    fn append_rows(hmenu: HMENU, rows: &[Option<(u32, String, String, bool)>]) {
+        use windows::Win32::UI::WindowsAndMessaging::{AppendMenuW, MF_GRAYED, MF_SEPARATOR, MF_STRING};
+        for row in rows {
+            unsafe {
+                let _ = match row {
+                    None => AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()),
+                    Some((id, label, shortcut, enabled)) => {
+                        // a tab right-aligns the shortcut like in system menus
+                        let text = if shortcut.is_empty() { label.clone() } else { format!("{label}\t{shortcut}") };
+                        let w = wide(&text);
+                        AppendMenuW(hmenu, if *enabled { MF_STRING } else { MF_STRING | MF_GRAYED }, *id as usize, PCWSTR(w.as_ptr()))
+                    }
+                };
+            }
+        }
     }
 
     /// A menu can't track the mouse while our window still holds the capture
@@ -257,22 +406,9 @@ mod imp {
     /// A plain native popup menu. `rows`: `Some((id, label, shortcut, enabled))`
     /// or `None` for a separator. Returns the chosen id (0 = none).
     pub fn show_native(owner: isize, rows: &[Option<(u32, String, String, bool)>], at: (i32, i32)) -> u32 {
-        use windows::Win32::UI::WindowsAndMessaging::{AppendMenuW, MF_GRAYED, MF_SEPARATOR, MF_STRING};
         let owner = hwnd(owner);
         let Ok(hmenu) = (unsafe { CreatePopupMenu() }) else { return 0 };
-        for row in rows {
-            unsafe {
-                let _ = match row {
-                    None => AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()),
-                    Some((id, label, shortcut, enabled)) => {
-                        // "	" right-aligns the shortcut like in system menus
-                        let text = if shortcut.is_empty() { label.clone() } else { format!("{label}	{shortcut}") };
-                        let w = wide(&text);
-                        AppendMenuW(hmenu, if *enabled { MF_STRING } else { MF_STRING | MF_GRAYED }, *id as usize, PCWSTR(w.as_ptr()))
-                    }
-                };
-            }
-        }
+        append_rows(hmenu, rows);
         let id = unsafe {
             release_capture(owner);
             let _ = SetForegroundWindow(owner);
@@ -407,6 +543,11 @@ mod imp {
         r
     }
 
+    #[cfg(test)]
+    pub fn context_menu_for_test(items: &[PathBuf]) -> Result<(IContextMenu, impl Drop), String> {
+        context_menu(HWND::default(), items)
+    }
+
     /// Verbs the shell offers for `items` (menu is built, never shown).
     #[cfg(test)]
     pub fn verbs(items: &[PathBuf]) -> Result<Vec<String>, String> {
@@ -440,7 +581,9 @@ mod imp {
 #[cfg(all(windows, test))]
 use imp::verbs;
 #[cfg(windows)]
-pub use imp::{arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_native};
+pub use imp::{
+    arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up,
+};
 
 #[cfg(not(windows))]
 mod fallback {
@@ -449,6 +592,12 @@ mod fallback {
     pub fn show_classic(_: isize, _: &[PathBuf], _: &Path, _: (i32, i32), _: bool) -> Result<Picked, String> {
         Err("the system context menu is only available on Windows".into())
     }
+    /// Elsewhere there is no shell menu to merge.
+    pub fn show_merged(_: isize, _: &[Option<(u32, String, String, bool)>], _: &[PathBuf], _: &Path, _: (i32, i32), _: bool, _: &[&str]) -> Result<Merged, String> {
+        Err("the system context menu is only available on Windows".into())
+    }
+    /// Elsewhere there are no shell extensions.
+    pub fn warm_up(_: Vec<PathBuf>) {}
     /// Elsewhere there are no shell verbs.
     pub fn invoke_verb(_: isize, _: &[PathBuf], _: &Path, verb: &str) -> Result<(), String> {
         Err(format!("\"{verb}\" is only available on Windows"))
@@ -482,11 +631,41 @@ mod fallback {
 }
 
 #[cfg(not(windows))]
-pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_native};
+pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up};
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    /// `cargo test -p sal-app time_classic_menu -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn time_classic_menu() {
+        let target = std::env::var_os("SAL_MENU_TARGET").map(PathBuf::from).unwrap_or_else(|| std::env::current_exe().unwrap());
+        use windows::Win32::UI::Shell::{CMF_CANRENAME, CMF_NORMAL};
+        use windows::Win32::UI::WindowsAndMessaging::{CreatePopupMenu, DestroyMenu};
+        if std::env::var_os("SAL_MENU_WARM").is_some() {
+            let t = std::time::Instant::now();
+            let tg = target.clone();
+            std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let _ = verbs(std::slice::from_ref(&tg));
+                }
+            })
+            .join()
+            .unwrap();
+            eprintln!("round warm-up thread: {:?}", t.elapsed());
+        }
+        for round in 0..3 {
+            let t = std::time::Instant::now();
+            let (menu, _p) = imp::context_menu_for_test(std::slice::from_ref(&target)).unwrap();
+            let t1 = t.elapsed();
+            let h = unsafe { CreatePopupMenu() }.unwrap();
+            unsafe { menu.QueryContextMenu(h, 0, 1, 0x7FFF, CMF_NORMAL | CMF_CANRENAME) }.unwrap();
+            eprintln!("round {round}: object {t1:?}, query {:?}", t.elapsed() - t1);
+            unsafe { DestroyMenu(h) }.unwrap();
+        }
+    }
 
     #[test]
     fn shell_offers_standard_verbs() {

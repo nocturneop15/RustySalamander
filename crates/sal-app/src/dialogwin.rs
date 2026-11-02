@@ -29,9 +29,11 @@ pub struct Place {
     flashed: bool,
     /// The main window is disabled while this (modal) dialog is open.
     disabled_owner: bool,
-    /// Created hidden (animations off) and not yet shown: frames waited
-    /// for its window to be found.
+    /// Created hidden and not yet shown: frames waited for its window to be
+    /// found and sized.
     hidden_frames: Option<u8>,
+    /// Shown after being created hidden: never hidden again.
+    shown: bool,
     /// Our other windows disabled while this (exclusive) dialog is open.
     disabled_others: Option<Vec<isize>>,
 }
@@ -49,6 +51,7 @@ impl Place {
             flashed: false,
             disabled_owner: false,
             hidden_frames: None,
+            shown: false,
             disabled_others: None,
         }
     }
@@ -106,10 +109,11 @@ impl DialogWin {
         let pos = *place.pos.get_or_insert_with(|| egui::pos2(main.center().x - width / 2.0, main.top() + 120.0));
         // a dialog takes the focus only from our own windows; while the user
         // works in another program it opens behind and the taskbar flashes
-        let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| our_app_is_foreground()));
-        // animations off: the window is made hidden, told not to animate, then
-        // shown (an inactive one is shown as before: showing it would take the focus)
-        if !self.animations && active && self.owner.is_some() && place.hwnd.is_none() && place.hidden_frames.is_none() {
+        let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| our_app_is_foreground() || std::env::var_os("SAL_DIAG_FOREGROUND").is_some()));
+        // the window is made hidden, told whether to animate, and shown once it
+        // has its size: it appears once, as it will be, never growing on screen
+        // (an inactive one is shown at once: showing it later would take the focus)
+        if active && self.owner.is_some() && !place.shown && place.hidden_frames.is_none() {
             place.hidden_frames = Some(0);
         }
         let hidden = place.hidden_frames.is_some();
@@ -125,6 +129,7 @@ impl DialogWin {
             .with_active(active)
             .with_visible(!hidden);
         let id = ViewportId::from_hash_of(("dialog", key));
+        diag(key, &format!("frame: active={active} hidden={hidden}"));
         ctx.show_viewport_immediate(id, builder, |vctx, class| {
             // keys typed into an open drop-down (font search) are not meant for the dialog
             let popup = vctx.memory(|m| m.any_popup_open());
@@ -149,14 +154,18 @@ impl DialogWin {
             }
             let frame = egui::Frame::central_panel(&vctx.style()).inner_margin(MARGIN);
             let height = egui::CentralPanel::default().frame(frame).show(vctx, |ui| {
-                // the panel itself always fills the window: measure a scope inside it
-                ui.scope(|ui| body(ui)).response.rect.height()
+                // the panel itself always fills the window: measure the content in
+                // a room as tall as it wants (a scroll area keeps its own maximum),
+                // not in the window as it is, or it grows a little every frame
+                let room = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 100_000.0));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(room), |ui| body(ui)).response.rect.height()
             });
             // fit the window to the content
             let want = egui::vec2(width, (height.inner + 2.0 * MARGIN).ceil());
             let have = vctx.input(|i| i.viewport().inner_rect).map(|r| r.size());
             let fits = have.is_some_and(|h| (h.y - want.y).abs() <= 2.0 && (h.x - want.x).abs() <= 2.0);
             if !fits {
+                diag(key, &format!("resize: have {have:?}, want {want:?}"));
                 vctx.send_viewport_cmd(ViewportCommand::InnerSize(want));
             }
             if place.theme != Some(self.theme) {
@@ -166,15 +175,19 @@ impl DialogWin {
             if let Some(owner) = self.owner {
                 if place.hwnd.is_none() {
                     place.hwnd = set_owner(owner, title);
+                    diag(key, &format!("owner lookup: {:?}", place.hwnd));
+                    // Windows' own animation (showing, closing) follows the setting
+                    if let Some(h) = place.hwnd {
+                        sal_ui::native::set_transitions(h, self.animations);
+                    }
                 }
                 if let Some(waited) = place.hidden_frames {
-                    // found: no animation; not found for a while: shown anyway
-                    if let Some(h) = place.hwnd {
-                        sal_ui::native::set_transitions(h, false);
-                    }
-                    if place.hwnd.is_some() || waited >= 10 {
+                    diag(key, &format!("hidden, frame {waited}"));
+                    // found and sized: shown; not after a while: shown anyway
+                    if place.hwnd.is_some() && fits || waited >= 10 {
                         vctx.send_viewport_cmd(ViewportCommand::Visible(true));
                         place.hidden_frames = None;
+                        place.shown = true;
                     } else {
                         place.hidden_frames = Some(waited + 1);
                         vctx.request_repaint();
@@ -197,6 +210,13 @@ impl DialogWin {
                 }
             }
         });
+    }
+}
+
+/// Diagnostics (SAL_DIAG_WINDOWS set): what a dialog window did, on stderr.
+fn diag(key: &str, msg: &str) {
+    if std::env::var_os("SAL_DIAG_WINDOWS").is_some() {
+        eprintln!("[dialog {key}] {msg}");
     }
 }
 

@@ -99,7 +99,7 @@ The first build compiles `7z.dll` from source, which takes a few minutes; later 
 
 All command shortcuts are configurable in **Options → Settings… → Keyboard shortcuts**. The table is split into three framed sections, with *Jump to* links at the top:
 
-- **File & folder operations**: view, edit, copy, move, rename, create, delete, copy paths, selection, folder sizes.
+- **File & folder operations**: view, edit, copy, move, rename, create, delete, copy paths, the clipboard (Ctrl+C, Ctrl+X, Ctrl+V copy, cut and paste files as Explorer does, through the Windows clipboard), selection, folder sizes.
 - **Navigation**: change directory, parent/enter, drive root, history, drive menus, and the drive-letter modifier.
 - **System & view**: sorting, refresh, hidden files, swap panels, command prompt, settings, help, exit.
 
@@ -108,6 +108,7 @@ Each section also lists its fixed keys. The F1 help is grouped the same way. Eac
 - **Preset**: Default (the Salamander binding), the single keys from the default set, alternatives such as `Ctrl+L` for Change directory or `Alt+Up` for Parent, or **None (disabled)**. The column shows **Custom** once you've edited the bindings.
 - **Shortcuts**: the current bindings. Click one to remove it. **+ Add…** records a custom key combination (Esc cancels).
 - **Conflicts**: a binding shared with another command is shown in red, and the tooltip names the other command.
+- **Function key bar**: the tick box before each command puts it on the bar at the bottom of the window, as a button with its first shortcut and its name (*Alt+F7 Find files*). The buttons go by key: F1…F12 first, then other shortcuts, then commands without one. By default the bar has F1 Help … F10 Exit; **Reset function key bar** brings that back.
 
 The drive-letter modifier is set at the top of the same table. **Reset all shortcuts to defaults** restores everything. The F1 help and the menus always show the current bindings. Only changes from the defaults are stored, in the `[shortcuts]` table of `config.toml`. An empty list disables a command's shortcut:
 
@@ -300,20 +301,20 @@ Copy/Move, Create directory, Rename, Delete, Select by mask and messages are mod
 
 - **File icons**: the panels show the real Windows icon for each file type, following your file associations. Programs, shortcuts and icon files (.exe, .lnk, .ico, …) show their own icon, except on network paths. Icons load in the background and are cached. Hidden items are ghosted. **View → Show Windows file icons** switches back to simple drawn icons.
 - **Settings → General** is grouped into *Appearance*, *Files*, *Drives*, *Context menu* and *Command prompt*, separated by lines. Menus and Settings use the same names for the same options.
-- When the window gets narrower, the panels re-lay out their columns, shrinking Ext/Size/Date/Attr if needed. Column widths you adjusted by hand reset on a window resize.
+- **Columns**: Attr is just as wide as its letters, Ext three letters to start with. Drag the edge to the left of Ext, Size or Date in the header to make that column wider or narrower; Name always takes the rest, so the columns end at the panel's edge. Your widths stay when the window is resized, unless they no longer fit.
 
 - The two panels are separated by a wider divider with a visible line.
 - **View → Always show scrollbars**: solid, wider scrollbars that are always drawn. By default egui's thin bars appear only when hovered.
-- **View → Animations** (also Settings → General → Layout): turned off, nothing is animated: windows, menus and tooltips appear at once instead of fading in, and moving the cursor (quick search, the cursor keys, Page Down) jumps instead of scrolling smoothly. The Viewer and Compare windows follow it.
-- **View → Show function key bar** shows or hides the F1…F10 buttons at the bottom. Status messages still appear when there's something to report.
+- **View → Animations** (also Settings → General → Misc): turned off, nothing is animated: the main window, dialogs, menus and tooltips appear and close at once instead of fading or zooming, and moving the cursor (quick search, the cursor keys, Page Down) jumps instead of scrolling smoothly. The Viewer and Compare windows follow it.
+- **View → Show function key bar** shows or hides the function key buttons at the bottom; which commands they are is set in Settings → Keyboard shortcuts (see Keyboard). Status messages still appear when there's something to report.
 
-Both options are also in **Settings → General → Layout** and are remembered.
+Both options are also in **Settings → General → Misc** and are remembered.
 
 ## Context menu
 
 Right-click an item to get its context menu. Like F5/F8, the menu applies to **the whole selection** when anything is selected, otherwise to the item you clicked. Right-clicking the empty area below the list gives the folder's own menu. **Shift+F10** opens the menu for the cursor item, and **Alt+Enter** shows Properties; both are configurable.
 
-Both menu styles are **native Windows menus**, so on Windows 11 they get the system's rounded look and follow the dark/light theme.
+All menu styles are **native Windows menus**, so on Windows 11 they get the system's rounded look and follow the dark/light theme.
 
 In **Options → Settings… → General**:
 
@@ -322,7 +323,10 @@ In **Options → Settings… → General**:
   - *Long right-click*: hold the right button until a ring appears at the pointer, then release to open the menu. A short right-click selects the item, Norton/Salamander style. The hold time is adjustable (250–1500 ms).
 - **Context menu style**:
   - *Windows 11*: a compact menu with Cut, Copy, Paste into folder, Rename, Delete, Open, Open with…, Calculate size, Copy as path, Open in Terminal and Properties. **Show more options** opens the full shell menu. On the background it offers New folder, Paste, Refresh, Select all, Open in Terminal and Properties. Cut, Copy, Paste, Open with and Properties are carried out by the Windows shell, so they work with Explorer's clipboard. Explorer's own new-style menu isn't available to other apps through any public API.
+  - *Windows 11, full*: the compact menu's commands, and below them every item of the full shell menu (third-party extensions, *Send to*, …) in the same menu, without what the commands above already do. No *Show more options* needed.
   - *Classic*: the real Windows shell menu, with every verb, *Send to* and *Open with* submenus and third-party extensions. Hold Shift for extended verbs. *Rename* and *Delete* from it use RustySalamander's own dialogs.
+
+The shell extensions are loaded in the background when the program starts, so the first full menu opens faster. How fast it opens after that depends on the extensions installed: Windows asks each of them every time, as Explorer does.
 
 Troubleshooting: run with the environment variable `SAL_DIAG_MENU=1` to open both menus once on start-up, close them by timer and log each step to stderr.
 

@@ -45,6 +45,9 @@ pub enum Action {
     ToggleTheme,
     SwapPanels,
     CopyPaths,
+    ClipboardCopy,
+    ClipboardCut,
+    ClipboardPaste,
     SortName,
     SortExt,
     SortTime,
@@ -106,7 +109,7 @@ impl Action {
     pub fn section(self) -> Section {
         use Action::*;
         match self {
-            View | Edit | Copy | Move | Rename | MkDir | Delete | DeletePermanent | CopyPaths | SelectAll | UnselectAll | SelectCalcSize | CalcSelectionSize | ContextMenu
+            View | Edit | Copy | Move | Rename | MkDir | Delete | DeletePermanent | CopyPaths | ClipboardCopy | ClipboardCut | ClipboardPaste | SelectAll | UnselectAll | SelectCalcSize | CalcSelectionSize | ContextMenu
             | Properties | Find => Section::Files,
             ChangeDir | Parent | EnterDir | Root | HistoryBack | HistoryForward | DriveMenuLeft | DriveMenuRight | ToggleQuickSearchMode => Section::Navigation,
             SortName | SortExt | SortTime | SortSize | Refresh | ToggleHidden | ToggleSystem | ToggleTheme | SwapPanels | Terminal | Settings | Help | Exit => Section::System,
@@ -114,7 +117,7 @@ impl Action {
     }
 
     /// Grouped by section (files, navigation, system).
-    pub const ALL: [Action; 38] = [
+    pub const ALL: [Action; 41] = [
         Action::View,
         Action::Edit,
         Action::Copy,
@@ -124,6 +127,9 @@ impl Action {
         Action::Delete,
         Action::DeletePermanent,
         Action::CopyPaths,
+        Action::ClipboardCopy,
+        Action::ClipboardCut,
+        Action::ClipboardPaste,
         Action::SelectAll,
         Action::UnselectAll,
         Action::SelectCalcSize,
@@ -184,6 +190,9 @@ impl Action {
             SelectCalcSize => info("select_size", n_("Select + calculate folder size"), &["Shift+Space"], &["Space", "Ctrl+Space"]),
             Find => info("find", n_("Find files"), &["Alt+F7"], &["Ctrl+F"]),
             CopyPaths => info("copy_paths", n_("Copy full paths"), &["Ctrl+Shift+C"], &[]),
+            ClipboardCopy => info("clipboard_copy", n_("Copy to clipboard"), &["Ctrl+C"], &["Ctrl+Insert"]),
+            ClipboardCut => info("clipboard_cut", n_("Cut to clipboard"), &["Ctrl+X"], &[]),
+            ClipboardPaste => info("clipboard_paste", n_("Paste from clipboard"), &["Ctrl+V"], &["Shift+Insert"]),
             SortName => info("sort_name", n_("Sort by name"), &["Ctrl+F3"], &[]),
             SortExt => info("sort_ext", n_("Sort by extension"), &["Ctrl+F4"], &[]),
             SortTime => info("sort_time", n_("Sort by time"), &["Ctrl+F5"], &[]),
@@ -199,6 +208,61 @@ impl Action {
             Exit => info("exit", n_("Exit"), &["F10"], &["Alt+X"]),
         }
     }
+}
+
+/// The commands of the function-key bar when the user hasn't chosen any.
+pub const DEFAULT_BAR: [Action; 9] =
+    [Action::Help, Action::Rename, Action::View, Action::Edit, Action::Copy, Action::Move, Action::MkDir, Action::Delete, Action::Exit];
+
+/// The name of the command on its function-key bar button: short for the
+/// classic F-keys, otherwise the command's name (marked for translation).
+pub fn bar_label(a: Action) -> &'static str {
+    use Action::*;
+    match a {
+        Help => n_("Help"),
+        View => n_("View"),
+        Edit => n_("Edit"),
+        MkDir => n_("MkDir"),
+        _ => a.info().label,
+    }
+}
+
+/// The commands on the function-key bar (`chosen`: action ids, `None` for
+/// the defaults), in key order: plain F1…F24 first, then other shortcuts,
+/// then commands without one.
+pub fn bar_actions(ov: &Overrides, chosen: Option<&[String]>) -> Vec<Action> {
+    let mut v: Vec<Action> = match chosen {
+        Some(ids) => Action::ALL.into_iter().filter(|a| ids.iter().any(|id| id == a.info().id)).collect(),
+        None => DEFAULT_BAR.to_vec(),
+    };
+    let order = |a: &Action| {
+        let first = bindings(ov, *a).first().and_then(|b| Shortcut::parse(b));
+        let index = Action::ALL.iter().position(|x| x == a).unwrap_or(0);
+        match first {
+            Some(s) if !(s.ctrl || s.shift || s.alt) => match s.key.name().strip_prefix('F').and_then(|n| n.parse::<u32>().ok()) {
+                Some(n) => (0, n, index),
+                None => (1, 0, index),
+            },
+            Some(_) => (1, 0, index),
+            None => (2, 0, index),
+        }
+    };
+    v.sort_by_key(order);
+    v
+}
+
+/// Put `a` on the function-key bar or take it off; the default set is stored as `None`.
+pub fn set_in_bar(chosen: &mut Option<Vec<String>>, a: Action, on: bool) {
+    let mut set: Vec<Action> = match chosen {
+        Some(ids) => Action::ALL.into_iter().filter(|x| ids.iter().any(|id| id == x.info().id)).collect(),
+        None => DEFAULT_BAR.to_vec(),
+    };
+    set.retain(|&x| x != a);
+    if on {
+        set.push(a);
+    }
+    let is_default = set.len() == DEFAULT_BAR.len() && DEFAULT_BAR.iter().all(|d| set.contains(d));
+    *chosen = (!is_default).then(|| Action::ALL.into_iter().filter(|x| set.contains(x)).map(|x| x.info().id.to_owned()).collect());
 }
 
 /// Canonical text of a shortcut (`ctrl+\` → `Ctrl+Backslash`); invalid text is kept as typed.
@@ -334,6 +398,11 @@ mod tests {
         assert_eq!(lookup(&ov, Key::F5, Modifiers::NONE), Some(Action::Copy));
         assert_eq!(lookup(&ov, Key::Backslash, Modifiers::CTRL), Some(Action::Root));
         assert_eq!(lookup(&ov, Key::F5, Modifiers::SHIFT), None);
+        // Explorer's clipboard keys
+        assert_eq!(lookup(&ov, Key::C, Modifiers::CTRL), Some(Action::ClipboardCopy));
+        assert_eq!(lookup(&ov, Key::X, Modifiers::CTRL), Some(Action::ClipboardCut));
+        assert_eq!(lookup(&ov, Key::V, Modifiers::CTRL), Some(Action::ClipboardPaste));
+        assert_eq!(lookup(&ov, Key::C, Modifiers::CTRL | Modifiers::SHIFT), Some(Action::CopyPaths));
     }
 
     #[test]
@@ -365,6 +434,32 @@ mod tests {
         assert_eq!(preset_label(&ov, Action::Delete), "None (disabled)");
         assert_eq!(lookup(&ov, Key::F8, Modifiers::NONE), None);
         assert_eq!(ov["delete"], Vec::<String>::new(), "disabled is stored explicitly");
+    }
+
+    #[test]
+    fn function_key_bar() {
+        let mut ov = Overrides::new();
+        let ids = |v: Vec<Action>| v.into_iter().map(|a| a.info().id).collect::<Vec<_>>();
+        // the default bar reads F1 … F10, as it always has
+        assert_eq!(ids(bar_actions(&ov, None)), ["help", "rename", "view", "edit", "copy", "move", "mkdir", "delete", "exit"]);
+        let mut chosen = None;
+        set_in_bar(&mut chosen, Action::Find, true);
+        set_in_bar(&mut chosen, Action::Help, false);
+        set_in_bar(&mut chosen, Action::Settings, true);
+        let bar = bar_actions(&ov, chosen.as_deref());
+        // F-keys in order, then Alt+F7 (Find), then Settings without a shortcut
+        assert_eq!(ids(bar), ["rename", "view", "edit", "copy", "move", "mkdir", "delete", "exit", "find", "settings"]);
+        // the order follows the user's keys
+        set_bindings(&mut ov, Action::Settings, vec!["F9".into()]);
+        assert_eq!(ids(bar_actions(&ov, chosen.as_deref())[6..].to_vec()), ["delete", "settings", "exit", "find"]);
+        // back to the default set: stored as nothing
+        set_in_bar(&mut chosen, Action::Find, false);
+        set_in_bar(&mut chosen, Action::Settings, false);
+        set_in_bar(&mut chosen, Action::Help, true);
+        assert_eq!(chosen, None);
+        set_in_bar(&mut chosen, Action::Help, false);
+        set_in_bar(&mut chosen, Action::Rename, false);
+        assert_eq!(chosen.as_ref().map(Vec::len), Some(7));
     }
 
     #[test]

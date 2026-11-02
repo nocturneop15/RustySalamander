@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0-beta (2026-11-02)
+
+The first beta.
+
+- **Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste files:** in a panel they put the selected items (or the one under the cursor) on the Windows clipboard, or paste what is there into the panel's folder, as Explorer and the context menu do. They did nothing: the window library turned these keys into its text clipboard events and dropped them, as it did Shift+Delete (Delete permanently) and Ctrl+Shift+C (Copy full paths), which work now too. The three are in Settings → Keyboard shortcuts (*Copy to clipboard*, *Cut to clipboard*, *Paste from clipboard*), and the context menu shows their keys.
+- **A context menu with everything, Windows 11 style:** Settings → General → Context menu → Style → *Windows 11, full* shows the compact menu's commands and below them every item of the full shell menu (third-party extensions, *Send to*, …), without *Show more options*. The shell extensions now load in the background when the program starts, so the first full or classic menu opens faster.
+- **The function key bar is yours to set:** in Settings → Keyboard shortcuts, the tick box before a command gives it a button on the bar, with its first shortcut and its name (*Alt+F7 Find files*), in key order. The default bar is F1 Help … F10 Exit as before; *Reset function key bar* brings it back.
+- **Columns don't leave empty space:** after a column was resized, the room it gave up was left empty at the right of the panel. Name now always takes the rest; drag the edge to the left of Ext, Size or Date in the header to resize that column. Attr is just as wide as its letters and Ext starts three letters wide. Your widths stay when the window is resized, unless they no longer fit.
+- **Settings keeps the main window waiting** while it is open, as the other dialogs do.
+- **Dialogs appear at their size:** Settings grew on screen for a moment when it opened (it looked like an animation with animations off); every dialog is now sized before it is shown. Animations off also stops Windows animating the main window (minimizing, restoring, closing) and every dialog, including one opening behind another program.
+- **The search window no longer flickers** while a search runs (with animations off it was hidden and shown again many times a second).
+- **All drives: Disconnect, Refresh and Close in the lists:** the server sessions and searches listed beside the drive buttons have the drive selector's buttons.
+- **Settings:** *Layout* is called *Misc*; *Accent color* is right below *Theme*, *Font size* right below *Font*.
+
 ## 0.7.4-alpha (2026-11-02)
 
 - **Animations off covers the windows too:** with View → Animations off, dialogs and the Viewer and Compare windows no longer fade or zoom in and out. Windows plays that animation for every window it shows, so each such window is now made hidden, told not to animate, and then shown. (A dialog opening while you work in another program still animates: showing it this way would take the focus.) The Viewer 0.5.9-alpha and Compare 0.1.2-alpha are bundled.
