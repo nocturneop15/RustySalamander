@@ -179,6 +179,8 @@ struct Look {
     solid_bars: bool,
     /// The accent colors of the light and the dark theme.
     accent: (Option<[u8; 3]>, Option<[u8; 3]>),
+    /// Fading in, smooth scrolling and Windows' own animation of the windows.
+    animations: bool,
     fonts_done: bool,
 }
 
@@ -201,7 +203,8 @@ impl Look {
         self.solid_bars = get("scrollbars") == "solid";
         sal_ui::apply_scrollbars(ctx, self.solid_bars);
         // programs before 0.7.1 don't say: animated, as they were
-        sal_ui::apply_animations(ctx, get("animations") != "off");
+        self.animations = get("animations") != "off";
+        sal_ui::apply_animations(ctx, self.animations);
         // programs before 0.5.9 send one color for both themes
         let one = |k: &str| if options.contains_key(k) { sal_ui::parse_accent(&get(k)) } else { sal_ui::parse_accent(&get("accent")) };
         self.accent = (one("accent_light"), one("accent_dark"));
@@ -262,7 +265,8 @@ impl eframe::App for App<'_> {
         // the others
         let frame = self.frame;
         for w in &mut self.wins[1..] {
-            ctx.show_viewport_immediate(w.id, frame.builder(&w.content.title()), |ctx, _| {
+            // made hidden, shown once Windows is told about its animation
+            ctx.show_viewport_immediate(w.id, frame.builder(&w.content.title()).with_visible(false), |ctx, _| {
                 if ctx.input(|i| i.viewport().close_requested()) {
                     w.open = false;
                 }
@@ -301,6 +305,9 @@ struct Win {
     open: bool,
     /// Its title bar follows the theme.
     themed: bool,
+    /// Windows was told about its animation (animations off: the window,
+    /// made hidden, then shown).
+    settled: bool,
     /// Where it is: the outer position and the inner size.
     place: Option<(egui::Pos2, egui::Vec2)>,
 }
@@ -308,11 +315,24 @@ struct Win {
 impl Win {
     /// A window for `content`.
     fn new(id: ViewportId, content: Box<dyn Content>) -> Win {
-        Win { id, content, open: true, themed: false, place: None }
+        Win { id, content, open: true, themed: false, settled: false, place: None }
     }
 
     /// Draw the window; Escape and F10 close it.
     fn show(&mut self, ctx: &egui::Context, look: &Look) {
+        if !self.settled {
+            // the window is still hidden (eframe shows the first one after its
+            // first frame, the others are made hidden): no animation from Windows
+            // when animations are off, then shown
+            if let Some(h) = sal_ui::native::thread_window(&self.content.title()) {
+                sal_ui::native::set_transitions(h, look.animations);
+            }
+            // the first window eframe shows itself, once its first frame is drawn
+            if self.id != ViewportId::ROOT {
+                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            }
+            self.settled = true;
+        }
         if !self.themed {
             ctx.send_viewport_cmd(ViewportCommand::SetTheme(look.system_theme()));
             self.themed = true;

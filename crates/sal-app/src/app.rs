@@ -392,6 +392,9 @@ pub struct App {
     size_report: Option<(usize, Vec<PathBuf>)>,
     /// Native window handle (for the shell menu and shell dialogs).
     hwnd: Option<isize>,
+    /// What the last operation did, shown in the status bar for a moment
+    /// ([`JOB_DONE_SHOWN`]) instead of "No operations running".
+    job_done: Option<(String, Instant)>,
     ctx_menu: Option<CtxMenu>,
     rmb: Option<RightPress>,
     /// Row rectangles of the last frame (screen points), per panel.
@@ -663,6 +666,7 @@ impl App {
             font_filter: String::new(),
             size_report: None,
             hwnd: None,
+            job_done: None,
             ctx_menu: None,
             rmb: None,
             row_hits: [Vec::new(), Vec::new()],
@@ -939,7 +943,7 @@ impl App {
             return;
         }
         win.poll(ctx);
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
         let (mut enter, mut escape) = (false, false);
         let height = (ctx.screen_rect().height() * 0.55).clamp(160.0, 520.0);
         let title = win.title.clone();
@@ -2787,7 +2791,7 @@ impl App {
         if matches!(dialog, Dialog::None) {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !JOB_WINDOWS.contains(&k));
         }
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
         // dialog windows are sized from the main window, not from themselves
         let main_h = ctx.screen_rect().height();
         // 0 = keep open, 1 = ok, 2 = cancel
@@ -4066,7 +4070,7 @@ impl App {
             return;
         }
         let now = Instant::now();
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
         let (mut enter, mut escape) = (false, false);
         let mut act: Option<JobAct> = None;
         let jobs = &self.jobs;
@@ -4154,7 +4158,7 @@ impl App {
 
     /// The question of an operation that hit a conflict or an error, in its own window.
     fn prompt_ui(&mut self, ctx: &egui::Context) {
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None, animations: self.cfg.animations };
         let Some(job) = self.jobs.running.iter_mut().find(|j| j.prompt.is_some()) else {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| k == "prompt");
             return;
@@ -4230,7 +4234,7 @@ impl App {
         self.dir_sizes.clear();
         self.free.forget();
         let title = job.spec.kind.title();
-        self.status = match job.result.unwrap() {
+        let done = match job.result.unwrap() {
             Ok(s) => {
                 let mut m = format!("{title}: {} ({})", plural(s.files as usize, "file"), format_size(s.bytes));
                 if s.skipped > 0 {
@@ -4251,6 +4255,7 @@ impl App {
                 String::new()
             }
         };
+        self.job_done = (!done.is_empty()).then(|| (done, Instant::now()));
         self.reload_all();
     }
 
@@ -4271,18 +4276,40 @@ impl App {
         Ok(())
     }
 
-    /// Progress of the running operations in the status bar; a click shows their window.
+    /// The file operations in the status bar: "No operations running" (or,
+    /// for a moment, what the last one did); else how many copy, move and
+    /// delete, their progress and the time left. A click shows their window.
     fn jobs_indicator(&mut self, ui: &mut egui::Ui) {
-        let Some(first) = self.jobs.running.first() else {
-            ui.label(RichText::new(trn("{n} operation waiting", "{n} operations waiting", self.jobs.queue.len() as u64)).weak());
+        if self.jobs.running.is_empty() && self.jobs.queue.is_empty() {
+            match self.job_done.as_ref().filter(|(_, at)| at.elapsed() < JOB_DONE_SHOWN) {
+                Some((done, at)) => {
+                    let strong = ui.visuals().strong_text_color();
+                    ui.add(egui::Label::new(RichText::new(done).color(strong)).truncate());
+                    ui.ctx().request_repaint_after(JOB_DONE_SHOWN.saturating_sub(at.elapsed()));
+                }
+                None => {
+                    self.job_done = None;
+                    ui.label(RichText::new(tr("No operations running")).weak());
+                }
+            }
             return;
-        };
-        let (frac, left) = self.jobs.summary();
-        let mut text = format!("{} {:.0} %", first.spec.kind.title(), frac * 100.0);
-        if self.jobs.running.len() > 1 {
-            text = format!("{} · {}", trn("{n} operation", "{n} operations", self.jobs.running.len() as u64), text);
         }
-        if self.jobs.running.iter().all(|j| j.is_paused()) {
+        // how many of each kind, running or waiting, in the order they come
+        let mut counts: Vec<(&str, usize)> = Vec::new();
+        for kind in self.jobs.running.iter().map(|j| j.spec.kind).chain(self.jobs.queue.iter().map(|s| s.kind)) {
+            match counts.iter_mut().find(|(g, _)| *g == kind.group()) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((kind.group(), 1)),
+            }
+        }
+        let mut text = counts.iter().map(|(g, n)| if *n > 1 { format!("{g} {n}") } else { (*g).to_owned() }).collect::<Vec<_>>().join(" · ");
+        let (frac, left) = self.jobs.summary();
+        if !self.jobs.running.is_empty() {
+            text.push_str(&format!(" · {:.0} %", frac * 100.0));
+        }
+        if self.jobs.running.is_empty() {
+            // waiting only: nothing to time
+        } else if self.jobs.running.iter().all(|j| j.is_paused()) {
             text.push_str(&format!(" · {}", tr("Paused")));
         } else if let Some(l) = left {
             text.push_str(&format!(" · {}", trf("about {time} left", &[("time", &format_duration(l))])));
@@ -4985,6 +5012,8 @@ const LBL_SYSTEM: &str = n_("Show system files");
 const LBL_ICONS: &str = n_("Show Windows file icons");
 const LBL_SCROLLBARS: &str = n_("Always show scrollbars");
 const LBL_ANIMATIONS: &str = n_("Animations");
+/// How long the status bar shows what the last operation did.
+const JOB_DONE_SHOWN: Duration = Duration::from_secs(5);
 const TIP_ANIMATIONS: &str = n_("Windows and menus fading in, smooth scrolling to the cursor (quick search, cursor keys). Off: everything changes at once.");
 const LBL_FKEYS: &str = n_("Show function key bar");
 const LBL_RECYCLE: &str = n_("Delete to Recycle Bin");
@@ -5394,20 +5423,21 @@ impl App {
         timing.mark("before menu");
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu_bar(ctx, ui));
         timing.mark("menu");
-        if self.cfg.show_fkey_bar || !self.status.is_empty() || !self.jobs.is_idle() {
-            egui::TopBottomPanel::bottom("fkeys").show(ctx, |ui| {
-                if !self.jobs.is_idle() {
-                    self.jobs_indicator(ui);
-                }
-                if !self.status.is_empty() {
-                    let strong = ui.visuals().strong_text_color();
-                    ui.add(egui::Label::new(RichText::new(&self.status).color(strong)).truncate());
-                }
-                if self.cfg.show_fkey_bar {
-                    self.fkey_bar(ctx, ui);
-                }
-            });
-        }
+        // the status bar always, the function keys when they are on; as much
+        // room below as at the sides (egui's panels leave only 2 points)
+        let frame = egui::Frame::side_top_panel(&ctx.style());
+        let side = frame.inner_margin.left;
+        let frame = frame.inner_margin(egui::Margin { left: side, right: side, top: 4.0, bottom: side });
+        egui::TopBottomPanel::bottom("fkeys").frame(frame).show(ctx, |ui| {
+            self.jobs_indicator(ui);
+            if !self.status.is_empty() {
+                let strong = ui.visuals().strong_text_color();
+                ui.add(egui::Label::new(RichText::new(&self.status).color(strong)).truncate());
+            }
+            if self.cfg.show_fkey_bar {
+                self.fkey_bar(ctx, ui);
+            }
+        });
         timing.mark("status and function keys");
         egui::CentralPanel::default().show(ctx, |ui| {
             let full = ui.available_rect_before_wrap();
@@ -5683,20 +5713,23 @@ mod tests {
         // a JSON file is colored in the background while its window is open
         fs::write(&a, "{\n  \"text\": \"Příliš žluťoučký kůň 日本語\",\n  \"count\": 42\n}\n").unwrap();
         fs::write(&b, [0u8, 1, 2, 3, 255]).unwrap();
+        // with animations on, and off (the windows made hidden, then shown)
+        for animations in ["on", "off"] {
+            let options: plugins::Values = [("theme".to_owned(), "dark".to_owned()), ("animations".to_owned(), animations.to_owned())].into();
+            viewer.open_file("text", &a, &options).unwrap();
+            wait_for("the first window", || windows_with("první 🦎.json").len() == 1);
+            viewer.open_file("text", &b, &options).unwrap();
+            wait_for("the second window", || windows_with("druhý.bin").len() == 1);
+            // closing the first (the loop's main window) keeps the second
+            let (first, _) = windows_with("první 🦎.json")[0];
+            unsafe { PostMessageW(first, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
+            wait_for("the first file's window gone", || windows_with("první 🦎.json").is_empty());
+            wait_for("the second file stays open, in one window", || windows_with("druhý.bin").len() == 1);
+            let (second, _) = windows_with("druhý.bin")[0];
+            unsafe { PostMessageW(second, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
+            wait_for("all closed", || windows_with(" - Viewer").is_empty());
+        }
         let options: plugins::Values = [("theme".to_owned(), "dark".to_owned())].into();
-
-        viewer.open_file("text", &a, &options).unwrap();
-        wait_for("the first window", || windows_with("první 🦎.json").len() == 1);
-        viewer.open_file("text", &b, &options).unwrap();
-        wait_for("the second window", || windows_with("druhý.bin").len() == 1);
-        // closing the first (the loop's main window) keeps the second
-        let (first, _) = windows_with("první 🦎.json")[0];
-        unsafe { PostMessageW(first, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
-        wait_for("the first file's window gone", || windows_with("první 🦎.json").is_empty());
-        wait_for("the second file stays open, in one window", || windows_with("druhý.bin").len() == 1);
-        let (second, _) = windows_with("druhý.bin")[0];
-        unsafe { PostMessageW(second, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
-        wait_for("all closed", || windows_with(" - Viewer").is_empty());
         // the loop starts again for the next file
         viewer.open_file("text", &a, &options).unwrap();
         wait_for("a window again", || windows_with("první 🦎.json").len() == 1);
@@ -7193,6 +7226,35 @@ mod tests {
         ui.frames(2);
         click(&mut ui, r - 10.0);
         assert_eq!(names(&ui), ["zz", "aa", "b.txt", "c.doc", "a.zip"], "largest first, folders by their sizes");
+    }
+
+    /// The status bar's operations: "No operations running" when nothing
+    /// runs; what the last one did, for a moment (not left behind in the
+    /// status line); kinds counted as copying, moving and deleting.
+    #[test]
+    fn operations_in_the_status_bar() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("pryč.txt"), "x").unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        assert!(ui.app.job_done.is_none());
+        cursor_to(&mut ui, "pryč.txt");
+        ui.key(Key::F8);
+        ui.key(Key::Enter);
+        ui.wait_job();
+        ui.frames(2);
+        assert!(!t.path().join("pryč.txt").exists());
+        let (done, _) = ui.app.job_done.clone().expect("what it did, for a moment");
+        assert!(done.starts_with("Deleting: 1 file"), "{done}");
+        assert!(!ui.app.status.contains("Deleting"), "not left in the status line: {}", ui.app.status);
+        // after a moment: no operations running
+        ui.app.job_done.as_mut().unwrap().1 = Instant::now() - JOB_DONE_SHOWN - Duration::from_secs(1);
+        ui.frames(2);
+        assert!(ui.app.job_done.is_none());
+        // the kinds the bar counts
+        assert_eq!((JobKind::Recycle.group(), JobKind::Delete.group()), ("Deleting", "Deleting"));
+        assert_eq!(JobKind::Transfer(OpKind::Move).group(), "Moving");
+        assert_eq!(JobKind::Archive(FolderOp::Transfer(OpKind::Copy)).group(), "Copying");
+        assert_eq!(JobKind::Archive(FolderOp::Rename).group(), "Renaming");
     }
 
     fn type_path(ui: &mut Ui, text: &str) {

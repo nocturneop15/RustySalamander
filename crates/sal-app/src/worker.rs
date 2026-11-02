@@ -61,6 +61,17 @@ impl JobKind {
         }
     }
 
+    /// What the status bar counts it as: "Copying", "Moving", "Deleting"
+    /// (the Recycle Bin too), or what it is ("Extracting", …).
+    pub fn group(self) -> &'static str {
+        match self {
+            JobKind::Transfer(OpKind::Copy) | JobKind::Archive(FolderOp::Transfer(OpKind::Copy)) => tr("Copying"),
+            JobKind::Transfer(OpKind::Move) | JobKind::Archive(FolderOp::Transfer(OpKind::Move)) => tr("Moving"),
+            JobKind::Transfer(OpKind::Delete) | JobKind::Delete | JobKind::Recycle | JobKind::Archive(FolderOp::Transfer(OpKind::Delete) | FolderOp::Delete) => tr("Deleting"),
+            other => other.title(),
+        }
+    }
+
     /// Whether the operation reports progress.
     pub fn has_progress(self) -> bool {
         self != JobKind::Recycle

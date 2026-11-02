@@ -5,6 +5,7 @@
 pub mod fonts;
 pub mod icon;
 pub mod mdi;
+pub mod native;
 
 /// Solid always-visible scrollbars, or egui's thin ones that appear on hover.
 pub fn apply_scrollbars(ctx: &egui::Context, always: bool) {

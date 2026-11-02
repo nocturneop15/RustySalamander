@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.4-alpha (2026-11-02)
+
+- **Animations off covers the windows too:** with View → Animations off, dialogs and the Viewer and Compare windows no longer fade or zoom in and out. Windows plays that animation for every window it shows, so each such window is now made hidden, told not to animate, and then shown. (A dialog opening while you work in another program still animates: showing it this way would take the focus.) The Viewer 0.5.9-alpha and Compare 0.1.2-alpha are bundled.
+- **The status bar tells what operations run:** its left side says *No operations running* when nothing runs or waits, and otherwise how many copy, move and delete (*Copying 2 · Deleting 1*), with the progress, the time left and how many wait. What an operation did (*Moving to Recycle Bin: 1 file*) shows there for 5 seconds after it ends; it was left in the status line until something else replaced it.
+- **The status bar is always there,** also with the function key bar turned off (View → Function key bar), and the function keys have as much room below them as at the sides (they touched the window's edge).
+
 ## 0.7.3-alpha (2026-11-01)
 
 - **Alphabetical order of your language:** names sort as in Explorer, by Windows in the language set for your account: `Čeština` right after `Cena` (not after `Zeta`), `Ábel` among the A's, in Czech `Chata` after `Hora`; case doesn't matter and numbers go by value (`a2` before `a10`). Symbols come before numbers, numbers before letters. In the panels, inside archives and connections, and in the search results window.

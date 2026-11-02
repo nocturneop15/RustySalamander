@@ -29,6 +29,9 @@ pub struct Place {
     flashed: bool,
     /// The main window is disabled while this (modal) dialog is open.
     disabled_owner: bool,
+    /// Created hidden (animations off) and not yet shown: frames waited
+    /// for its window to be found.
+    hidden_frames: Option<u8>,
     /// Our other windows disabled while this (exclusive) dialog is open.
     disabled_others: Option<Vec<isize>>,
 }
@@ -45,6 +48,7 @@ impl Place {
             hwnd: None,
             flashed: false,
             disabled_owner: false,
+            hidden_frames: None,
             disabled_others: None,
         }
     }
@@ -65,6 +69,9 @@ pub struct DialogWin {
     pub exclusive: bool,
     /// The window's icon (one of `sal_ui::icon`); `None` for the program's.
     pub icon: Option<fn() -> std::sync::Arc<egui::IconData>>,
+    /// Windows' own animation when the window shows and closes (off with
+    /// View → Animations off).
+    pub animations: bool,
 }
 
 impl DialogWin {
@@ -100,6 +107,12 @@ impl DialogWin {
         // a dialog takes the focus only from our own windows; while the user
         // works in another program it opens behind and the taskbar flashes
         let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| our_app_is_foreground()));
+        // animations off: the window is made hidden, told not to animate, then
+        // shown (an inactive one is shown as before: showing it would take the focus)
+        if !self.animations && active && self.owner.is_some() && place.hwnd.is_none() && place.hidden_frames.is_none() {
+            place.hidden_frames = Some(0);
+        }
+        let hidden = place.hidden_frames.is_some();
         let builder = ViewportBuilder::default()
             .with_title(title)
             .with_icon(self.icon.unwrap_or(sal_ui::icon::program)())
@@ -109,7 +122,8 @@ impl DialogWin {
             .with_minimize_button(false)
             .with_maximize_button(false)
             .with_taskbar(false)
-            .with_active(active);
+            .with_active(active)
+            .with_visible(!hidden);
         let id = ViewportId::from_hash_of(("dialog", key));
         ctx.show_viewport_immediate(id, builder, |vctx, class| {
             // keys typed into an open drop-down (font search) are not meant for the dialog
@@ -152,6 +166,19 @@ impl DialogWin {
             if let Some(owner) = self.owner {
                 if place.hwnd.is_none() {
                     place.hwnd = set_owner(owner, title);
+                }
+                if let Some(waited) = place.hidden_frames {
+                    // found: no animation; not found for a while: shown anyway
+                    if let Some(h) = place.hwnd {
+                        sal_ui::native::set_transitions(h, false);
+                    }
+                    if place.hwnd.is_some() || waited >= 10 {
+                        vctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                        place.hidden_frames = None;
+                    } else {
+                        place.hidden_frames = Some(waited + 1);
+                        vctx.request_repaint();
+                    }
                 }
                 if place.hwnd.is_some() && !active && !place.flashed {
                     place.flashed = true;

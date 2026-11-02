@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.2-alpha (2026-11-02)
+
+- **No window animation with animations off:** with View → Animations turned off in the program (RustySalamander 0.7.4-alpha and later), Windows no longer fades or zooms its windows in and out.
+
 ## 0.1.1-alpha (2026-11-01)
 
 - **Animations can be off:** with View → Animations turned off in the program (RustySalamander 0.7.1-alpha and later), its windows don't fade in or scroll smoothly either.
