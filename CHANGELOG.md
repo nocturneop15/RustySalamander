@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.5-beta (2026-11-03)
+
+- **Fixed:** **Overwrite All** in the window about an existing file now holds for the whole operation. When folders were merged into folders already at the target (moving, or copying out of an archive), the window came back for every next folder.
+
 ## 0.8.4-beta (2026-11-03)
 
 - **Drag and drop:** drag files, folders or the selection from a panel onto the other panel or onto a folder's row. On the same drive they are moved, onto another drive copied; **Shift** moves and **Ctrl** copies. The target is outlined and a label at the pointer says what will happen; the drop opens the Copy or Move dialog with the target filled in (Settings → General → Files → *Drag and drop* can start it at once). Esc cancels.

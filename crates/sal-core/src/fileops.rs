@@ -545,12 +545,18 @@ impl Ctx<'_> {
     fn move_by_copy(&mut self, src: &Path, dst: &Path) -> Step {
         // copy_tree resolves conflicts itself; deleting the source only when
         // everything below it was copied keeps skipped files safe
-        let saved = self.overwrite_all;
-        if fs::symlink_metadata(dst).is_ok() && !src.is_dir() {
-            self.overwrite_all = true; // conflict was already resolved by move_item
+        // a single file whose conflict move_item already resolved: overwrite
+        // it without asking again, then forget that (it was this file only).
+        // A merged directory keeps what the user chose inside it, so an
+        // Overwrite All there holds for the rest of the operation.
+        let forced = !self.overwrite_all && fs::symlink_metadata(dst).is_ok() && !src.is_dir();
+        if forced {
+            self.overwrite_all = true;
         }
         let ok = self.copy_tree(src, dst);
-        self.overwrite_all = saved;
+        if forced {
+            self.overwrite_all = false;
+        }
         if ok? {
             self.delete_tree(src, false)?;
             Ok(true)
@@ -914,6 +920,42 @@ mod tests {
         let s = transfer_with(OpKind::Move, &[src.join("dir")], &dst, &options, &mut Auto(ConflictAction::Cancel));
         assert_eq!((s.files, s.verified, s.renamed), (1, 1, 0));
         assert!(!src.join("dir").exists() && dst.join("dir/b.txt").exists());
+    }
+
+    /// Overwrite All answered inside one merged folder holds for the next
+    /// folders too (it was forgotten after each folder of a move).
+    #[test]
+    fn overwrite_all_holds_across_merged_folders() {
+        struct Count(u32);
+        impl OpObserver for Count {
+            fn progress(&mut self, _: &Progress) -> bool {
+                true
+            }
+            fn conflict(&mut self, _: &Path, _: &Path) -> ConflictAction {
+                self.0 += 1;
+                ConflictAction::OverwriteAll
+            }
+            fn error(&mut self, p: &Path, e: &io::Error) -> ErrorAction {
+                panic!("unexpected error on {}: {e}", p.display())
+            }
+        }
+        for kind in [OpKind::Copy, OpKind::Move] {
+            let t = tempfile::tempdir().unwrap();
+            let (src, dst) = (t.path().join("src"), t.path().join("dst"));
+            for side in [&src, &dst] {
+                for d in ["a", "b", "c"] {
+                    fs::create_dir_all(side.join(d)).unwrap();
+                    fs::write(side.join(d).join("x.txt"), side.to_string_lossy().as_bytes()).unwrap();
+                    fs::write(side.join(d).join("y.txt"), side.to_string_lossy().as_bytes()).unwrap();
+                }
+            }
+            let sources: Vec<PathBuf> = ["a", "b", "c"].iter().map(|d| src.join(d)).collect();
+            let mut obs = Count(0);
+            let s = transfer(kind, &sources, &dst, &mut obs);
+            assert_eq!(obs.0, 1, "{kind:?}: asked once");
+            assert_eq!((s.files, s.skipped), (6, 0), "{kind:?}");
+            assert_eq!(fs::read_to_string(dst.join("c/y.txt")).unwrap(), src.to_string_lossy(), "{kind:?}");
+        }
     }
 
     #[test]
