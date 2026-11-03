@@ -2961,7 +2961,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sal-app"
-version = "0.8.0-beta"
+version = "0.8.1-beta"
 dependencies = [
  "chrono",
  "eframe",
@@ -2981,10 +2981,11 @@ dependencies = [
 
 [[package]]
 name = "sal-core"
-version = "0.8.0-beta"
+version = "0.8.1-beta"
 dependencies = [
  "encoding_rs",
  "serde",
+ "sha2",
  "tempfile",
  "toml",
  "unicode-bidi",
@@ -3001,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "sal-plugin-api"
-version = "0.8.0-beta"
+version = "0.8.1-beta"
 
 [[package]]
 name = "sal-plugin-compare"
@@ -3060,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "sal-ui"
-version = "0.8.0-beta"
+version = "0.8.1-beta"
 dependencies = [
  "ab_glyph",
  "egui",
@@ -3069,7 +3070,7 @@ dependencies = [
 
 [[package]]
 name = "sal-window"
-version = "0.8.0-beta"
+version = "0.8.1-beta"
 dependencies = [
  "eframe",
  "sal-plugin-api",

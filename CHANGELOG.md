@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1-beta (2026-11-03)
+
+- **Safe copy and safe move:** the Copy and Move dialog checks each copy right after it is written: *Compare sizes*, or *SHA-256 checksums* (each copy is read back and compared with the original). With checksums, every file's checksum is also written to `RustySalamander <date> <time>.sha256` in the target folder and in the source folder, in the format `sha256sum -c` checks. A copy that fails the check is removed and you are asked to Retry, Skip or Cancel; a safe move deletes an original only after its copy passed.
+- **Run in background** and **Show the result when finished**, two ticks in the Copy and Move dialog: start without the progress window (the status bar shows the progress), and get the *Operation result* window at the end. A safe copy always shows the result.
+- **The Operation result window** tells how each operation went: what was copied or moved, how long it took and how fast, how the copies were checked, and every file that failed or was skipped, with the reason. It is modal. **Save protocol…** saves all of that to a text file, with every file's SHA-256 checksum after a check with checksums; **Close and remove checksum files** deletes the `.sha256` files when you only wanted the check.
+- **Defaults for Copy and Move in Settings:** Settings → General → Files → *Copying (F5)* and *Moving (F6)* set what the dialogs offer when they open. What you change in a dialog is for that operation only and isn't remembered.
+- **A question brings a background operation forward:** when a copy running in the background has to ask (a file exists already, an error), its progress window appears with the question and hides again once you have answered. Before, the window stayed hidden and the status bar could not bring it back while the question was open.
+- **Click anywhere in a panel to make it active**, also on the empty space below the last item.
+- **The user manual** (`USER-MANUAL.md`) is in the package.
+
 ## 0.8.0-beta (2026-11-02)
 
 The first beta.

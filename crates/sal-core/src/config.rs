@@ -238,6 +238,30 @@ pub struct Config {
     pub hot_paths: Vec<String>,
     /// Look for a new release on GitHub when the program starts.
     pub check_updates: bool,
+    /// How Copy (F5) starts: what its dialog offers each time.
+    pub copy_defaults: TransferDefaults,
+    /// How Move (F6) starts: what its dialog offers each time.
+    pub move_defaults: TransferDefaults,
+}
+
+/// What the Copy or the Move dialog offers when it opens (Settings → Files);
+/// a change in the dialog is for that operation only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransferDefaults {
+    /// Run in the background: no progress window.
+    pub background: bool,
+    /// Show the result window when it ends (always with a safe copy).
+    pub show_result: bool,
+    /// Safe copy: how each copy is checked.
+    pub verify: crate::fileops::Verify,
+}
+
+impl TransferDefaults {
+    /// Whether the result window opens: when asked, and always after a safe copy.
+    pub fn reports(&self) -> bool {
+        self.show_result || self.verify != crate::fileops::Verify::None
+    }
 }
 
 impl Default for Config {
@@ -287,6 +311,8 @@ impl Default for Config {
             root_shortcut: None,
             hot_paths: vec![String::new(); 10],
             check_updates: true,
+            copy_defaults: TransferDefaults::default(),
+            move_defaults: TransferDefaults::default(),
         }
     }
 }

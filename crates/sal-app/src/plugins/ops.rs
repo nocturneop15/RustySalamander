@@ -50,7 +50,7 @@ struct Phase<'a> {
 impl Phase<'_> {
     /// A phase of `files` items, starting at `current`.
     fn new<'a>(obs: &'a mut dyn OpObserver, current: &Path, files: u64) -> Phase<'a> {
-        let p = Progress { current: current.to_path_buf(), files_done: 0, files_total: files, bytes_done: 0, bytes_total: 0 };
+        let p = Progress { current: current.to_path_buf(), files_done: 0, files_total: files, bytes_done: 0, bytes_total: 0, verifying: false };
         Phase { obs, p }
     }
 

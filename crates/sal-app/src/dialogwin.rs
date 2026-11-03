@@ -109,11 +109,18 @@ impl DialogWin {
         let pos = *place.pos.get_or_insert_with(|| egui::pos2(main.center().x - width / 2.0, main.top() + 120.0));
         // a dialog takes the focus only from our own windows; while the user
         // works in another program it opens behind and the taskbar flashes
-        let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| our_app_is_foreground() || std::env::var_os("SAL_DIAG_FOREGROUND").is_some()));
+        // (SAL_DIAG_FOREGROUND: 1 as if we were in the foreground, 0 as if not)
+        let foreground = || match std::env::var_os("SAL_DIAG_FOREGROUND") {
+            Some(v) => v != "0",
+            None => our_app_is_foreground(),
+        };
+        let active = *place.active.get_or_insert_with(|| self.owner.is_none_or(|_| foreground()));
         // the window is made hidden, told whether to animate, and shown once it
-        // has its size: it appears once, as it will be, never growing on screen
-        // (an inactive one is shown at once: showing it later would take the focus)
-        if active && self.owner.is_some() && !place.shown && place.hidden_frames.is_none() {
+        // has its size: it appears once, as it will be, never growing on screen.
+        // Also one that opens behind (a result while the user works elsewhere):
+        // its first show doesn't activate it (winit shows a window that was
+        // created inactive with SW_SHOWNOACTIVATE)
+        if self.owner.is_some() && !place.shown && place.hidden_frames.is_none() {
             place.hidden_frames = Some(0);
         }
         let hidden = place.hidden_frames.is_some();
@@ -129,7 +136,7 @@ impl DialogWin {
             .with_active(active)
             .with_visible(!hidden);
         let id = ViewportId::from_hash_of(("dialog", key));
-        diag(key, &format!("frame: active={active} hidden={hidden}"));
+        diag(key, &format!("frame: active={active} hidden={hidden} window visible={:?}", place.hwnd.map(is_visible)));
         ctx.show_viewport_immediate(id, builder, |vctx, class| {
             // keys typed into an open drop-down (font search) are not meant for the dialog
             let popup = vctx.memory(|m| m.any_popup_open());
@@ -181,6 +188,8 @@ impl DialogWin {
                         sal_ui::native::set_transitions(h, self.animations);
                     }
                 }
+                // shown in an earlier frame (a show asked for now happens after this frame)
+                let shown_before = place.shown;
                 if let Some(waited) = place.hidden_frames {
                     diag(key, &format!("hidden, frame {waited}"));
                     // found and sized: shown; not after a while: shown anyway
@@ -192,6 +201,15 @@ impl DialogWin {
                         place.hidden_frames = Some(waited + 1);
                         vctx.request_repaint();
                     }
+                }
+                // shown, but not on the screen: winit took the show as done, yet
+                // a window shown in the same frame as an exclusive question
+                // (the operations window with its overwrite question) stayed
+                // hidden, with the program's other windows disabled, so nothing
+                // could bring it back. Windows is asked directly.
+                if let Some(h) = place.hwnd.filter(|&h| shown_before && !is_visible(h)) {
+                    diag(key, "shown but not visible: showing it again");
+                    show_no_activate(h);
                 }
                 if place.hwnd.is_some() && !active && !place.flashed {
                     place.flashed = true;
@@ -206,7 +224,15 @@ impl DialogWin {
                 // every frame: windows opened meanwhile (the operations window
                 // shown in the same frame) are disabled as well
                 if let (true, Some(own)) = (self.exclusive, place.hwnd) {
-                    place.disabled_others.get_or_insert_with(Vec::new).extend(disable_others(own));
+                    let newly = disable_others(own);
+                    // one shown after it (the operations window) stays below the
+                    // question, which keeps the keyboard
+                    if !newly.is_empty() && place.shown {
+                        diag(key, "windows shown meanwhile: back on top");
+                        raise(own);
+                        activate(own);
+                    }
+                    place.disabled_others.get_or_insert_with(Vec::new).extend(newly);
                 }
             }
         });
@@ -249,6 +275,48 @@ fn disable_others(keep: isize) -> Vec<isize> {
     s.found
 }
 
+/// Whether the window `h` is shown.
+#[cfg(windows)]
+fn is_visible(h: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    unsafe { IsWindowVisible(HWND(h as *mut _)).as_bool() }
+}
+
+/// Put the window `h` above the program's other windows, without taking the focus.
+#[cfg(windows)]
+fn raise(h: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE};
+    unsafe {
+        let _ = SetWindowPos(HWND(h as *mut _), HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+/// Elsewhere windows keep their order.
+#[cfg(not(windows))]
+fn raise(_: isize) {}
+
+/// Show the window `h` without taking the focus.
+#[cfg(windows)]
+fn show_no_activate(h: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+    unsafe {
+        let _ = ShowWindow(HWND(h as *mut _), SW_SHOWNOACTIVATE);
+    }
+}
+
+/// Elsewhere windows show themselves.
+#[cfg(not(windows))]
+fn show_no_activate(_: isize) {}
+
+/// Elsewhere every window counts as shown.
+#[cfg(not(windows))]
+fn is_visible(_: isize) -> bool {
+    true
+}
+
 /// Elsewhere other windows stay usable.
 #[cfg(not(windows))]
 fn disable_others(_: isize) -> Vec<isize> {
@@ -263,6 +331,12 @@ pub fn bring_to_front(places: &Places, key: &str) {
             set_foreground(h);
         }
     }
+}
+
+/// The window of the open dialog `key`, once it exists (the owner of a
+/// standard dialog it opens).
+pub fn hwnd(places: &Places, key: &str) -> Option<isize> {
+    places.get(key).and_then(|p| p.hwnd)
 }
 
 /// Identity of the open dialog window `key` (tests: was it kept or reopened?).
@@ -287,6 +361,12 @@ pub fn close(places: &mut Places, owner: Option<isize>, which: impl Fn(&str) -> 
                 enable(h, true);
             }
         }
+    }
+    // another modal dialog still open (the operation result over the Copy
+    // dialog): the main window stays disabled, that dialog keeps the focus
+    if let Some(h) = places.values().filter(|p| p.disabled_owner).find_map(|p| p.hwnd) {
+        activate(h);
+        return;
     }
     if let Some(owner) = owner {
         // re-enabled before the dialog goes away, or Windows activates another app

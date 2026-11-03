@@ -2,7 +2,7 @@
 
 RustySalamander is a two-panel file manager for Windows 10 and 11. It is a rewrite of Open Salamander that handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
 
-Version 0.8.0-beta.
+Version 0.8.1-beta.
 
 ## Contents
 
@@ -49,7 +49,7 @@ rustysalamander.exe "C:\Projects" "D:\Backup"
 
 ### The idea of two panels
 
-The window shows two folders side by side. One panel is **active**: its path bar is highlighted and the cursor bar is shown in it. Most commands work on the active panel, and copy and move send things **to the other panel's folder** by default. Press **Tab** to switch panels, or click into the other one.
+The window shows two folders side by side. One panel is **active**: its path bar is highlighted and the cursor bar is shown in it. Most commands work on the active panel, and copy and move send things **to the other panel's folder** by default. Press **Tab** to switch panels, or click anywhere in the other one (also below the last item).
 
 ### Your first steps
 
@@ -199,6 +199,17 @@ The buttons decide when it runs:
 - **Run first** pauses what is running, runs this one, then lets the others go on.
 - **Queue last** waits until everything running or waiting has finished.
 
+Options below the target. The dialog opens with the defaults from Settings → General → Files (*Copying (F5)*, *Moving (F6)*); what you change in the dialog is for this operation only and isn't remembered.
+
+- **Run in background:** the operation starts without its progress window (the status bar shows the progress; click it to see the window). If it needs an answer (a file exists already, an error), its progress window comes back together with the question, and goes away again once you have answered.
+- **Show the result when finished:** when the operation ends, the *Operation result* window tells how it went: what was copied or moved, how long it took and how fast, how the copies were checked, and every file that failed or was skipped, with the reason. With a safe copy or move it is always shown (the tick is fixed on).
+- **Safe copy / Safe move** checks each copy right after it is written:
+  - **Off:** no check.
+  - **Compare sizes:** the copy must have as many bytes as the original.
+  - **SHA-256 checksums:** the copy is read back and its SHA-256 checksum compared with the original's. This takes about as long again as the copy. The checksums of all files are also written to a file named `RustySalamander <date> <time>.sha256`, one in the target folder and one in the source folder, in the format `sha256sum -c` checks (`<checksum> *<path>`).
+
+  A copy that fails the check is removed and you are asked to **Retry**, **Skip** or **Cancel**. A safe move deletes an original only after its copy passed the check; the checksum file in the source folder stays as a record. A move within the same drive only renames, so no data is copied: its files are listed in the checksum files but there is nothing to compare. A safe copy always shows the *Operation result* window when it ends. Inside archives and on servers (plugins) nothing is checked.
+
 ### Create directory (F7)
 
 Type a name. You can create several levels at once: `photos/2026/summer` creates all three. Folders that already exist are reused.
@@ -215,7 +226,7 @@ Copy, move and delete run in the background. You can keep working in the panels 
 
 **The *File operations* window** shows each running operation with two progress bars (data and files), the current file, the speed, the time spent and the time left. Each operation has **Pause / Resume** and **Cancel**.
 
-**Waiting operations** are listed below: **⏶ / ⏷** change their order, **Start now** runs one at once, **×** removes it.
+**Waiting operations** are listed below: **⏶ / ⏷** change their order (⏶ on the first one runs it at once and pauses the running ones until it finishes), **Start now** runs one at once, **×** removes it.
 
 **At the bottom:** *Pause all* / *Resume all*, *Cancel all* (also empties the queue) and *Run in background*.
 
@@ -223,7 +234,9 @@ Copy, move and delete run in the background. You can keep working in the panels 
 
 **When a file already exists** at the target, a window shows both side by side (name, folder, size, date; the larger and the newer one marked) and asks what to do: **Overwrite**, **Overwrite All**, **Skip**, **Skip All** or **Cancel**.
 
-**When something fails** (access denied, file in use), you get **Retry**, **Skip**, **Skip All** or **Cancel**.
+**When something fails** (access denied, file in use, a copy that fails its safe-copy check), you get **Retry**, **Skip**, **Skip All** or **Cancel**. These questions appear also while the window is hidden: the window comes back with the question, and goes away again once you have answered.
+
+**The *Operation result* window** opens when an operation started with *Show the result when finished*, or a safe copy or move, ends (see [Copy and move](#copy-and-move-f5-f6)). It is modal: the main window waits until you close it (operations that are still running go on). Results of several operations are listed in it, the newest first; **Close** or Esc closes it. **Save protocol…** saves them to a text file you choose (it starts in the target folder): for each operation what was copied or moved from where to where, when it ended, how it went, how long it took, how the copies were checked, every problem, and, after a check with checksums, every file with its SHA-256 checksum. The window stays open, so you can still remove the checksum files after saving. After a safe copy with checksums, **Close and remove checksum files** also deletes the `.sha256` files it lists, in the target and the source folders (when you only wanted the check, not the record). Like every window of the program, it opens without Windows' animation when View → *Animations* is off, also when it opens while you work in another program.
 
 ---
 
@@ -421,6 +434,9 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 | Visibility → *Show system files* | on | Lists protected system items. An item that is both hidden and system needs both on. |
 | Deleting → *Delete to Recycle Bin* | on | Off: F8 and Delete delete permanently. |
 | Deleting → *Confirm delete* | on | Asks before deleting. |
+| *Copying (F5)*, *Moving (F6)* → *Run in background* | off | What the Copy and the Move dialog offer when they open: start without the progress window. A change in the dialog is for that operation only. |
+| *Copying (F5)*, *Moving (F6)* → *Show the result when finished* | off | Show the *Operation result* window at the end. Always on with a safe copy or move. |
+| *Copying (F5)*, *Moving (F6)* → *Safe copy* / *Safe move* | Off | What the dialogs offer: *Off*, *Compare sizes* or *SHA-256 checksums* (see [Copy and move](#copy-and-move-f5-f6)). |
 
 #### Quick search
 

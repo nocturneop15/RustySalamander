@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use sal_core::encoding::display_path;
-use sal_core::fileops::{self, ConflictAction, ErrorAction, OpKind, OpObserver, OpSummary, Progress};
+use sal_core::fileops::{self, ConflictAction, ErrorAction, OpKind, OpObserver, OpSummary, Progress, TransferOptions, Verify};
 
 use crate::i18n::{tr, trf, trn};
 use crate::plugins::ops::{self, FolderOp};
@@ -105,6 +105,18 @@ pub struct Spec {
     pub target: PathBuf,
     /// The plugin that does an archive operation.
     pub plugin: Option<PluginRef>,
+    pub options: JobOptions,
+}
+
+/// How a copy or move runs, beyond what and where.
+#[derive(Debug, Clone, Default)]
+pub struct JobOptions {
+    /// How each copy is checked (safe copy); see [`TransferOptions`].
+    pub verify: Verify,
+    /// The name of the checksum files, with [`Verify::Checksum`].
+    pub checksum_name: String,
+    /// A window with the result and a summary opens when it ends.
+    pub report: bool,
 }
 
 /// A folder plugin, for operations inside its files.
@@ -315,9 +327,10 @@ impl Job {
         let mut obs = ChannelObserver { tx: tx.clone(), rx: reply_rx, cancel: cancel.clone(), paused: paused.clone(), ctx: ctx.clone() };
         let ctx2 = ctx.clone();
         let (kind, sources, target, plugin) = (spec.kind, spec.sources.clone(), spec.target.clone(), spec.plugin.clone());
+        let options = TransferOptions { verify: spec.options.verify, checksum_name: spec.options.checksum_name.clone() };
         thread::spawn(move || {
             let result = match kind {
-                JobKind::Transfer(k) => Ok(fileops::transfer(k, &sources, &target, &mut obs)),
+                JobKind::Transfer(k) => Ok(fileops::transfer_with(k, &sources, &target, &options, &mut obs)),
                 JobKind::Delete => Ok(fileops::delete(&sources, &mut obs)),
                 JobKind::Recycle => sal_core::shell::recycle(&sources).map(|_| OpSummary { files: sources.len() as u64, ..Default::default() }).map_err(|e| e.to_string()),
                 JobKind::Archive(op) => match &plugin {
@@ -426,6 +439,9 @@ pub struct Jobs {
     pub queue: VecDeque<Spec>,
     /// The operations window is hidden ("run in background").
     pub hidden: bool,
+    /// Shown only for a question of an operation in the background: hidden
+    /// again once it is answered.
+    pub shown_for_prompt: bool,
     next_id: u64,
 }
 
@@ -438,14 +454,15 @@ impl Jobs {
     /// [`Self::add_with`] for an operation of the program's own (tests).
     #[cfg(test)]
     pub fn add(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf, place: Placement) {
-        self.add_with(ctx, kind, sources, target, place, None);
+        self.add_with(ctx, kind, sources, target, place, None, JobOptions::default());
     }
 
     /// Run an operation now, or queue it (`place`); `plugin` does it when
     /// it happens inside a plugin's file or connection.
-    pub fn add_with(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf, place: Placement, plugin: Option<PluginRef>) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_with(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf, place: Placement, plugin: Option<PluginRef>, options: JobOptions) {
         self.next_id += 1;
-        let spec = Spec { id: self.next_id, kind, sources, target, plugin };
+        let spec = Spec { id: self.next_id, kind, sources, target, plugin, options };
         match place {
             Placement::Now => self.running.push(Job::start(ctx, spec)),
             Placement::First => self.run_first(ctx, spec),
@@ -506,7 +523,7 @@ impl Jobs {
     #[cfg(test)]
     pub fn add_paused(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf) {
         self.next_id += 1;
-        let spec = Spec { id: self.next_id, kind, sources, target, plugin: None };
+        let spec = Spec { id: self.next_id, kind, sources, target, plugin: None, options: JobOptions::default() };
         self.running.push(Job::spawn(ctx, spec, true));
     }
 
@@ -734,6 +751,47 @@ mod tests {
         assert!(!b.join("3").exists(), "the waiting one never ran");
     }
 
+    /// A safe copy cancelled while it copies or while it reads the copy back
+    /// ends at once, cancelled, without leaving the copy behind.
+    #[test]
+    fn cancelling_a_safe_copy_ends_it() {
+        let ctx = egui::Context::default();
+        let t = tempfile::tempdir().unwrap();
+        let (a, b) = (t.path().join("a"), t.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(a.join("big.bin"), vec![5u8; 64 << 20]).unwrap();
+        for verifying in [false, true] {
+            let options = JobOptions { verify: Verify::Checksum, checksum_name: String::new(), report: true };
+            let spec = Spec { id: 1, kind: JobKind::Transfer(OpKind::Copy), sources: vec![a.join("big.bin")], target: b.clone(), plugin: None, options };
+            let mut jobs = Jobs::default();
+            jobs.running.push(Job::spawn(&ctx, spec, false));
+            // wait for the copy, or for the reading back
+            for _ in 0..2000 {
+                jobs.poll(&ctx);
+                let p = &jobs.running[0].progress;
+                if p.bytes_done > 0 && p.verifying == verifying {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            jobs.running[0].cancel();
+            let started = Instant::now();
+            let done = loop {
+                let mut done = jobs.poll(&ctx);
+                if let Some(j) = done.pop() {
+                    break j;
+                }
+                assert!(started.elapsed() < Duration::from_secs(10), "still running after cancel (verifying: {verifying})");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            assert!(jobs.is_idle());
+            let s = done.result.unwrap().unwrap();
+            assert!(s.cancelled, "verifying: {verifying}");
+            assert!(!b.join("big.bin").exists(), "no partial or unchecked copy left (verifying: {verifying})");
+        }
+    }
+
     #[test]
     fn pause_holds_the_copy() {
         let ctx = egui::Context::default();
@@ -744,7 +802,7 @@ mod tests {
         std::fs::write(a.join("f.txt"), "x").unwrap();
         let mut jobs = Jobs::default();
         // paused before the first progress report: the file isn't copied
-        let spec = Spec { id: 1, kind: JobKind::Transfer(OpKind::Copy), sources: vec![a.join("f.txt")], target: b.clone(), plugin: None };
+        let spec = Spec { id: 1, kind: JobKind::Transfer(OpKind::Copy), sources: vec![a.join("f.txt")], target: b.clone(), plugin: None, options: JobOptions::default() };
         jobs.running.push(Job::spawn(&ctx, spec, true));
         std::thread::sleep(Duration::from_millis(300));
         assert!(jobs.poll(&ctx).is_empty());

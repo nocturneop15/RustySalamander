@@ -80,19 +80,20 @@ Examples are `snapshot_czech` (the main window and Settings in Czech), `snapshot
 |---|---|
 | `RUSTYSALAMANDER_CONFIG` | Use this configuration file instead of `config.toml` next to the program. |
 | `RUSTYSALAMANDER_PLUGINS` | Look for plugins in this folder instead of `plugins` next to the program. |
-| `RUSTYSALAMANDER_LOG` | A timing log: a file path, or `1` for `%TEMP%ustysalamander.log`. It records each start-up step (configuration, fonts, plugins, each panel) and every frame that takes over 150 ms, split into its parts (menu, each panel, dialogs…), plus background reads. Use it when the program is slow somewhere. |
+| `RUSTYSALAMANDER_LOG` | A timing log: a file path, or `1` for `%TEMP%
+ustysalamander.log`. It records each start-up step (configuration, fonts, plugins, each panel) and every frame that takes over 150 ms, split into its parts (menu, each panel, dialogs…), plus background reads. Use it when the program is slow somewhere. |
 | `SAL_DIAG_DIALOG` | `mkdir`, `settings`, `help`, `copy` or `delete`: open that dialog shortly after start-up. Any other value opens a message box. |
 | `SAL_DIAG_DIALOG_CLOSE` | `cancel` or `ok`: close that dialog again after about 3 s. |
 | `SAL_DIAG_ANSWER` | Answer the first conflict or error question with *Skip* after about 6 s. |
 | `SAL_DIAG_MENU`, `SAL_DIAG_MENU_MS` | Open both context-menu styles once after start-up, close them by timer after `SAL_DIAG_MENU_MS` ms (default 1000), and log each step to stderr. |
 | `SAL_DIAG_SEARCH` | A folder: search it for `*.dll` files containing a text that isn't there (a long search), keep the results window open for about 6 s, then quit. |
 | `SAL_DIAG_WINDOWS` | Log what each dialog window does, every frame, to stderr: hidden or shown, its owner looked up, resized. A line repeated every frame other than `frame:` means the window is being reset. |
-| `SAL_DIAG_FOREGROUND` | Open dialog windows as if the program were in the foreground, as when the user works in it (a program started from a script usually isn't). |
+| `SAL_DIAG_FOREGROUND` | `1`: open dialog windows as if the program were in the foreground, as when the user works in it (a program started from a script usually isn't). `0`: as if the user worked in another program (the dialog opens behind, the taskbar button flashes). |
 
 The `SAL_DIAG_*` variables exist to check dialogs, focus and menus in the real program, for example by capturing the program's own window, without synthetic input. Combine them with `RUSTYSALAMANDER_CONFIG` pointing at a scratch configuration, so a diagnostic run doesn't change your settings.
 
 ## Making a release
 
 1. Run `cargo clippy --workspace --all-targets`, `cargo test --workspace` and `cargo build --release`.
-2. Package `target\release` without build leftovers: `rustysalamander.exe`, `lang\`, `plugins\`, plus `README.md`, `LICENSE` and `THIRD-PARTY-NOTICES.md`. Leave out `config.toml`, `build\`, `deps\`, `incremental\`, `.fingerprint\`, `*.d` and `*.pdb`.
+2. Package `target\release` without build leftovers: `rustysalamander.exe`, `lang\`, `plugins\`, plus `README.md`, `CHANGELOG.md`, `LICENSE` (as `LICENSE.txt`), `THIRD-PARTY-NOTICES.md`, `MaterialDesignIcons-LICENSE.txt` (from `cratessal-uiontsmaterialdesignicons-LICENSE.txt`) and `USER-MANUAL.md` (from `docs`). Each plugin folder holds its own `CHANGELOG.md`. Leave out `config.toml`, `build\`, `deps\`, `incremental\`, `.fingerprint\`, `*.d` and `*.pdb`.
 3. Bump `version` in the root `Cargo.toml`. Bump `sal_plugin_api::abi::VERSION` whenever the plugin interface changed.

@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, text::LayoutJob, Align, Color32, Event, Key, Layout, Modifiers, RichText, Sense, TextFormat};
 use egui_extras::{Column, TableBuilder};
-use sal_core::config::{Config, ContextMenuStyle, ContextMenuTrigger, DriveButtons, DriveHotkey, OpenWith, PanelConfig, SuffixRule, ThemeMode};
+use sal_core::config::{Config, ContextMenuStyle, ContextMenuTrigger, DriveButtons, DriveHotkey, OpenWith, PanelConfig, SuffixRule, ThemeMode, TransferDefaults};
 use sal_core::drives::{self, Drive};
 use sal_core::encoding::{display_name, display_path, format_size, format_thousands, visual_order};
-use sal_core::fileops::{self, ConflictAction, ErrorAction, OpKind};
+use sal_core::fileops::{self, ConflictAction, ErrorAction, OpKind, OpSummary, Verify};
 use sal_core::listing::Visibility;
 use sal_core::location::{self, Target};
 use sal_core::shell::TerminalKind;
@@ -29,7 +29,7 @@ use crate::plugins::ops::{FolderOp, OpenAs};
 use crate::plugins::{self, FolderPlugin, Plugins};
 use crate::shellmenu::{self, Merged, Picked};
 use crate::shortcut::{key_letter, Shortcut};
-use crate::worker::{format_duration, Job, JobKind, Jobs, Placement, PluginRef, Prompt, Reply};
+use crate::worker::{format_duration, Job, JobKind, JobOptions, Jobs, Placement, PluginRef, Prompt, Reply, Spec};
 use sal_plugin_api::{OpenKind, Opener};
 use sal_ui::scroll_bar_visibility;
 
@@ -107,6 +107,9 @@ enum Dialog {
         kind: OpKind,
         sources: Vec<PathBuf>,
         target: String,
+        /// In the background, the result window, safe copy: from Settings,
+        /// changed for this operation only.
+        opts: TransferDefaults,
     },
     MkDir {
         name: String,
@@ -395,6 +398,13 @@ pub struct App {
     plugin_task: Option<PluginTask>,
     /// Where the next operation goes (set by the Copy/Move dialog's queue buttons).
     queue_place: Placement,
+    /// How the next operation [`Self::start_job`] starts runs (taken by it).
+    job_options: JobOptions,
+    /// Operations that ended and asked for their result to be shown, the
+    /// newest last; their window is open while there are any.
+    reports: Vec<Report>,
+    /// Where the protocol of the operations in the result window was saved.
+    protocol_saved: Option<PathBuf>,
     status: String,
     drives: Vec<Drive>,
     drives_loaded: Option<Instant>,
@@ -689,6 +699,9 @@ impl App {
             plugins,
             plugin_task: None,
             queue_place: Placement::Now,
+            job_options: JobOptions::default(),
+            reports: Vec::new(),
+            protocol_saved: None,
             status: String::new(),
             drives: Vec::new(),
             drives_loaded: None,
@@ -1246,7 +1259,7 @@ impl App {
     fn open_from_archive(&mut self, ctx: &egui::Context, file: PathBuf, how: OpenAs) -> Result<(), String> {
         let plugin = self.in_archive(&file).map(|(p, _, _)| PluginRef(p));
         let dir = plugins::temp_dir("open").map_err(|e| e.to_string())?;
-        self.jobs.add_with(ctx, JobKind::Archive(FolderOp::Open(how)), vec![file], dir, Placement::Now, plugin);
+        self.jobs.add_with(ctx, JobKind::Archive(FolderOp::Open(how)), vec![file], dir, Placement::Now, plugin, JobOptions::default());
         Ok(())
     }
 
@@ -1326,6 +1339,7 @@ impl App {
             return;
         }
         let place = std::mem::replace(&mut self.queue_place, Placement::Now);
+        let options = std::mem::take(&mut self.job_options);
         // inside, into or out of an archive: the plugin showing it does the work
         let plugin = self.in_archive(&sources[0]).or_else(|| if matches!(kind, JobKind::Transfer(_)) { self.archive_folder(&target) } else { None }).map(|(p, _, _)| PluginRef(p));
         let touches_archive = plugin.is_some();
@@ -1339,7 +1353,7 @@ impl App {
         for p in &mut self.panels {
             p.unselect(&sources);
         }
-        self.jobs.add_with(ctx, kind, sources, target, place, plugin);
+        self.jobs.add_with(ctx, kind, sources, target, place, plugin, options);
     }
 
     /// Drive list, re-read at most every few seconds (it hits the OS per drive).
@@ -1916,7 +1930,9 @@ impl App {
                         target.push(sep);
                     }
                     let kind = if cmd == Cmd::Copy { OpKind::Copy } else { OpKind::Move };
-                    self.open_dialog(Dialog::Transfer { kind, sources, target });
+                    // what Settings sets; a change in the dialog is for this operation only
+                    let d = if kind == OpKind::Copy { self.cfg.copy_defaults } else { self.cfg.move_defaults };
+                    self.open_dialog(Dialog::Transfer { kind, sources, target, opts: d });
                 }
                 Ok(())
             }
@@ -2849,6 +2865,13 @@ impl App {
         });
 
         // apply interactions after drawing
+        // any press in the panel makes it the active one: also below the last
+        // row, on the path bar or the footer, not only on an item
+        let panel_rect = egui::Rect::from_min_max(top, egui::pos2(ui.max_rect().right(), ui.min_rect().bottom()));
+        let press = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten());
+        if press.is_some_and(|p| panel_rect.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id())) {
+            self.active = idx;
+        }
         if let Some(key) = sort_click {
             self.active = idx;
             self.command(ui.ctx(), Cmd::Sort(key));
@@ -2977,13 +3000,15 @@ impl App {
                     outcome = buttons(ui, &form.ok);
                 });
             }
-            Dialog::Transfer { kind, sources, target } => {
+            Dialog::Transfer { kind, sources, target, opts } => {
                 let verb = if *kind == OpKind::Copy { tr("Copy") } else { tr("Move") };
                 let busy = self.jobs.running.len() + self.jobs.queue.len();
                 dw.modal().show(ctx, &mut self.dialog_places, "transfer", verb, 560.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(if *kind == OpKind::Copy { trf("Copy {what} to:", &[("what", &describe(sources))]) } else { trf("Move {what} to:", &[("what", &describe(sources))]) });
                     text_field(ui, target);
                     ui.small(tr("Target can be a directory, a new name, or a mask such as *.bak"));
+                    ui.add_space(6.0);
+                    transfer_options(ui, *kind, opts);
                     if busy > 0 {
                         ui.small(trn("{n} operation is running or waiting.", "{n} operations are running or waiting.", busy as u64));
                     }
@@ -3574,6 +3599,16 @@ impl App {
                                         ui.checkbox(&mut cfg.confirm_delete, tr(LBL_CONFIRM));
                                     });
                                     ui.end_row();
+
+                                    // what the Copy and Move dialogs offer each time they open
+                                    for (label, kind) in [(tr("Copying (F5)"), OpKind::Copy), (tr("Moving (F6)"), OpKind::Move)] {
+                                        ui.label(label).on_hover_text(tr("What the dialog offers each time it opens; a change there is for that operation only"));
+                                        let d = if kind == OpKind::Copy { &mut cfg.copy_defaults } else { &mut cfg.move_defaults };
+                                        ui.push_id(("transfer_defaults", label), |ui| {
+                                            ui.vertical(|ui| transfer_choices(ui, kind, d));
+                                        });
+                                        ui.end_row();
+                                    }
                                 });
 
                                 section(ui, n_("Quick search"), false, &mut |ui| {
@@ -4116,7 +4151,7 @@ impl App {
                 Some(p) => self.run_plugin_command(ctx, p, form.command, values),
                 None => self.error(tr("The plugin for this file is not enabled.")),
             },
-            Dialog::Transfer { kind, sources, target } => {
+            Dialog::Transfer { kind, sources, target, opts } => {
                 let base = self.panels[self.active].path().to_path_buf();
                 let t = location::parse_url(target.trim()).unwrap_or_else(|| PathBuf::from(target.trim()));
                 let mut target = if t.is_absolute() { t } else { base.join(t) };
@@ -4133,7 +4168,12 @@ impl App {
                         return;
                     }
                 }
+                let checksum_name = if opts.verify == Verify::Checksum { chrono::Local::now().format("RustySalamander %Y-%m-%d %H-%M-%S.sha256").to_string() } else { String::new() };
+                // a safe copy always tells how it went
+                self.job_options = JobOptions { verify: opts.verify, checksum_name, report: opts.reports() };
                 self.start_job(ctx, JobKind::Transfer(kind), sources, target);
+                // its progress window goes away at once (or comes back for one that shows it)
+                self.jobs.hidden = opts.background && !self.jobs.is_idle();
             }
             Dialog::MkDir { name } => {
                 // "/a/b/c" or "a\\b\\c": nested folders inside the current one
@@ -4226,8 +4266,10 @@ impl App {
         for job in self.jobs.poll(ctx) {
             self.job_finished(job);
         }
+        self.report_ui(ctx);
         if self.jobs.is_idle() {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| k == "job" || k == "prompt");
+            self.jobs.shown_for_prompt = false;
             return;
         }
         // keep the elapsed time and the estimate moving
@@ -4304,7 +4346,10 @@ impl App {
             act = Some(JobAct::Hide);
         }
         match act {
-            Some(JobAct::Hide) => self.jobs.hidden = true,
+            Some(JobAct::Hide) => {
+                self.jobs.hidden = true;
+                self.jobs.shown_for_prompt = false;
+            }
             Some(JobAct::PauseAll(paused)) => self.jobs.pause_all(paused),
             Some(JobAct::CancelAll) => self.jobs.cancel_all(),
             Some(JobAct::Pause(id, paused)) => {
@@ -4329,8 +4374,19 @@ impl App {
         let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None, animations: self.cfg.animations };
         let Some(job) = self.jobs.running.iter_mut().find(|j| j.prompt.is_some()) else {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| k == "prompt");
+            // answered: back to the background it was in
+            if std::mem::take(&mut self.jobs.shown_for_prompt) {
+                self.jobs.hidden = !self.jobs.is_idle();
+            }
             return;
         };
+        // an operation in the background that needs an answer comes forward:
+        // the question takes every window's input (the status bar's too), so
+        // its progress is shown beside it, and goes back once answered
+        if self.jobs.hidden {
+            self.jobs.hidden = false;
+            self.jobs.shown_for_prompt = true;
+        }
         let (mut enter, mut escape) = (false, false);
         let mut reply = None;
         let op = job.spec.describe();
@@ -4402,7 +4458,9 @@ impl App {
         self.dir_sizes.clear();
         self.free.forget();
         let title = job.spec.kind.title();
-        let done = match job.result.unwrap() {
+        let elapsed = job.rate.elapsed(Instant::now());
+        let result = job.result.unwrap();
+        let done = match &result {
             Ok(s) => {
                 let mut m = format!("{title}: {} ({})", plural(s.files as usize, "file"), format_size(s.bytes));
                 if s.skipped > 0 {
@@ -4419,11 +4477,115 @@ impl App {
                 m
             }
             Err(e) => {
-                self.error(trf("{job} failed: {error}", &[("job", &title), ("error", &e)]));
+                // a result window says so itself
+                if !job.spec.options.report {
+                    self.error(trf("{job} failed: {error}", &[("job", &title), ("error", &e)]));
+                }
                 String::new()
             }
         };
         self.job_done = (!done.is_empty()).then(|| (done, Instant::now()));
+        if job.spec.options.report {
+            self.reports.push(Report { spec: job.spec, result, elapsed, ended: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string() });
+        }
+        self.reload_all();
+    }
+
+    /// The window with the results of the operations that asked for one
+    /// (in the background, or a safe copy): how each went, what it did,
+    /// how its copies were checked and what went wrong.
+    fn report_ui(&mut self, ctx: &egui::Context) {
+        if self.reports.is_empty() {
+            dialogwin::close(&mut self.dialog_places, self.hwnd, |k| k == "report");
+            return;
+        }
+        // modal: the main window waits until the result has been read
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: true, exclusive: false, icon: None, animations: self.cfg.animations };
+        let (mut enter, mut escape) = (false, false);
+        let mut close = false;
+        let mut remove = false;
+        let mut save = false;
+        let reports = &self.reports;
+        let saved = &self.protocol_saved;
+        let has_sums = reports.iter().any(|r| r.result.as_ref().is_ok_and(|s| !s.checksum_files.is_empty()));
+        // the list's room from the main window: inside the dialog its own
+        // window is the screen, which the dialog is sized to (it would shrink)
+        let max_h = (ctx.screen_rect().height() * 0.7).max(240.0);
+        // a fixed title: the window is found by it to make it owned by the main one
+        dw.show(ctx, &mut self.dialog_places, "report", tr("Operation result"), 600.0, &mut enter, &mut escape, &mut |ui| {
+            egui::ScrollArea::vertical().max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
+                // the newest first
+                for (n, r) in reports.iter().rev().enumerate() {
+                    if n > 0 {
+                        ui.add_space(6.0);
+                        ui.separator();
+                    }
+                    report_body(ui, r);
+                }
+            });
+            ui.add_space(8.0);
+            if let Some(p) = saved {
+                ui.label(RichText::new(trf("Protocol saved to {path}", &[("path", &display_path(p))])).small().weak());
+            }
+            let mut buttons = vec![(tr("Close"), ""), (tr("Save protocol…"), tr("Save what was done, how it was checked, every problem and the checksum of every file to a text file"))];
+            if has_sums {
+                buttons.push((tr("Close and remove checksum files"), tr("Delete the .sha256 files listed above, in the target and in the source folders")));
+            }
+            match centered_buttons(ui, &buttons) {
+                Some(1) => save = true,
+                Some(2) => remove = true,
+                Some(_) => close = true,
+                None => {}
+            }
+        });
+        if save {
+            self.save_protocol();
+        }
+        if remove {
+            self.remove_checksum_files();
+        }
+        if close || remove || enter || escape {
+            self.reports.clear();
+            self.protocol_saved = None;
+        }
+    }
+
+    /// Ask where, and save the protocol of the operations in the result
+    /// window there. It starts next to the newest one's target.
+    fn save_protocol(&mut self) {
+        let Some(newest) = self.reports.last() else { return };
+        let name = chrono::Local::now().format("RustySalamander %Y-%m-%d %H-%M-%S protocol.txt").to_string();
+        let owner = dialogwin::hwnd(&self.dialog_places, "report").or(self.hwnd);
+        let Some(path) = shellmenu::pick_save(owner, tr("Save protocol"), Some(&newest.spec.target), &name) else { return };
+        self.write_protocol(&path);
+    }
+
+    /// Write the protocol of the operations in the result window to `path`.
+    fn write_protocol(&mut self, path: &Path) {
+        // UTF-8 with a BOM: older editors read it as UTF-8 too
+        let text = format!("\u{feff}{}", report_protocol(&self.reports));
+        match std::fs::write(path, text) {
+            Ok(()) => {
+                self.protocol_saved = Some(path.to_path_buf());
+                self.reload_all();
+            }
+            Err(e) => self.error(trf("Cannot save the protocol to {path}: {err}", &[("path", &display_path(path)), ("err", &e)])),
+        }
+    }
+
+    /// Delete the checksum files the operations in the result window wrote.
+    fn remove_checksum_files(&mut self) {
+        let mut failed = Vec::new();
+        for path in self.reports.iter().filter_map(|r| r.result.as_ref().ok()).flat_map(|s| &s.checksum_files) {
+            if let Err(e) = std::fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    failed.push(format!("{}: {e}", display_path(path)));
+                }
+            }
+        }
+        if !failed.is_empty() {
+            self.error(trf("Cannot remove the checksum files:\n{files}", &[("files", &failed.join("\n"))]));
+        }
         self.reload_all();
     }
 
@@ -4494,6 +4656,7 @@ impl App {
             .inner;
         if clicked {
             self.jobs.hidden = false;
+            self.jobs.shown_for_prompt = false;
             dialogwin::bring_to_front(&self.dialog_places, "job");
         }
     }
@@ -4754,10 +4917,11 @@ impl App {
 }
 
 /// Dialog windows with a life of their own, not `self.dialog`'s: those of
-/// the running operations, and the results window. Closing or opening a
+/// the running operations, the results window and the operations' result
+/// window. Closing or opening a
 /// dialog leaves them alone (forgetting one every frame would make it hide,
 /// show and take the focus again and again).
-const OWN_WINDOWS: [&str; 3] = ["job", "prompt", "results"];
+const OWN_WINDOWS: [&str; 4] = ["job", "prompt", "results", "report"];
 
 /// The fields of a plugin's form: a label and an input per row. The first
 /// text input takes the focus when the dialog opens; `browse` is set to the
@@ -5044,10 +5208,220 @@ enum JobAct {
 
 /// One running operation: what it does, progress bars, speed and time left,
 /// Pause / Cancel.
+/// An operation that ended, for the result window.
+struct Report {
+    spec: Spec,
+    result: Result<OpSummary, String>,
+    /// How long it ran, without pauses.
+    elapsed: Duration,
+    /// When it ended ("2026-11-03 14:25:01").
+    ended: String,
+}
+
+/// Run in the background, the result at the end, and safe copy: in the Copy
+/// and Move dialog, and as their defaults in Settings.
+fn transfer_choices(ui: &mut egui::Ui, kind: OpKind, d: &mut TransferDefaults) {
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut d.background, tr("Run in background"))
+            .on_hover_text(tr("The progress window doesn't open; the status bar shows the progress (click it to see the window)"));
+        ui.add_space(12.0);
+        // a safe copy always tells how it went: ticked and fixed
+        let safe = d.verify != Verify::None;
+        let mut shown = d.show_result || safe;
+        let r = ui.add_enabled(!safe, egui::Checkbox::new(&mut shown, tr("Show the result when finished")));
+        if safe {
+            r.on_disabled_hover_text(tr("Always shown after a safe copy or move"));
+        } else {
+            r.on_hover_text(tr("A window with the result and a summary opens when the operation ends"));
+            d.show_result = shown;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(if kind == OpKind::Move { tr("Safe move:") } else { tr("Safe copy:") });
+        ui.radio_value(&mut d.verify, Verify::None, tr("Off"));
+        ui.radio_value(&mut d.verify, Verify::Size, tr("Compare sizes")).on_hover_text(tr("Each copy must have as many bytes as its original"));
+        ui.radio_value(&mut d.verify, Verify::Checksum, tr("SHA-256 checksums")).on_hover_text(tr(
+            "Each copy is read back and its SHA-256 checksum compared with the original's; the checksums are written to a .sha256 file in the target folder and in the source folder",
+        ));
+    });
+}
+
+/// The options of the Copy and Move dialog, with what they mean.
+fn transfer_options(ui: &mut egui::Ui, kind: OpKind, d: &mut TransferDefaults) {
+    transfer_choices(ui, kind, d);
+    if d.verify != Verify::None {
+        let mut notes = Vec::new();
+        if kind == OpKind::Move {
+            notes.push(tr("An original is deleted only after its copy passed the check."));
+        }
+        if d.verify == Verify::Checksum {
+            notes.push(tr("Reading every copy back takes about as long again."));
+        }
+        if !notes.is_empty() {
+            ui.label(RichText::new(notes.join(" ")).small().weak());
+        }
+    }
+}
+
+/// How an operation in the result window went.
+#[derive(Clone, Copy, PartialEq)]
+enum Outcome {
+    Good,
+    Warn,
+    Bad,
+}
+
+/// The status line of an operation in the result window and its protocol.
+fn report_status(r: &Report) -> (&'static str, Outcome) {
+    match &r.result {
+        Err(_) => (tr("Failed"), Outcome::Bad),
+        Ok(s) if s.cancelled => (tr("Cancelled"), Outcome::Warn),
+        Ok(s) if s.verify_failed > 0 => (tr("Finished, some copies failed the check"), Outcome::Bad),
+        Ok(s) if s.skipped > 0 || !s.problems.is_empty() => (tr("Finished with problems"), Outcome::Warn),
+        Ok(_) => (tr("Finished"), Outcome::Good),
+    }
+}
+
+/// The facts about an operation in the result window and its protocol:
+/// heading and text (an error's text is shown in red).
+fn report_rows(r: &Report) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    let archive = matches!(r.spec.kind, JobKind::Archive(_));
+    match &r.result {
+        Err(e) => rows.push((tr("Problem"), e.clone())),
+        Ok(s) => {
+            rows.push((tr("Done"), trf("{files} ({size})", &[("files", &plural(s.files as usize, "file")), ("size", &format_size(s.bytes))])));
+            if s.skipped > 0 {
+                rows.push((tr("Skipped"), plural(s.skipped as usize, "file")));
+            }
+            let secs = r.elapsed.as_secs_f64();
+            let mut time = format_duration(r.elapsed);
+            if secs >= 1.0 && s.bytes > 0 {
+                time.push_str(&format!(" · {}/s", format_size((s.bytes as f64 / secs) as u64)));
+            }
+            rows.push((tr("Time"), time));
+            let mut check = match (s.verify, archive) {
+                (_, true) if r.spec.options.verify != Verify::None => tr("Not available inside archives and connections: nothing was checked").to_owned(),
+                (Verify::None, _) => tr("Off").to_owned(),
+                (Verify::Size, _) => trf("Sizes match: {files}", &[("files", &plural(s.verified as usize, "file"))]),
+                (Verify::Checksum, _) => trf("SHA-256 checksums match: {files}", &[("files", &plural(s.verified as usize, "file"))]),
+            };
+            if s.verify_failed > 0 {
+                check.push_str(&format!(" · {}", trf("{files} failed the check (not kept)", &[("files", &plural(s.verify_failed as usize, "file"))])));
+            }
+            if s.renamed > 0 && s.verify != Verify::None {
+                check.push_str(&format!(" · {}", trf("{files} moved within the drive, no data copied", &[("files", &plural(s.renamed as usize, "file"))])));
+            }
+            rows.push((tr("Check"), check));
+            if !s.checksum_files.is_empty() {
+                rows.push((tr("Checksum files"), s.checksum_files.iter().map(|p| display_path(p)).collect::<Vec<_>>().join("\n")));
+            }
+        }
+    }
+    rows
+}
+
+/// One operation in the result window.
+fn report_body(ui: &mut egui::Ui, r: &Report) {
+    let visuals = ui.visuals().clone();
+    let good = if visuals.dark_mode { Color32::from_rgb(110, 200, 120) } else { Color32::from_rgb(30, 130, 50) };
+    let (status, outcome) = report_status(r);
+    let color = match outcome {
+        Outcome::Good => good,
+        Outcome::Warn => visuals.warn_fg_color,
+        Outcome::Bad => visuals.error_fg_color,
+    };
+    // the time only: the date is in the protocol
+    let time = r.ended.rsplit(' ').next().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(status).strong().color(color));
+        ui.label(RichText::new(trf("at {time}", &[("time", &time)])).weak());
+    });
+    ui.add(egui::Label::new(r.spec.describe()).wrap());
+    ui.add_space(4.0);
+    egui::Grid::new(("report", r.spec.id)).num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+        for (head, text) in report_rows(r) {
+            ui.label(RichText::new(head).weak());
+            if r.result.is_err() {
+                ui.colored_label(visuals.error_fg_color, text);
+            } else {
+                ui.add(egui::Label::new(text).wrap());
+            }
+            ui.end_row();
+        }
+    });
+    if let Ok(s) = &r.result {
+        if !s.problems.is_empty() {
+            ui.add_space(4.0);
+            let more = if s.problems.len() >= fileops::MAX_PROBLEMS { "+" } else { "" };
+            egui::CollapsingHeader::new(RichText::new(format!("{} ({}{more})", tr("Problems"), s.problems.len())).color(visuals.warn_fg_color))
+                .id_salt(("problems", r.spec.id))
+                .default_open(s.problems.len() <= 10)
+                .show(ui, |ui| {
+                    for (path, message) in &s.problems {
+                        ui.add(egui::Label::new(RichText::new(display_path(path)).small()).wrap());
+                        ui.add(egui::Label::new(RichText::new(message).small().color(visuals.error_fg_color)).wrap());
+                        ui.add_space(2.0);
+                    }
+                });
+        }
+    }
+}
+
+/// The protocol of the operations in the result window, as plain text to
+/// keep: what was done, where, how it was checked, every problem, and the
+/// checksum of every file (from the checksum files, while they exist).
+fn report_protocol(reports: &[Report]) -> String {
+    let mut out = String::new();
+    let mut line = |text: &str| {
+        out.push_str(text);
+        out.push_str("\r\n");
+    };
+    line(&format!("RustySalamander {} – {}", env!("CARGO_PKG_VERSION"), tr("Operation protocol")));
+    line(&trf("Saved {time}", &[("time", &chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))]));
+    for r in reports {
+        line("");
+        line(&"=".repeat(72));
+        line(&r.spec.describe());
+        line(&format!("{}: {}", tr("Status"), report_status(r).0));
+        line(&format!("{}: {}", tr("Ended"), r.ended));
+        line(&format!("{}:", tr("Sources")));
+        for p in &r.spec.sources {
+            line(&format!("    {}", display_path(p)));
+        }
+        line(&format!("{}: {}", tr("Target"), display_path(&r.spec.target)));
+        for (head, text) in report_rows(r) {
+            let mut lines = text.lines();
+            line(&format!("{head}: {}", lines.next().unwrap_or_default()));
+            for more in lines {
+                line(&format!("    {more}"));
+            }
+        }
+        if let Ok(s) = &r.result {
+            if !s.problems.is_empty() {
+                line(&format!("{} ({}):", tr("Problems"), s.problems.len()));
+                for (path, message) in &s.problems {
+                    line(&format!("    {}", display_path(path)));
+                    line(&format!("        {message}"));
+                }
+            }
+            // every file and its checksum: from the first checksum file still there
+            if let Some(sums) = s.checksum_files.iter().find_map(|p| std::fs::read_to_string(p).ok()) {
+                line(&format!("{}:", tr("Files and their SHA-256 checksums")));
+                for l in sums.lines() {
+                    line(&format!("    {l}"));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn job_progress_ui(ui: &mut egui::Ui, job: &Job, now: Instant, act: &mut Option<JobAct>) {
     let p = &job.progress;
     ui.add(egui::Label::new(RichText::new(job.spec.describe()).strong()).truncate());
-    ui.add(egui::Label::new(RichText::new(display_path(&p.current)).small()).truncate());
+    let current = if p.verifying { trf("Verifying {path}", &[("path", &display_path(&p.current))]) } else { display_path(&p.current) };
+    ui.add(egui::Label::new(RichText::new(current).small()).truncate());
     let id = job.spec.id;
     if job.spec.kind.has_progress() {
         let frac = |a: u64, b: u64| if b == 0 { 0.0 } else { (a as f64 / b as f64).min(1.0) as f32 };
@@ -7060,6 +7434,135 @@ mod tests {
     }
 
     #[test]
+    fn background_and_safe_copy_show_the_result() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.txt"), "abc").unwrap();
+        let mut ui = Ui::new(&src, &dst);
+        ui.text("a");
+        // a plain copy: no result window
+        ui.key(Key::F5);
+        ui.key(Key::Enter);
+        ui.wait_job();
+        assert!(ui.app.reports.is_empty());
+        // in the background: the progress window is hidden at once, no result
+        fs::remove_file(dst.join("a.txt")).unwrap();
+        ui.key(Key::F5);
+        let Dialog::Transfer { opts, .. } = &mut ui.app.dialog else { panic!("no copy dialog") };
+        opts.background = true;
+        ui.key(Key::Enter);
+        assert!(ui.app.jobs.is_idle() || ui.app.jobs.hidden, "in the background");
+        ui.wait_job();
+        ui.frames(2);
+        assert!(ui.app.reports.is_empty(), "the result only when asked");
+        // the result asked for: shown at the end
+        fs::remove_file(dst.join("a.txt")).unwrap();
+        ui.key(Key::F5);
+        let Dialog::Transfer { opts, .. } = &mut ui.app.dialog else { panic!("no copy dialog") };
+        assert!(!opts.background, "not remembered: in the background only when asked each time");
+        opts.show_result = true;
+        ui.key(Key::Enter);
+        ui.wait_job();
+        ui.frames(2);
+        assert_eq!(ui.app.reports.len(), 1);
+        ui.app.reports.clear();
+        // a safe copy always shows it, and writes the checksums to both sides
+        fs::remove_file(dst.join("a.txt")).unwrap();
+        ui.key(Key::F5);
+        let Dialog::Transfer { opts, .. } = &mut ui.app.dialog else { panic!("no copy dialog") };
+        assert!(!opts.show_result, "not remembered");
+        opts.verify = Verify::Checksum;
+        ui.key(Key::Enter);
+        ui.wait_job();
+        ui.frames(2);
+        let [r] = ui.app.reports.as_slice() else { panic!("one result: {}", ui.app.reports.len()) };
+        let s = r.result.as_ref().unwrap();
+        assert_eq!((s.files, s.verified, s.verify), (1, 1, Verify::Checksum));
+        assert_eq!(s.checksum_files.len(), 2);
+        assert!(s.checksum_files[0].starts_with(&dst) && s.checksum_files[1].starts_with(&src), "{:?}", s.checksum_files);
+        let listed = fs::read_to_string(&s.checksum_files[0]).unwrap();
+        assert!(listed.ends_with(" *a.txt\n"), "{listed}");
+        let sums = s.checksum_files.clone();
+        // the protocol: what, where, the check, and every file's checksum
+        let protocol = t.path().join("protocol.txt");
+        ui.app.write_protocol(&protocol);
+        assert_eq!(ui.app.protocol_saved.as_deref(), Some(protocol.as_path()));
+        let text = fs::read_to_string(&protocol).unwrap();
+        assert!(text.starts_with('\u{feff}'), "UTF-8 with a BOM");
+        for want in ["Copy \"a.txt\" to", "Status: Finished", "SHA-256 checksums match: 1 file", listed.trim_end()] {
+            assert!(text.contains(want), "{want:?} in:\n{text}");
+        }
+        // the window stays as it is from frame to frame, not opened again
+        let serial = dialogwin::serial(&ui.app.dialog_places, "report").expect("shown");
+        ui.frames(3);
+        assert_eq!(dialogwin::serial(&ui.app.dialog_places, "report"), Some(serial), "kept open");
+        // Esc closes the result window
+        ui.key(Key::Escape);
+        assert!(ui.app.reports.is_empty());
+        ui.frames(2);
+        assert!(dialogwin::serial(&ui.app.dialog_places, "report").is_none());
+        assert!(sums.iter().all(|p| p.exists()), "closing keeps the checksum files");
+        // closing with the other button removes them
+        ui.app.reports.push(Report { spec: Spec { id: 99, kind: JobKind::Transfer(OpKind::Copy), sources: vec![], target: dst.clone(), plugin: None, options: JobOptions::default() }, result: Ok(OpSummary { checksum_files: sums.clone(), ..Default::default() }), elapsed: Duration::ZERO, ended: String::new() });
+        ui.app.remove_checksum_files();
+        assert!(sums.iter().all(|p| !p.exists()), "removed");
+        assert!(dst.join("a.txt").exists() && src.join("a.txt").exists(), "only the checksum files");
+        ui.app.reports.clear();
+
+        // the dialogs' choices are for that operation only: they open with Settings' defaults
+        assert_eq!(ui.app.cfg.copy_defaults, TransferDefaults::default(), "not remembered");
+        let moving = TransferDefaults { background: true, show_result: false, verify: Verify::Size };
+        ui.app.cfg.move_defaults = moving;
+        for (key, kind, want) in [(Key::F5, OpKind::Copy, TransferDefaults::default()), (Key::F6, OpKind::Move, moving)] {
+            ui.key(key);
+            let Dialog::Transfer { kind: k, opts, .. } = &ui.app.dialog else { panic!("no dialog for {kind:?}") };
+            assert_eq!((*k, *opts), (kind, want));
+            assert_eq!(opts.reports(), kind == OpKind::Move, "a safe move always shows its result");
+            ui.key(Key::Escape);
+        }
+    }
+
+    /// A copy in the background that has to ask (the target exists) shows
+    /// its progress window again beside the question.
+    #[test]
+    fn background_copy_that_asks_comes_forward() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.txt"), "new").unwrap();
+        fs::write(dst.join("a.txt"), "old").unwrap();
+        let mut ui = Ui::new(&src, &dst);
+        ui.text("a");
+        ui.key(Key::F5);
+        let Dialog::Transfer { opts, .. } = &mut ui.app.dialog else { panic!("no copy dialog") };
+        opts.background = true;
+        opts.show_result = true;
+        ui.key(Key::Enter);
+        assert!(ui.app.jobs.hidden, "in the background");
+        for _ in 0..300 {
+            ui.frames(1);
+            if ui.app.jobs.running.first().is_some_and(|j| j.prompt.is_some()) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ui.frames(2);
+        assert!(ui.app.jobs.running[0].prompt.is_some(), "asks");
+        assert!(!ui.app.jobs.hidden, "its window is back with the question");
+        ui.app.jobs.running[0].answer(Reply::Conflict(ConflictAction::Overwrite));
+        ui.frames(2);
+        assert!(ui.app.jobs.hidden || ui.app.jobs.is_idle(), "back in the background once answered");
+        ui.wait_job();
+        assert!(!ui.app.jobs.shown_for_prompt);
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "new");
+        ui.frames(2);
+        assert_eq!(ui.app.reports.len(), 1, "and the result at the end");
+    }
+
+    #[test]
     fn rename_move_and_delete() {
         let t = tempfile::tempdir().unwrap();
         let (a, b) = (t.path().join("a"), t.path().join("b"));
@@ -7625,6 +8128,24 @@ mod tests {
         ui.run(vec![button(true)], Modifiers::NONE);
         ui.run(vec![button(false)], Modifiers::NONE);
         ui.frames(2);
+    }
+
+    #[test]
+    fn click_on_empty_space_activates_the_panel() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        assert_eq!(ui.app.active, 0);
+        // below the last row of the right panel: no item there
+        let body = ui.app.body_rects[1];
+        let last = ui.app.row_hits[1].iter().map(|(r, _)| r.bottom()).fold(body.top(), f32::max);
+        let empty = egui::pos2(body.center().x, (last + body.bottom()) / 2.0);
+        assert!(empty.y > last + 4.0, "room below the rows: {last} vs {body:?}");
+        click(&mut ui, empty);
+        assert_eq!(ui.app.active, 1, "empty space");
+        // and the footer of the left one
+        let footer = egui::pos2(ui.app.body_rects[0].center().x, ui.app.body_rects[0].bottom() + 8.0);
+        click(&mut ui, footer);
+        assert_eq!(ui.app.active, 0, "footer");
     }
 
     #[test]
@@ -8981,6 +9502,40 @@ mod tests {
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("conflict.png"));
         ui.app.jobs.running[0].cancel();
+        ui.wait_job();
+
+        // the Copy dialog with its options: in the background, safe copy with checksums
+        ui.app.open_dialog(Dialog::Transfer { kind: OpKind::Move, sources: vec![src.join("video.mkv")], target: display_path(&dst), opts: TransferDefaults { background: true, show_result: false, verify: Verify::Checksum } });
+        ui.frames(20);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("transfer_options.png"));
+        ui.app.dialog = Dialog::None;
+
+        // the result window: a safe copy that went well, one with problems
+        let spec = |id, kind| Spec { id, kind, sources: vec![src.join("video.mkv"), src.join("zpráva.docx")], target: dst.clone(), plugin: None, options: JobOptions::default() };
+        let ok = OpSummary {
+            files: 2,
+            bytes: 3_002_000,
+            verify: Verify::Checksum,
+            verified: 2,
+            checksum_files: vec![dst.join("RustySalamander 2026-11-03 14-25-01.sha256"), src.join("RustySalamander 2026-11-03 14-25-01.sha256")],
+            ..Default::default()
+        };
+        let bad = OpSummary {
+            files: 1,
+            bytes: 3_000_000,
+            skipped: 1,
+            verify: Verify::Size,
+            verified: 1,
+            verify_failed: 1,
+            problems: vec![(dst.join("zpráva.docx"), "verification failed: the copy has 1000 bytes, the original 2000".into())],
+            ..Default::default()
+        };
+        ui.app.reports.push(Report { spec: spec(10, JobKind::Transfer(OpKind::Copy)), result: Ok(ok), elapsed: Duration::from_secs(12), ended: "14:25:01".into() });
+        ui.app.reports.push(Report { spec: spec(11, JobKind::Transfer(OpKind::Move)), result: Ok(bad), elapsed: Duration::from_secs(3), ended: "14:31:40".into() });
+        ui.frames(20);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("operation_result.png"));
     }
 
     fn qs_files(t: &Path) {

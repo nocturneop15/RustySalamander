@@ -476,6 +476,41 @@ mod imp {
         Some(PathBuf::from(std::ffi::OsString::from_wide(&file[..n])))
     }
 
+    /// The standard "Save as" dialog for a text file, starting in `dir` with
+    /// `name`; asks before replacing a file. Never in tests.
+    pub fn pick_save(owner: Option<isize>, title: &str, dir: Option<&Path>, name: &str) -> Option<PathBuf> {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows::Win32::UI::Controls::Dialogs::{GetSaveFileNameW, OFN_DONTADDTORECENT, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW};
+        if cfg!(test) {
+            return None;
+        }
+        let filter: Vec<u16> = "Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0".encode_utf16().collect();
+        let title = wide(title);
+        let ext = wide("txt");
+        let dir: Option<Vec<u16>> = dir.filter(|d| d.is_dir()).map(|d| d.as_os_str().encode_wide().chain([0]).collect());
+        let mut file = vec![0u16; 32768];
+        for (i, c) in name.encode_utf16().take(file.len() - 1).enumerate() {
+            file[i] = c;
+        }
+        let mut ofn = OPENFILENAMEW {
+            lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+            hwndOwner: owner.map(hwnd).unwrap_or_default(),
+            lpstrFilter: PCWSTR(filter.as_ptr()),
+            lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: PCWSTR(title.as_ptr()),
+            lpstrDefExt: PCWSTR(ext.as_ptr()),
+            lpstrInitialDir: dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())),
+            Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT,
+            ..Default::default()
+        };
+        if !unsafe { GetSaveFileNameW(&mut ofn) }.as_bool() {
+            return None;
+        }
+        let n = file.iter().position(|&c| c == 0).unwrap_or(0);
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&file[..n])))
+    }
+
     /// The standard folder picker (a plugin form's Browse… for a folder),
     /// starting in `current` when it exists. Never in tests.
     pub fn pick_folder(owner: Option<isize>, title: &str, current: Option<&Path>) -> Option<PathBuf> {
@@ -582,7 +617,7 @@ mod imp {
 use imp::verbs;
 #[cfg(windows)]
 pub use imp::{
-    arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up,
+    arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, pick_save, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up,
 };
 
 #[cfg(not(windows))]
@@ -620,6 +655,10 @@ mod fallback {
     pub fn pick_file(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
         None
     }
+    /// Elsewhere there is no Save dialog.
+    pub fn pick_save(_: Option<isize>, _: &str, _: Option<&Path>, _: &str) -> Option<PathBuf> {
+        None
+    }
     /// Elsewhere there is no folder picker.
     pub fn pick_folder(_: Option<isize>, _: &str, _: Option<&Path>) -> Option<PathBuf> {
         None
@@ -631,7 +670,7 @@ mod fallback {
 }
 
 #[cfg(not(windows))]
-pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up};
+pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, pick_save, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up};
 
 #[cfg(all(test, windows))]
 mod tests {
