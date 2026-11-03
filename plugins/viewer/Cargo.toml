@@ -2,7 +2,7 @@
 name = "sal-plugin-viewer"
 description = "RustySalamander plugin: the text and hex viewer (F3)"
 # the plugin's own version, apart from the program's
-version = "0.5.9-alpha"
+version = "0.6.0-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,6 +19,7 @@ sal-core = { path = "../../crates/sal-core" }
 sal-ui = { path = "../../crates/sal-ui" }
 sal-window = { path = "../../crates/sal-window" }
 syntect = { version = "5", default-features = false, features = ["parsing", "regex-onig", "dump-load"] }
+regex = "1"
 two-face = { version = "0.4", default-features = false, features = ["syntect-onig"] }
 
 [dev-dependencies]

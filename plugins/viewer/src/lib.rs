@@ -4,6 +4,7 @@
 //! `window.rs`).
 
 mod doc;
+mod find;
 mod highlight;
 mod window;
 
@@ -79,7 +80,7 @@ impl FolderPlugin for Viewer {
             return Err(unsupported());
         }
         let file = file.to_path_buf();
-        self.windows.open(Box::new(move || Box::new(window::ViewerWin { doc: doc::Doc::open(&file) })), options.clone())
+        self.windows.open(Box::new(move || Box::new(window::ViewerWin::new(doc::Doc::open(&file)))), options.clone())
     }
 }
 

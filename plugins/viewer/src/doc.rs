@@ -185,6 +185,12 @@ impl Doc {
         }
     }
 
+    /// Changes whenever the lines or their colors do (search results made for
+    /// another one are out of date).
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// The bytes read (at most [`MAX_BYTES`]).
     pub fn len(&self) -> usize {
         self.bytes.len()

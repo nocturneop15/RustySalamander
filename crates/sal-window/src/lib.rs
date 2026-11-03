@@ -28,6 +28,11 @@ pub trait Content {
     /// Draw the window's panels into `ctx`; false closes it. Escape and F10
     /// close it too.
     fn show(&mut self, ctx: &egui::Context) -> bool;
+    /// Whether Escape is the content's now (a find bar to close) instead of
+    /// closing the window.
+    fn takes_escape(&self) -> bool {
+        false
+    }
 }
 
 /// Makes a window's content, on the windows' thread (where reading a file
@@ -340,7 +345,8 @@ impl Win {
         if let Some((outer, inner)) = ctx.input(|i| Some((i.viewport().outer_rect?, i.viewport().inner_rect?))) {
             self.place = Some((outer.min, inner.size()));
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::F10)) {
+        let escape = !self.content.takes_escape() && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if escape || ctx.input(|i| i.key_pressed(egui::Key::F10)) {
             self.open = false;
         }
         if !self.content.show(ctx) {

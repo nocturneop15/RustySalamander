@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.6.0-alpha (2026-11-03)
+
+- **Find in the file:** Ctrl+F (or the magnifier in the toolbar) opens a find bar. Every match is marked as you type, the current one in orange, with *3 of 12* beside it; Enter or F3 goes to the next match, Shift+Enter or Shift+F3 to the previous one, round the end. **Match case** makes upper and lower case count; without it, case is ignored in every language (`ŽLUŤ` finds `žluť`). **Wildcards** makes `*` stand for any characters and `?` for one (`file*.txt`, `a?b`); without it, they are plain characters. Esc closes the bar, a second Esc the window. A match found while the Hex view is shown is shown in the Text view.
+
 ## 0.5.9-alpha (2026-11-02)
 
 - **No window animation with animations off:** with View → Animations turned off in the program (RustySalamander 0.7.4-alpha and later), Windows no longer fades or zooms its windows in and out.

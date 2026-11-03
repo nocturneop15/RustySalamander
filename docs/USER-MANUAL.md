@@ -2,7 +2,7 @@
 
 RustySalamander is a two-panel file manager for Windows 10 and 11. It is a rewrite of Open Salamander that handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
 
-Version 0.8.1-beta.
+Version 0.8.2-beta.
 
 ## Contents
 
@@ -291,6 +291,11 @@ F3 opens the file in RustySalamander's own viewer, in a window of its own (the V
 - **Wrap** long lines (Ctrl+W).
 - **Encoding:** detected automatically (UTF-8, UTF-16, your Windows code page); the list lets you switch to Windows-125x, ISO-8859-2, KOI8-R, CP866, Shift-JIS, EUC-JP, GBK, Big5 or EUC-KR.
 - **Coloring:** source code and other text formats (about 200: JSON, XML, HTML, PowerShell, C, Python, …) are colored by their format, recognized from the name or the first line. Pick another one or *Plain text* in the list.
+- **Find** (Ctrl+F, or the magnifier in the toolbar): type what you look for. Every match is marked as you type, the current one in orange, and *3 of 12* says where you are. **Enter** or **F3** goes to the next match, **Shift+Enter** or **Shift+F3** to the previous one, round the end of the file.
+  - **Match case:** upper and lower case must be the same. Without it, case doesn't matter, in any language (`ŽLUŤ` finds `žluť`).
+  - **Wildcards:** `*` stands for any characters and `?` for one, within a line: `file*.txt` finds `file1.txt` and `file22.txt`, `a?b` finds `axb`. Without it, `*` and `?` are found as they are.
+  - The search is in the text; a match found while the Hex view is shown is shown in the Text view.
+  - **Esc** closes the find bar; a second Esc closes the window.
 - **Esc** or **F10** closes the window. Several viewer windows can be open at once.
 
 ### The editor (F4)
@@ -603,7 +608,7 @@ These are the default keys. Everything in the first three tables can be changed 
 
 ### In the viewer
 
-F4 text/hex · Ctrl+W wrap · Esc or F10 close.
+F4 text/hex · Ctrl+W wrap · Ctrl+F find · F3 / Shift+F3 (or Enter / Shift+Enter in the find bar) next / previous match · Esc close the find bar, then the window · F10 close.
 
 ### In the file comparison window
 

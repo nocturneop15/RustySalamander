@@ -73,7 +73,8 @@ plugins/search    the search plugin (plugins\search\search.spl): Find files, res
 plugins/viewer    the Viewer plugin (plugins\viewer\viewer.spl): F3 text/hex viewer in windows of its own
 plugins/compare   the Compare plugin (plugins\compare\compare.spl): files side by side, folders in both panels
   doc.rs          a file as text in an encoding, or as hex
-  window.rs       the viewer windows, on a thread and event loop of the plugin's own
+  find.rs         finding text: any case or matching case, * and ? wildcards
+  window.rs       the viewer windows with the find bar, on a thread and event loop of the plugin's own
 plugins/*/CHANGELOG.md   each plugin's own changelog (its own versions)
 plugins/example-filelist   a small example plugin for plugin authors (not installed)
 tools/            subset-mdi.py: cuts the icon font down to the icons in use

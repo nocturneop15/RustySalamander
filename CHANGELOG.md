@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2-beta (2026-11-03)
+
+- **Find in the viewer:** Ctrl+F in the viewer (F3) opens a find bar. Every match is marked as you type, *3 of 12* says where you are, Enter or F3 goes to the next match and Shift+F3 to the previous one. **Match case** makes upper and lower case count (otherwise case is ignored in every language); **Wildcards** makes `*` stand for any characters and `?` for one. Esc closes the bar, a second Esc the window. The Viewer 0.6.0-alpha is bundled.
+
 ## 0.8.1-beta (2026-11-03)
 
 - **Safe copy and safe move:** the Copy and Move dialog checks each copy right after it is written: *Compare sizes*, or *SHA-256 checksums* (each copy is read back and compared with the original). With checksums, every file's checksum is also written to `RustySalamander <date> <time>.sha256` in the target folder and in the source folder, in the format `sha256sum -c` checks. A copy that fails the check is removed and you are asked to Retry, Skip or Cancel; a safe move deletes an original only after its copy passed.
