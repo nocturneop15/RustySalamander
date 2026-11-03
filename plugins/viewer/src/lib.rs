@@ -6,6 +6,8 @@
 mod doc;
 mod find;
 mod highlight;
+#[cfg(test)]
+mod snapshot;
 mod window;
 
 use std::io;

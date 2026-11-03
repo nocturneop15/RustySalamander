@@ -134,7 +134,8 @@ impl Content for ViewerWin {
         if find.open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             find.open = false;
         }
-        egui::TopBottomPanel::top("viewer_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("viewer_bar").frame(bar_frame(ctx)).show(ctx, |ui| {
+            roomy(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut doc.hex, false, tr("Text"));
                 ui.selectable_value(&mut doc.hex, true, tr("Hex")).on_hover_text(tr("F4 toggles"));
@@ -197,11 +198,12 @@ impl Content for ViewerWin {
             });
         });
         if find.open {
-            egui::TopBottomPanel::top("find_bar").show(ctx, |ui| {
+            egui::TopBottomPanel::top("find_bar").frame(bar_frame(ctx)).show(ctx, |ui| {
+                roomy(ui);
                 ui.horizontal(|ui| {
                     ui.label(tr("Find:"));
                     let hint = if find.query.wildcards { tr("text, * any characters, ? one") } else { tr("text") };
-                    let field = ui.add(egui::TextEdit::singleline(&mut find.query.text).desired_width(260.0).hint_text(hint));
+                    let field = ui.add(egui::TextEdit::singleline(&mut find.query.text).desired_width(260.0).margin(egui::vec2(6.0, 4.0)).hint_text(hint));
                     if std::mem::take(&mut find.focus) {
                         field.request_focus();
                         select_all(ui, &field, &find.query.text);
@@ -301,6 +303,21 @@ impl Content for ViewerWin {
     }
 }
 
+/// The toolbar's and the find bar's frame: room around the controls, so none
+/// touches the bar's edge or the line under it.
+fn bar_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(10.0, 7.0))
+}
+
+/// Room between and inside the controls of a bar: buttons, boxes and the
+/// text field don't touch each other or their text.
+fn roomy(ui: &mut egui::Ui) {
+    let s = ui.spacing_mut();
+    s.item_spacing = egui::vec2(8.0, 6.0);
+    s.button_padding = egui::vec2(8.0, 4.0);
+    s.interact_size.y = s.interact_size.y.max(24.0);
+}
+
 /// Select all text of a text field (so typing replaces what was looked for).
 fn select_all(ui: &egui::Ui, field: &egui::Response, text: &str) {
     if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), field.id) {
@@ -326,7 +343,7 @@ impl<'a> Marks<'a> {
             current: current.and_then(|c| hits.get(c).copied()),
             // every match a soft yellow, the current one orange
             other: if dark { Color32::from_rgba_unmultiplied(220, 180, 0, 70) } else { Color32::from_rgba_unmultiplied(255, 220, 0, 150) },
-            this: if dark { Color32::from_rgba_unmultiplied(255, 130, 0, 170) } else { Color32::from_rgba_unmultiplied(255, 150, 0, 200) },
+            this: Color32::from_rgb(255, 150, 0),
         }
     }
 
@@ -374,6 +391,10 @@ fn line_job(ui: &egui::Ui, text: &str, spans: Option<&[Span]>, marks: &[(usize, 
         }
         if let Some(m) = marks.iter().find(|m| m.0 <= a && a < m.1) {
             format.background = m.2;
+            // the current match is solid: its text in a color readable on it
+            if m.2.is_opaque() {
+                format.color = sal_ui::readable_on(m.2);
+            }
         }
         job.append(&text[a..b], 0.0, format);
     }
@@ -410,7 +431,7 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let red = Span { len: 3, rgb: [200, 0, 0], italic: false, underline: false };
-                let mark = Color32::YELLOW;
+                let mark = Color32::from_rgba_unmultiplied(255, 220, 0, 150);
                 // "cdeř" is found: it starts inside the red span and ends in plain text
                 let job = line_job(ui, "abcdeřest", Some(&[red]), &[(2, 7, mark)]);
                 let parts: Vec<(&str, Color32, Color32)> =
@@ -420,6 +441,43 @@ mod tests {
                 assert_eq!(parts, [("ab", red, Color32::TRANSPARENT), ("c", red, mark), ("deř", plain, mark), ("est", plain, Color32::TRANSPARENT)]);
             });
         });
+    }
+
+    /// Render a viewer window with the find bar to PNGs (dark and light) in
+    /// SNAPSHOT_DIR or the temp folder, to look at its layout.
+    #[test]
+    #[ignore]
+    fn snapshot_viewer() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("notes.json");
+        let text: String = (0..60).map(|i| format!("{{\"line\": {i}, \"name\": \"Kůň {i}\", \"ok\": true}}\n")).collect();
+        std::fs::write(&file, text).unwrap();
+        let out_dir = std::env::var_os("SNAPSHOT_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        for (dark, name) in [(true, "viewer_dark.png"), (false, "viewer_light.png")] {
+            let mut w = ViewerWin::new(Doc::open(&file));
+            w.find.open = true;
+            w.find.query.text = "kůň".into();
+            let ctx = egui::Context::default();
+            ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
+            sal_ui::fonts::install(&ctx, "", "");
+            let mut snap = crate::snapshot::Snapshot::default();
+            let input = || egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 360.0))),
+                ..Default::default()
+            };
+            for _ in 0..3 {
+                let out = ctx.run(input(), |ctx| {
+                    w.show(ctx);
+                });
+                snap.apply(&out);
+            }
+            let out = ctx.run(input(), |ctx| {
+                w.show(ctx);
+            });
+            snap.apply(&out);
+            let bg = ctx.style().visuals.panel_fill;
+            snap.render(&ctx, out, bg, &out_dir.join(name));
+        }
     }
 
     /// Ctrl+F opens the find bar, the text is found from the first line
