@@ -2,7 +2,7 @@
 
 RustySalamander is a two-panel file manager for Windows 10 and 11. It is a rewrite of Open Salamander that handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
 
-Version 0.8.2-beta.
+Version 0.8.3-beta.
 
 ## Contents
 
@@ -88,7 +88,7 @@ From top to bottom:
 | Date | When it was last changed |
 | Attr | The attributes: **R** read-only, **H** hidden, **S** system, **A** archive, **C** compressed, **E** encrypted |
 
-**Sorting:** click a column header to sort by it, click again for the reverse order. A small arrow shows which column sorts and which way. Ctrl+F3 to Ctrl+F6 sort by name, extension, time and size. Folders are always listed before files. Names sort in the alphabetical order of your Windows language, and numbers in names by value (`file2` before `file10`).
+**Sorting:** click a column header to sort by it, click again for the reverse order. A small arrow shows which column sorts and which way: pointing up for ascending (A to Z, smallest or oldest first), pointing down for descending. Ctrl+F3 to Ctrl+F6 sort by name, extension, time and size. Folders are always listed before files. Names sort in the alphabetical order of your Windows language, and numbers in names by value (`file2` before `file10`).
 
 **Column widths:** drag the edge to the left of **Ext**, **Size** or **Date** in the header row to make that column wider or narrower. **Name** always takes the rest of the width. **Attr** is just as wide as its letters.
 
@@ -113,10 +113,10 @@ Inside an archive, on a server, in search results or in a comparison, the panel 
 
 ### Drives
 
-- **Drive button / drive selector:** click the drive button above a panel, or press **Alt+F1** (left panel) / **Alt+F2** (right panel). The list shows local drives, then network drives, then open server sessions, searches and comparisons, then *Recent paths* you typed. Each drive has its icon: blue for local disks, green for network drives, orange for USB sticks, purple for CD/DVD.
+- **Drive button / drive selector:** click the drive button above a panel, or press **Alt+F1** (left panel) / **Alt+F2** (right panel). The list shows local drives, then network drives, then open server sessions, searches and comparisons, then *Recent paths* you typed. The last row, **From right panel** (⏪, in the left panel) or **From left panel** (⏩, in the right panel), takes the panel to the folder the other panel shows. Each drive has its icon: blue for local disks, green for network drives, orange for USB sticks, purple for CD/DVD.
 - **Letter keys:** **Shift+C** goes to drive C:, **Shift+D** to D:, and so on. The modifier can be Shift, Alt, Ctrl+Shift or none (Settings → Keyboard shortcuts → *Go to drive*).
 - **Back where you were:** changing to a drive returns to the folder you last had open on it (Settings → General → Drives).
-- **All drives at once:** Settings → General → Drives → *Drive buttons* → *All drives* shows a button for every drive above each panel. Next to them come drop-down lists of server sessions and searches (with Disconnect, Refresh and Close buttons) and a button for the comparison.
+- **All drives at once:** Settings → General → Drives → *Drive buttons* → *All drives* shows a button for every drive above each panel. Next to them come drop-down lists of server sessions and searches (with Disconnect, Refresh and Close buttons) and a button for the comparison. The last button, ⏪ above the left panel or ⏩ above the right one, takes the panel to the folder the other panel shows.
 
 ### The path bar
 
@@ -348,7 +348,7 @@ You can then copy and move files in and out (F5, F6), delete (F8), rename (F2), 
 - **Names:** masks such as `*.txt;*.md`, with masks to leave out after `|` (`*.log|old*`), or a regular expression.
 - **Look in:** the folder to search, the active panel's folder to start with, with or without subfolders. Hidden and system items can be left out.
 - **Containing text:** optional. Found in any case unless *Match case* is on, in UTF-8, UTF-16 and ANSI files; or a regular expression.
-- **Find folders too:** folders whose names match are results as well.
+- **Find folders too:** folders whose names match are results as well (on to start with).
 
 The **results window** fills while the search runs. Columns sort with a click.
 

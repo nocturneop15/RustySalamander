@@ -79,7 +79,8 @@ impl Content for DiffWin {
         if prev {
             self.step(false);
         }
-        egui::TopBottomPanel::top("compare_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("compare_bar").frame(sal_ui::layout::bar_frame(&ctx.style())).show(ctx, |ui| {
+            sal_ui::layout::controls(ui);
             ui.horizontal(|ui| {
                 let n = self.changes().len();
                 let text = match &self.outcome {
@@ -105,15 +106,15 @@ impl Content for DiffWin {
                 }
             });
         });
-        egui::CentralPanel::default().show(ctx, |ui| match &self.outcome {
+        egui::CentralPanel::default().frame(sal_ui::layout::content_frame(&ctx.style())).show(ctx, |ui| match &self.outcome {
             Err(e) => {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
             Ok(Outcome::Binary { sizes, first_difference }) => {
-                ui.add_space(12.0);
+                ui.add_space(sal_ui::layout::GAP_LARGE);
                 ui.label(format!("{}: {}", display_path(&self.left), trf("{bytes} bytes", &[("bytes", &format_thousands(sizes.0))])));
                 ui.label(format!("{}: {}", display_path(&self.right), trf("{bytes} bytes", &[("bytes", &format_thousands(sizes.1))])));
-                ui.add_space(8.0);
+                ui.add_space(sal_ui::layout::GAP);
                 ui.label(RichText::new(match first_difference {
                     None => tr("The files are the same."),
                     Some(at) => trf("The files differ from byte {at} on.", &[("at", &format_thousands(*at))]),
@@ -147,7 +148,8 @@ fn text_view(ui: &mut egui::Ui, rows: &[Row], left: &std::path::Path, right: &st
     let digits = rows.len().max(1).to_string().len();
     let num_w = ui.fonts(|f| f.layout_no_wrap("0".repeat(digits), egui::TextStyle::Monospace.resolve(ui.style()), Color32::WHITE).size().x) + 10.0;
     let dark = ui.visuals().dark_mode;
-    let half = ((ui.available_width() - 6.0) / 2.0).max(50.0);
+    let gap = sal_ui::layout::COLUMN_GAP;
+    let half = ((ui.available_width() - gap) / 2.0).max(50.0);
     ui.horizontal(|ui| {
         for p in [left, right] {
             ui.add_sized([half, row_h], egui::Label::new(RichText::new(display_path(p)).weak()).truncate());
@@ -162,9 +164,9 @@ fn text_view(ui: &mut egui::Ui, rows: &[Row], left: &std::path::Path, right: &st
         for row in &rows[range] {
             let (lf, rf) = fills(row.tag, dark);
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().item_spacing.x = gap;
                 for (side, fill) in [(&row.left, lf), (&row.right, rf)] {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(half - 3.0, row_h), egui::Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(half - gap / 2.0, row_h), egui::Sense::hover());
                     ui.painter().rect_filled(rect, 0.0, fill);
                     if let Some((n, text)) = side {
                         let mono = egui::TextStyle::Monospace.resolve(ui.style());

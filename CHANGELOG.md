@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3-beta (2026-11-03)
+
+- **From the other panel:** the drive selector (Alt+F1, Alt+F2) ends with **From right panel** in the left panel and **From left panel** in the right one: the panel goes straight to the folder the other one shows. With *All drives* in Settings, the same is a button (⏪ / ⏩) at the end of the drive buttons.
+- **The sort arrow points the way the list is sorted:** up for ascending (A to Z, smallest, oldest first), down for descending, in every column.
+- **One layout for every window:** the dialogs, Settings, the operations and result windows, plugin forms and the plugins' windows (Viewer, Compare) share the same margins, gaps, button padding, control heights, forms and tables. Every dialog ends with its buttons centred, Settings and Keyboard help too.
+- **Plugin forms** (Find files, Connect to server) are wider and laid out in two clean columns: labels on the left, tick boxes with their text beside them, fields that end at the same edge, notes across the whole width.
+- **Find files** finds folders too by default. Search 0.5.4-alpha, Viewer 0.6.2-alpha and Compare 0.1.3-alpha are bundled.
+
 ## 0.8.2-beta (2026-11-03)
 
 - **Find in the viewer:** Ctrl+F in the viewer (F3) opens a find bar. Every match is marked as you type, *3 of 12* says where you are, Enter or F3 goes to the next match and Shift+F3 to the previous one. **Match case** makes upper and lower case count (otherwise case is ignored in every language); **Wildcards** makes `*` stand for any characters and `?` for one. Esc closes the bar, a second Esc the window. The Viewer 0.6.0-alpha is bundled.

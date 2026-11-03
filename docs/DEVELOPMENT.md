@@ -73,6 +73,7 @@ Examples are `snapshot_czech` (the main window and Settings in Czech), `snapshot
   ```
 
   Then add the Czech translation to `crates/sal-app/lang/cs.toml` (or the plugin's `lang/cs.toml`). The test `language_files_match_the_code` fails while any language file lacks a string or has an unused one.
+- **Spacing and alignment** come from `sal_ui::layout`, in the program, its dialogs and the plugins' windows alike: margins, gaps (`GAP_SMALL`, `GAP`, `GAP_LARGE`), button padding, the height of controls, and the frames and grids built from them (`dialog_frame`, `bar_frame`, `content_frame`, `group_frame`, `form_grid`, `table_grid`, `divider`, `before_buttons`, `buttons`). A dialog is its content, `before_buttons`, then `buttons` (centred); a form has its labels in the first column, left-aligned, and tick boxes in the second with their label to the right. Never write a gap or margin as a number: a measure that is missing gets a name in `layout.rs`. The test `windows_use_these_measures` (in `sal-ui`) fails on a number in `add_space`, `inner_margin`, `Margin::…`, `.spacing([…])` or `item_spacing`/`button_padding` in the program's and the plugins' window code.
 
 ## Environment variables
 
@@ -95,5 +96,5 @@ The `SAL_DIAG_*` variables exist to check dialogs, focus and menus in the real p
 ## Making a release
 
 1. Run `cargo clippy --workspace --all-targets`, `cargo test --workspace` and `cargo build --release`.
-2. Package `target\release` without build leftovers: `rustysalamander.exe`, `lang\`, `plugins\`, plus `README.md`, `CHANGELOG.md`, `LICENSE` (as `LICENSE.txt`), `THIRD-PARTY-NOTICES.md`, `MaterialDesignIcons-LICENSE.txt` (from `cratessal-uiontsmaterialdesignicons-LICENSE.txt`) and `USER-MANUAL.md` (from `docs`). Each plugin folder holds its own `CHANGELOG.md`. Leave out `config.toml`, `build\`, `deps\`, `incremental\`, `.fingerprint\`, `*.d` and `*.pdb`.
+2. Package `target\release` without build leftovers: `rustysalamander.exe`, `lang\`, `plugins\`, plus `README.md`, `CHANGELOG.md`, `LICENSE` (as `LICENSE.txt`), `THIRD-PARTY-NOTICES.md`, `MaterialDesignIcons-LICENSE.txt` (from `crates\sal-ui\fonts\materialdesignicons-LICENSE.txt`) and `USER-MANUAL.md` (from `docs`). Each plugin folder holds its own `CHANGELOG.md`. Leave out `config.toml`, `build\`, `deps\`, `incremental\`, `.fingerprint\`, `*.d` and `*.pdb`.
 3. Bump `version` in the root `Cargo.toml`. Bump `sal_plugin_api::abi::VERSION` whenever the plugin interface changed.

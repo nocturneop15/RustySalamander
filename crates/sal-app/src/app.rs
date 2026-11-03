@@ -31,6 +31,7 @@ use crate::shellmenu::{self, Merged, Picked};
 use crate::shortcut::{key_letter, Shortcut};
 use crate::worker::{format_duration, Job, JobKind, JobOptions, Jobs, Placement, PluginRef, Prompt, Reply, Spec};
 use sal_plugin_api::{OpenKind, Opener};
+use sal_ui::layout;
 use sal_ui::scroll_bar_visibility;
 
 const SELECTED_COLOR: Color32 = Color32::from_rgb(230, 40, 40);
@@ -316,7 +317,7 @@ fn connection_list(ui: &mut egui::Ui, salt: (&str, usize), icon: &str, color: Co
     egui::popup_below_widget(ui, popup, &button, egui::PopupCloseBehavior::CloseOnClick, |ui| {
         ui.set_min_width(220.0);
         // name | Refresh | Close or Disconnect, the buttons in columns
-        egui::Grid::new((salt, "rows")).num_columns(3).spacing([6.0, 4.0]).show(ui, |ui| {
+        egui::Grid::new((salt, "rows")).num_columns(3).spacing(layout::MENU_GRID_SPACING).show(ui, |ui| {
             for c in list {
                 let label = if c.name.is_empty() { display_path(&c.root).trim_end_matches('/').to_owned() } else { c.name.clone() };
                 let row_tip = display_path(&c.start).trim_end_matches('/').to_owned();
@@ -1378,6 +1379,14 @@ impl App {
         self.panels[panel].load(root, hidden, None)
     }
 
+    /// "From the left/right panel": `panel` goes to the folder the other
+    /// panel shows.
+    fn go_to_other_panel(&mut self, panel: usize) -> Result<(), String> {
+        let there = self.panels[1 - panel].path().to_path_buf();
+        let hidden = self.vis();
+        self.panels[panel].load(&there, hidden, None)
+    }
+
     /// F8 / Shift+F8: delete `sources`, to the Recycle Bin when that is on
     /// and `permanent` is not asked for.
     fn delete_items(&mut self, ctx: &egui::Context, sources: Vec<PathBuf>, permanent: bool) {
@@ -2328,6 +2337,7 @@ impl App {
         // a server session or search picked beside the drive buttons: (start, root)
         let mut conn_picked: Option<ConnPick> = None;
         let mut compare_picked = false;
+        let mut from_other_picked = false;
         let drive_list = self.cached_drives().to_vec();
         let show_all = self.cfg.drive_buttons == DriveButtons::All;
         // with all drive buttons: the connections, by group, and this panel's side of the comparison
@@ -2351,7 +2361,7 @@ impl App {
             let root_kind = drives::kind_of_root(&root, &drive_list);
             let on_listed_drive = drive_list.iter().any(|d| d.root == root);
             if show_all {
-                ui.spacing_mut().item_spacing.x = 2.0;
+                ui.spacing_mut().item_spacing.x = layout::CHIP_SPACING;
                 for d in &drive_list {
                     let letter = d.letter.trim_end_matches(':');
                     if drive_icon::button(ui, d.kind, letter, d.root == root).on_hover_text(describe_drive(d)).clicked() {
@@ -2375,7 +2385,12 @@ impl App {
                         compare_picked = true;
                     }
                 }
-                ui.spacing_mut().item_spacing.x = 6.0;
+                let (icon, label) = from_other_label(idx);
+                let tip = format!("{label}\n{}", display_path(self.panels[1 - idx].path()));
+                if drive_icon::glyph_button(ui, icon, drive_icon::color(sal_core::drives::DriveType::Fixed), "", false).on_hover_text(tip).clicked() {
+                    from_other_picked = true;
+                }
+                ui.spacing_mut().item_spacing.x = layout::CHROME_GAP;
             }
             // the current drive (or UNC share) when not shown among the buttons
             // above (a plugin's connection is, in its list or as the comparison)
@@ -2409,7 +2424,7 @@ impl App {
                 (false, false) => (ui.visuals().faint_bg_color, ui.visuals().text_color()),
             };
             let edit_key = menu_key(&self.cfg.shortcuts, Cmd::ChangeDir);
-            egui::Frame::none().fill(bg).inner_margin(egui::Margin::symmetric(6.0, 3.0)).rounding(3.0f32).show(ui, |ui| {
+            egui::Frame::none().fill(bg).inner_margin(layout::PATH_MARGIN).rounding(3.0f32).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if let Some(edit) = &mut self.path_edit[idx] {
                     let r = ui.add(
@@ -2435,7 +2450,7 @@ impl App {
                 } else {
                     let crumbs = path_crumbs(self.panels[idx].path());
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
+                        ui.spacing_mut().item_spacing.x = layout::CRUMB_SPACING;
                         let font = egui::TextStyle::Body.resolve(ui.style());
                         let text_w = |ui: &egui::Ui, s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_owned(), font.clone(), fg).size().x);
                         // keep the root and as many trailing segments as fit; the rest becomes "…"
@@ -2593,11 +2608,12 @@ impl App {
                             let (_, cell) = h.col(|ui| {
                                 // the column's own room (the response's rect is wider)
                                 column = ui.max_rect();
+                                // up: ascending (A→Z, smallest, oldest first); down: descending
                                 let arrow = if sort.key == key {
                                     if sort.reverse {
-                                        sal_ui::mdi::MENU_UP
-                                    } else {
                                         sal_ui::mdi::MENU_DOWN
+                                    } else {
+                                        sal_ui::mdi::MENU_UP
                                     }
                                 } else {
                                     ""
@@ -2782,7 +2798,7 @@ impl App {
         }
         if let Some(text) = banner {
             let fill = plugin_tint(ui.visuals()).gamma_multiply(2.5);
-            egui::Frame::none().fill(fill).inner_margin(egui::Margin::symmetric(6.0, 1.0)).show(ui, |ui| {
+            egui::Frame::none().fill(fill).inner_margin(layout::LINE_MARGIN).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(RichText::new(text).small().strong()).truncate());
             });
@@ -2834,7 +2850,7 @@ impl App {
         // a strip that stands out from the panel in both themes
         let strip = strip_color(ui.visuals());
         let strong = ui.visuals().strong_text_color();
-        egui::Frame::none().fill(strip).inner_margin(egui::Margin::symmetric(6.0, 2.0)).rounding(2.0f32).show(ui, |ui| {
+        egui::Frame::none().fill(strip).inner_margin(layout::LINE_MARGIN).rounding(2.0f32).show(ui, |ui| {
             ui.visuals_mut().override_text_color = Some(strong);
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -2930,6 +2946,12 @@ impl App {
             self.active = idx;
             self.show_comparison();
         }
+        if from_other_picked {
+            self.active = idx;
+            if let Err(e) = self.go_to_other_panel(idx) {
+                self.error(e);
+            }
+        }
         if let Some((i, m, double)) = clicked {
             self.active = idx;
             let p = &mut self.panels[idx];
@@ -2973,7 +2995,7 @@ impl App {
         // 0 = keep open, 1 = ok, 2 = cancel
         let mut outcome = 0u8;
         let text_field = |ui: &mut egui::Ui, s: &mut String| {
-            let r = ui.add(egui::TextEdit::singleline(s).desired_width(f32::INFINITY));
+            let r = ui.add(layout::text_field(s).desired_width(f32::INFINITY));
             // a new window's first frame is an invisible sizing pass that drops
             // focus requests, so keep claiming focus while nothing holds it
             if focus || ui.memory(|m| m.focused().is_none()) {
@@ -2981,8 +3003,8 @@ impl App {
             }
         };
         let buttons = |ui: &mut egui::Ui, ok: &str| -> u8 {
-            ui.add_space(6.0);
-            match centered_buttons(ui, &[(ok, ""), (tr("Cancel"), "")]) {
+            layout::before_buttons(ui);
+            match layout::buttons(ui, &[(ok, ""), (tr("Cancel"), "")]) {
                 Some(0) => 1,
                 Some(_) => 2,
                 None => 0,
@@ -2995,7 +3017,7 @@ impl App {
         match &mut dialog {
             Dialog::None => return,
             Dialog::PluginForm { form, values, .. } => {
-                dw.modal().show(ctx, &mut self.dialog_places, "plugin-form", &form.title, 500.0, &mut enter, &mut escape, &mut |ui| {
+                dw.modal().show(ctx, &mut self.dialog_places, "plugin-form", &form.title, 640.0, &mut enter, &mut escape, &mut |ui| {
                     plugin_form(ui, form, values, focus, &mut browse_field);
                     outcome = buttons(ui, &form.ok);
                 });
@@ -3007,19 +3029,19 @@ impl App {
                     ui.label(if *kind == OpKind::Copy { trf("Copy {what} to:", &[("what", &describe(sources))]) } else { trf("Move {what} to:", &[("what", &describe(sources))]) });
                     text_field(ui, target);
                     ui.small(tr("Target can be a directory, a new name, or a mask such as *.bak"));
-                    ui.add_space(6.0);
+                    ui.add_space(layout::GAP);
                     transfer_options(ui, *kind, opts);
                     if busy > 0 {
                         ui.small(trn("{n} operation is running or waiting.", "{n} operations are running or waiting.", busy as u64));
                     }
-                    ui.add_space(6.0);
+                    layout::before_buttons(ui);
                     let buttons = [
                         (verb, tr("Start now, alongside the running operations")),
                         (tr("Run first"), tr("Pause the running operations and run this one; they go on when it finishes")),
                         (tr("Queue last"), tr("Wait until the running and the waiting operations finish")),
                         (tr("Cancel"), ""),
                     ];
-                    match centered_buttons(ui, &buttons) {
+                    match layout::buttons(ui, &buttons) {
                         Some(0) => outcome = 1,
                         Some(1) => outcome = 3,
                         Some(2) => outcome = 4,
@@ -3070,7 +3092,10 @@ impl App {
                 });
             }
             Dialog::Drive { panel, drives, conns, paths, cursor } => {
-                let count = drives.len() + conns.len() + paths.len();
+                // the last row: the other panel's folder
+                let other_row = drives.len() + conns.len() + paths.len();
+                let other_path = display_path(self.panels[1 - *panel].path());
+                let count = other_row + 1;
                 let (up, down) = ctx.input(|i| (i.key_pressed(Key::ArrowUp), i.key_pressed(Key::ArrowDown)));
                 if up {
                     *cursor = cursor.saturating_sub(1);
@@ -3108,7 +3133,7 @@ impl App {
                 // up over the window; it scrolls only when the rows are
                 // taller than the whole window
                 let content_id = egui::Id::new("drive_selector_rows");
-                let rows = (drives.len() + conns.len() + paths.len() + 4) as f32;
+                let rows = (count + 5) as f32;
                 let content_h: f32 = ctx.data(|d| d.get_temp(content_id)).unwrap_or(rows * (row_h + 1.0));
                 let (margin, frame) = (4.0, 16.0);
                 // a few points of slack: with display scaling the rows round up a
@@ -3131,7 +3156,7 @@ impl App {
                             ui.set_width(width);
                             let list = egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                                 ui.set_width(width);
-                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.spacing_mut().item_spacing.y = layout::MENU_ROW_SPACING;
                                 let shown_cursor = *cursor;
                                 let keep_visible = |r: &egui::Response, i: usize| {
                                     if moved && i == shown_cursor {
@@ -3145,9 +3170,9 @@ impl App {
                                     };
                                     // local drives first, then network: a separator marks the change
                                     if k > 0 && drives[k - 1].kind.is_local() != d.kind.is_local() {
-                                        ui.add_space(3.0);
+                                        ui.add_space(layout::MENU_GAP);
                                         ui.separator();
-                                        ui.add_space(3.0);
+                                        ui.add_space(layout::MENU_GAP);
                                     }
                                     let r = drive_icon::row(ui, d.kind, &d.letter, &d.label, &detail, k == *cursor).on_hover_text(describe_drive(d));
                                     keep_visible(&r, k);
@@ -3160,7 +3185,7 @@ impl App {
                                 if !conns.is_empty() {
                                     for (k, c) in conns.iter().enumerate() {
                                         if k == 0 || c.group() != conns[k - 1].group() {
-                                            ui.add_space(4.0);
+                                            ui.add_space(layout::MENU_GAP);
                                             ui.separator();
                                             ui.label(RichText::new(conn_group_name(c.group())).small().weak());
                                         }
@@ -3202,7 +3227,7 @@ impl App {
                                     }
                                 }
                                 if !paths.is_empty() {
-                                    ui.add_space(4.0);
+                                    ui.add_space(layout::MENU_GAP);
                                     ui.separator();
                                     ui.label(RichText::new(tr("Recent paths")).small().weak());
                                     for (k, p) in paths.iter().enumerate() {
@@ -3215,6 +3240,17 @@ impl App {
                                             outcome = 1;
                                         }
                                     }
+                                }
+                                ui.add_space(layout::MENU_GAP);
+                                ui.separator();
+                                ui.add_space(layout::MENU_GAP);
+                                let (icon, label) = from_other_label(*panel);
+                                let r = drive_icon::glyph_row(ui, icon, drive_icon::color(sal_core::drives::DriveType::Fixed), label, &other_path, other_row == *cursor)
+                                    .on_hover_text(other_path.as_str());
+                                keep_visible(&r, other_row);
+                                if r.clicked() {
+                                    *cursor = other_row;
+                                    outcome = 1;
                                 }
                             });
                             // the rows' height for the next frame; another frame when it changed
@@ -3235,8 +3271,8 @@ impl App {
             Dialog::Message { title, text } => {
                 dw.modal().show(ctx, &mut self.dialog_places, "message", title.as_str(), 440.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(text.as_str());
-                    ui.add_space(6.0);
-                    if centered_buttons(ui, &[(tr("OK"), "")]).is_some() {
+                    layout::before_buttons(ui);
+                    if layout::buttons(ui, &[(tr("OK"), "")]).is_some() {
                         outcome = 2;
                     }
                 });
@@ -3256,7 +3292,7 @@ impl App {
                 dw.modal().show(ctx, &mut self.dialog_places, "update", title, 560.0, &mut enter, &mut escape, &mut |ui| {
                     for (i, (row, state)) in rows.iter().zip(&states).enumerate() {
                         let u = &row.update;
-                        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(8.0)).show(ui, |ui| {
+                        layout::group_frame(ui.style()).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(u.name()).strong());
@@ -3329,7 +3365,7 @@ impl App {
                                 }
                             }
                             if row.show_log {
-                                ui.add_space(4.0);
+                                ui.add_space(layout::GAP_SMALL);
                                 let log = row.changelog.as_ref().and_then(|c| c.lock().unwrap().clone());
                                 match log {
                                     None => {
@@ -3342,7 +3378,7 @@ impl App {
                                         ui.label(RichText::new(tr("The changelog says nothing about these versions.")).weak());
                                     }
                                     Some(Ok(text)) => {
-                                        egui::Frame::none().fill(ui.visuals().extreme_bg_color).inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
+                                        layout::well_frame(ui.style()).show(ui, |ui| {
                                             egui::ScrollArea::vertical().id_salt(("changelog", i)).max_height(240.0).auto_shrink([false, true]).show(ui, |ui| markdown(ui, &text));
                                         });
                                     }
@@ -3352,13 +3388,12 @@ impl App {
                                 }
                             }
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(layout::GAP);
                     }
-                    ui.add_space(4.0);
                     if staged {
                         ui.label(tr("Plugin updates are installed when RustySalamander starts again."));
-                        ui.add_space(4.0);
                     }
+                    layout::before_buttons(ui);
                     // Update all when more than one can start; Restart now once a
                     // plugin waits for it; Close
                     let all = ready.len() > 1 && !running;
@@ -3370,7 +3405,7 @@ impl App {
                         buttons.push((tr("Restart now"), tr("Closes and starts RustySalamander again")));
                     }
                     buttons.push((tr("Close"), ""));
-                    if let Some(b) = centered_buttons(ui, &buttons) {
+                    if let Some(b) = layout::buttons(ui, &buttons) {
                         match (b, all, staged) {
                             (0, true, _) => update_all = true,
                             (0, false, true) | (1, true, true) => restart = true,
@@ -3502,13 +3537,11 @@ impl App {
                                 // one grid per section, same first-column width, a line between them
                                 let section = |ui: &mut egui::Ui, title: &'static str, first: bool, body: &mut dyn FnMut(&mut egui::Ui)| {
                                     if !first {
-                                        ui.add_space(4.0);
-                                        ui.separator();
-                                        ui.add_space(2.0);
+                                        layout::divider(ui);
                                     }
                                     ui.label(RichText::new(tr(title)).strong());
-                                    ui.add_space(2.0);
-                                    egui::Grid::new(("settings", title)).num_columns(2).spacing([16.0, 8.0]).min_col_width(190.0).show(ui, |ui| body(ui));
+                                    ui.add_space(layout::GAP_SMALL);
+                                    layout::form_grid(("settings", title)).min_col_width(190.0).show(ui, |ui| body(ui));
                                 };
 
                                 section(ui, n_("Appearance"), true, &mut |ui| {
@@ -3721,8 +3754,8 @@ impl App {
                             let list_h = (main_h - 300.0).max(260.0);
                             egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                                 ui.label(RichText::new(tr("F3 views and F4 edits files with these. A file suffix below can have its own.")).weak());
-                                ui.add_space(6.0);
-                                egui::Grid::new("open_defaults").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                                ui.add_space(layout::GAP);
+                                layout::form_grid("open_defaults").show(ui, |ui| {
                                     ui.label(tr("Viewer (F3)"));
                                     let mut v = Some(cfg.view_with.clone());
                                     if open_with_picker(ui, "default_view", &mut v, false, &view_choices, &mut cfg.viewer) {
@@ -3742,16 +3775,15 @@ impl App {
                                 if edit_choices.is_empty() {
                                     ui.label(RichText::new(tr("No plugin registers as an editor.")).small().weak());
                                 }
-                                ui.add_space(6.0);
-                                ui.separator();
+                                layout::divider(ui);
                                 ui.label(RichText::new(tr("By file suffix")).strong());
                                 ui.label(RichText::new(tr("Files ending with a suffix open with its own viewer or editor; Default uses the ones above.")).weak());
-                                ui.add_space(4.0);
+                                ui.add_space(layout::GAP_SMALL);
                                 let (mut edit_at, mut remove_at) = (None, None);
                                 if cfg.suffix_rules.is_empty() {
                                     ui.label(tr("No suffix has its own viewer or editor."));
                                 } else {
-                                    egui::Grid::new("suffix_rules").num_columns(4).striped(true).spacing([16.0, 6.0]).show(ui, |ui| {
+                                    layout::table_grid("suffix_rules").num_columns(4).striped(true).show(ui, |ui| {
                                         ui.label(RichText::new(tr("Suffix")).strong());
                                         ui.label(RichText::new(tr("Viewer (F3)")).strong());
                                         ui.label(RichText::new(tr("Editor (F4)")).strong());
@@ -3783,7 +3815,7 @@ impl App {
                                         *suffix_edit = None;
                                     }
                                 }
-                                ui.add_space(6.0);
+                                ui.add_space(layout::GAP);
                                 let mut done = false;
                                 match suffix_edit {
                                     None => {
@@ -3792,10 +3824,10 @@ impl App {
                                         }
                                     }
                                     Some(form) => {
-                                        egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+                                        layout::group_frame(ui.style()).show(ui, |ui| {
                                             ui.set_width(ui.available_width());
                                             ui.label(RichText::new(if form.index.is_some() { tr("Edit the suffix") } else { tr("A new suffix") }).strong());
-                                            egui::Grid::new("suffix_form").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                                            layout::form_grid("suffix_form").show(ui, |ui| {
                                                 ui.label(tr("Suffix"));
                                                 ui.add(egui::TextEdit::singleline(&mut form.rule.suffix).hint_text("txt, tar.gz").desired_width(160.0));
                                                 ui.end_row();
@@ -3841,12 +3873,12 @@ impl App {
                         SettingsTab::Plugins => {
                             ui.label(RichText::new(tr("Plugins add optional features. A plugin that is off changes nothing; turning one on or off applies at once.")).weak());
                             ui.label(RichText::new(trf("Plugins are found in {dir} when the program starts.", &[("dir", &plugins_dir)])).weak());
-                            ui.add_space(6.0);
+                            ui.add_space(layout::GAP);
                             if plugin_rows.is_empty() {
                                 ui.label(tr("No plugins found."));
                             }
                             for k in &plugin_rows {
-                                egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+                                layout::group_frame(ui.style()).show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     let mut on = !cfg.disabled_plugins.contains(&k.id);
                                     if ui.checkbox(&mut on, RichText::new(k.name.as_str()).strong()).on_hover_text(k.file.as_str()).changed() {
@@ -3875,7 +3907,7 @@ impl App {
                                         _ => {}
                                     }
                                 });
-                                ui.add_space(4.0);
+                                ui.add_space(layout::GAP);
                             }
                             for (file, why) in &broken_plugins {
                                 ui.colored_label(ui.visuals().warn_fg_color, RichText::new(trf("{file} can't be used: {why}", &[("file", file), ("why", why)])).small());
@@ -3902,13 +3934,13 @@ impl App {
                                     if jump == Some(section) {
                                         ui.scroll_to_cursor(Some(Align::TOP));
                                     }
-                                    egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(10.0)).show(ui, |ui| {
+                                    layout::group_frame(ui.style()).show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         ui.label(RichText::new(tr(section.label())).size(ui.text_style_height(&egui::TextStyle::Body) * 1.15).strong());
                                         ui.label(RichText::new(tr(section.description())).small().weak());
                                         ui.separator();
                                         let bar = keymap::bar_actions(&cfg.shortcuts, cfg.fkey_bar.as_deref());
-                                        egui::Grid::new(("keymap", section.label())).striped(true).num_columns(3).spacing([12.0, 6.0]).min_col_width(200.0).show(ui, |ui| {
+                                        layout::table_grid(("keymap", section.label())).striped(true).num_columns(3).min_col_width(200.0).show(ui, |ui| {
                                             ui.label(RichText::new(tr("Command")).small().weak())
                                                 .on_hover_text(tr("Tick a command to give it a button on the function key bar, labelled with its first shortcut"));
                                             ui.label(RichText::new(tr("Preset")).small().weak());
@@ -3980,14 +4012,14 @@ impl App {
                                         });
                                         let fixed: Vec<String> = FIXED_KEYS.iter().filter(|(sec, ..)| *sec == section).map(|(_, k, d)| format!("{} — {}", tr(k), tr(d))).collect();
                                         if !fixed.is_empty() {
-                                            ui.add_space(4.0);
+                                            ui.add_space(layout::GAP_SMALL);
                                             ui.label(RichText::new(trf("Fixed: {keys}", &[("keys", &fixed.join(" · "))])).small().weak());
                                         }
                                     });
-                                    ui.add_space(8.0);
+                                    ui.add_space(layout::GAP);
                                 }
                             });
-                            ui.add_space(4.0);
+                            ui.add_space(layout::GAP);
                             ui.horizontal(|ui| {
                                 if ui.button(tr("Reset all shortcuts to defaults")).clicked() {
                                     edit = Some(KeyEdit::ResetAll);
@@ -3999,15 +4031,11 @@ impl App {
                             ui.small(tr("Configured shortcuts take precedence over fixed keys. Ticked commands have a button on the function key bar."));
                         }
                     }
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.small(tr("Settings apply immediately and are saved on exit."));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button(tr("Close")).clicked() {
-                                outcome = 2;
-                            }
-                        });
-                    });
+                    layout::before_buttons(ui);
+                    ui.small(tr("Settings apply immediately and are saved on exit."));
+                    if layout::buttons(ui, &[(tr("Close"), "")]).is_some() {
+                        outcome = 2;
+                    }
                 });
                 if captured {
                     enter = false;
@@ -4054,7 +4082,7 @@ impl App {
                     egui::ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
                         for section in Section::ALL {
                             ui.label(RichText::new(tr(section.label())).strong());
-                            egui::Grid::new(("help", section.label())).striped(true).min_col_width(200.0).show(ui, |ui| {
+                            layout::table_grid(("help", section.label())).striped(true).num_columns(2).min_col_width(200.0).show(ui, |ui| {
                                 let mut row = |k: &str, d: &str| {
                                     ui.label(RichText::new(k).monospace().strong());
                                     ui.label(d);
@@ -4073,18 +4101,14 @@ impl App {
                                     row(tr(k), tr(d));
                                 }
                             });
-                            ui.add_space(8.0);
+                            ui.add_space(layout::GAP);
                         }
                     });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.small(tr("Shortcuts are configured in Options → Settings… → Keyboard shortcuts."));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button(tr("Close")).clicked() {
-                                outcome = 2;
-                            }
-                        });
-                    });
+                    layout::before_buttons(ui);
+                    ui.small(tr("Shortcuts are configured in Options → Settings… → Keyboard shortcuts."));
+                    if layout::buttons(ui, &[(tr("Close"), "")]).is_some() {
+                        outcome = 2;
+                    }
                 });
                 if enter {
                     outcome = 2;
@@ -4110,7 +4134,8 @@ impl App {
         if let Some(root) = drive_disconnect {
             if let Dialog::Drive { drives, conns, paths, cursor, .. } = &mut dialog {
                 conns.retain(|c| c.root != root);
-                *cursor = (*cursor).min((drives.len() + conns.len() + paths.len()).saturating_sub(1));
+                // the last row is the other panel's folder
+                *cursor = (*cursor).min(drives.len() + conns.len() + paths.len());
             }
             self.close_connection(&root);
             outcome = 0;
@@ -4233,7 +4258,9 @@ impl App {
             },
             Dialog::Drive { panel, drives, conns, paths, cursor } => {
                 let conn = conns.get(cursor.wrapping_sub(drives.len()));
+                let other = cursor == drives.len() + conns.len() + paths.len();
                 let res = match (drives.get(cursor), paths.get(cursor.wrapping_sub(drives.len() + conns.len()))) {
+                    _ if other => self.go_to_other_panel(panel),
                     (Some(d), _) => self.change_drive(panel, &d.root),
                     // a connection: where it started, or its root
                     (None, _) if conn.is_some() => {
@@ -4289,17 +4316,15 @@ impl App {
         dw.show(ctx, &mut self.dialog_places, "job", title, 580.0, &mut enter, &mut escape, &mut |ui| {
             for (n, job) in jobs.running.iter().enumerate() {
                 if n > 0 {
-                    ui.add_space(4.0);
-                    ui.separator();
+                    layout::divider(ui);
                 }
                 job_progress_ui(ui, job, now, &mut act);
             }
             if !jobs.queue.is_empty() {
-                ui.add_space(6.0);
-                ui.separator();
+                layout::divider(ui);
                 ui.label(RichText::new(trf("Queue ({n})", &[("n", &jobs.queue.len())])).strong());
                 ui.label(RichText::new(tr("Waiting operations start one by one when the running ones finish.")).small().weak());
-                ui.add_space(2.0);
+                ui.add_space(layout::GAP_SMALL);
                 let row_h = ui.spacing().interact_size.y;
                 for (i, spec) in jobs.queue.iter().enumerate() {
                     // one line per operation: buttons on the right, the description cut to fit
@@ -4324,16 +4349,16 @@ impl App {
                 }
             }
             // controls for everything, on a strip like the panels' status bar
-            ui.add_space(8.0);
+            layout::before_buttons(ui);
             let all_paused = jobs.running.iter().filter(|j| j.spec.kind.can_pause()).all(|j| j.is_paused());
-            egui::Frame::none().fill(strip_color(ui.visuals())).inner_margin(egui::Margin::symmetric(8.0, 6.0)).rounding(2.0f32).show(ui, |ui| {
+            layout::strip_frame(strip_color(ui.visuals())).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let buttons = [
                     if all_paused { (tr("Resume all"), tr("Continue all paused operations")) } else { (tr("Pause all"), tr("Pause all running operations")) },
                     (tr("Cancel all"), tr("Stop the running operations and empty the queue")),
                     (tr("Run in background"), tr("Hide this window; the progress stays in the status bar")),
                 ];
-                match centered_buttons(ui, &buttons) {
+                match layout::buttons(ui, &buttons) {
                     Some(0) => act = Some(JobAct::PauseAll(!all_paused)),
                     Some(1) => act = Some(JobAct::CancelAll),
                     Some(_) => act = Some(JobAct::Hide),
@@ -4395,9 +4420,9 @@ impl App {
                 dw.show(ctx, &mut self.dialog_places, "prompt", tr("Target already exists"), 660.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(RichText::new(op.as_str()).small().weak());
                     ui.label(RichText::new(tr("An item with the same name is already in the target folder.")).strong());
-                    ui.add_space(6.0);
+                    ui.add_space(layout::GAP);
                     conflict_table(ui, src, dst);
-                    ui.add_space(10.0);
+                    layout::before_buttons(ui);
                     let actions = [ConflictAction::Overwrite, ConflictAction::OverwriteAll, ConflictAction::Skip, ConflictAction::SkipAll, ConflictAction::Cancel];
                     let labels = [
                         (tr("Overwrite"), ""),
@@ -4406,7 +4431,7 @@ impl App {
                         (tr("Skip All"), tr("Skip this and all further existing items")),
                         (tr("Cancel"), tr("Stop the whole operation")),
                     ];
-                    if let Some(i) = centered_buttons(ui, &labels) {
+                    if let Some(i) = layout::buttons(ui, &labels) {
                         reply = Some(Reply::Conflict(actions[i]));
                     }
                 });
@@ -4417,8 +4442,8 @@ impl App {
             Prompt::Error { path, message } => {
                 dw.show(ctx, &mut self.dialog_places, "prompt", tr("Error"), 560.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(RichText::new(op.as_str()).small().weak());
-                    ui.add_space(4.0);
-                    egui::Grid::new("error").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    ui.add_space(layout::GAP);
+                    layout::table_grid("error").num_columns(2).show(ui, |ui| {
                         ui.label(RichText::new(tr("Item")).weak());
                         ui.add(egui::Label::new(display_path(path)).wrap());
                         ui.end_row();
@@ -4426,11 +4451,11 @@ impl App {
                         ui.colored_label(ui.visuals().error_fg_color, message.as_str());
                         ui.end_row();
                     });
-                    ui.add_space(10.0);
+                    layout::before_buttons(ui);
                     let actions = [ErrorAction::Retry, ErrorAction::Skip, ErrorAction::SkipAll, ErrorAction::Cancel];
                     let labels =
                         [(tr("Retry"), ""), (tr("Skip"), ""), (tr("Skip All"), tr("Skip this and all further items that fail")), (tr("Cancel"), tr("Stop the whole operation"))];
-                    if let Some(i) = centered_buttons(ui, &labels) {
+                    if let Some(i) = layout::buttons(ui, &labels) {
                         reply = Some(Reply::Error(actions[i]));
                     }
                 });
@@ -4517,13 +4542,12 @@ impl App {
                 // the newest first
                 for (n, r) in reports.iter().rev().enumerate() {
                     if n > 0 {
-                        ui.add_space(6.0);
-                        ui.separator();
+                        layout::divider(ui);
                     }
                     report_body(ui, r);
                 }
             });
-            ui.add_space(8.0);
+            layout::before_buttons(ui);
             if let Some(p) = saved {
                 ui.label(RichText::new(trf("Protocol saved to {path}", &[("path", &display_path(p))])).small().weak());
             }
@@ -4531,7 +4555,7 @@ impl App {
             if has_sums {
                 buttons.push((tr("Close and remove checksum files"), tr("Delete the .sha256 files listed above, in the target and in the source folders")));
             }
-            match centered_buttons(ui, &buttons) {
+            match layout::buttons(ui, &buttons) {
                 Some(1) => save = true,
                 Some(2) => remove = true,
                 Some(_) => close = true,
@@ -4923,69 +4947,96 @@ impl App {
 /// show and take the focus again and again).
 const OWN_WINDOWS: [&str; 4] = ["job", "prompt", "results", "report"];
 
+/// The icon and label of "From the other panel" for `panel`: the left one
+/// takes the right one's folder (double arrow left), and the other way.
+fn from_other_label(panel: usize) -> (&'static str, &'static str) {
+    if panel == 0 {
+        (sal_ui::mdi::REWIND, tr("From right panel"))
+    } else {
+        (sal_ui::mdi::FAST_FORWARD, tr("From left panel"))
+    }
+}
+
 /// The fields of a plugin's form: a label and an input per row. The first
 /// text input takes the focus when the dialog opens; `browse` is set to the
 /// field whose Browse… button was clicked.
 fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Values, focus: bool, browse: &mut Option<String>) {
     use plugins::FieldKind;
     let mut focus_next = true;
-    egui::Grid::new("plugin-form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-        for f in &form.fields {
-            let enabled = f.enabled_if.as_ref().is_none_or(|(id, v)| values.get(id) == Some(v));
-            match &f.kind {
-                FieldKind::Hidden => continue,
-                FieldKind::Note => {
-                    ui.label("");
-                    ui.add(egui::Label::new(f.label.as_str()).wrap());
-                    ui.end_row();
-                    continue;
-                }
-                _ => {
-                    ui.add_enabled(enabled, egui::Label::new(f.label.as_str()));
-                }
-            }
+    // the label column is as wide as the longest label of an input; tick
+    // boxes and notes go in the input column, so they don't widen it
+    let label_w = form
+        .fields
+        .iter()
+        .filter(|f| !matches!(f.kind, FieldKind::Hidden | FieldKind::Note | FieldKind::Check))
+        .map(|f| ui.fonts(|fonts| fonts.layout_no_wrap(f.label.clone(), egui::TextStyle::Body.resolve(ui.style()), Color32::WHITE).size().x))
+        .fold(0.0f32, f32::max)
+        .ceil();
+    layout::controls(ui);
+    let gap = layout::FORM_SPACING.x;
+    let row_h = ui.spacing().interact_size.y;
+    ui.spacing_mut().item_spacing.y = layout::FORM_SPACING.y;
+    for f in &form.fields {
+        if f.kind == FieldKind::Hidden {
+            continue;
+        }
+        let enabled = f.enabled_if.as_ref().is_none_or(|(id, v)| values.get(id) == Some(v));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            let label = if matches!(f.kind, FieldKind::Note | FieldKind::Check) { "" } else { f.label.as_str() };
+            ui.allocate_ui_with_layout(egui::vec2(label_w, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.set_min_size(egui::vec2(label_w, row_h));
+                ui.add_enabled(enabled, egui::Label::new(label));
+            });
+            let w = ui.available_width();
             let value = values.entry(f.id.clone()).or_default();
             ui.add_enabled_ui(enabled, |ui| {
-                let mut text = |ui: &mut egui::Ui, value: &mut String, password: bool| {
-                    let r = ui.add(egui::TextEdit::singleline(value).password(password).desired_width(ui.available_width().min(320.0)).id_salt(("plugin-field", &f.id)));
+                ui.spacing_mut().item_spacing.x = layout::ITEM_SPACING.x;
+                let mut text = |ui: &mut egui::Ui, value: &mut String, password: bool, width: f32| {
+                    let r = ui.add(layout::text_field(value).password(password).desired_width(width).id_salt(("plugin-field", &f.id)));
                     if focus_next && enabled && (focus || ui.memory(|m| m.focused().is_none())) {
                         r.request_focus();
                     }
                     focus_next = false;
                 };
                 match &f.kind {
-                    FieldKind::Text => text(ui, value, false),
-                    FieldKind::Password => text(ui, value, true),
+                    FieldKind::Text => text(ui, value, false, w),
+                    FieldKind::Password => text(ui, value, true, w),
                     FieldKind::File | FieldKind::Folder => {
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 90.0).clamp(120.0, 260.0);
-                            ui.add(egui::TextEdit::singleline(value).desired_width(w).id_salt(("plugin-field", &f.id)));
-                            if ui.button(tr("Browse…")).clicked() {
-                                *browse = Some(f.id.clone());
-                            }
-                        });
+                        let browse_label = tr("Browse…");
+                        let bw = ui.fonts(|fonts| fonts.layout_no_wrap(browse_label.to_owned(), egui::TextStyle::Button.resolve(ui.style()), Color32::WHITE).size().x)
+                            + 2.0 * ui.spacing().button_padding.x;
+                        // the text field's margin is outside its desired width
+                        text(ui, value, false, (w - bw - layout::ITEM_SPACING.x - 2.0 * layout::FIELD_MARGIN.x).max(120.0));
+                        if ui.button(browse_label).clicked() {
+                            *browse = Some(f.id.clone());
+                        }
                     }
                     FieldKind::Choice(options) => {
-                        ui.horizontal(|ui| {
-                            for (v, label) in options {
-                                if ui.radio(value == v, label.as_str()).clicked() {
-                                    *value = v.clone();
-                                }
+                        for (v, label) in options {
+                            if ui.radio(value == v, label.as_str()).clicked() {
+                                *value = v.clone();
                             }
-                        });
+                        }
                     }
                     FieldKind::Check => {
                         let mut on = !value.is_empty();
-                        if ui.checkbox(&mut on, "").changed() {
+                        if ui.checkbox(&mut on, f.label.as_str()).changed() {
                             *value = if on { "1".into() } else { String::new() };
                         }
                     }
-                    FieldKind::Note | FieldKind::Hidden => {}
+                    FieldKind::Note => {
+                        let note = if f.id == "error" { RichText::new(f.label.as_str()).color(ui.visuals().warn_fg_color) } else { RichText::new(f.label.as_str()).small().weak() };
+                        ui.vertical(|ui| {
+                            ui.set_width(w);
+                            ui.add(egui::Label::new(note).wrap());
+                        });
+                    }
+                    FieldKind::Hidden => {}
                 }
             });
-            ui.end_row();
-        }
-    });
+        });
+    }
 }
 
 /// One theme's accent color in Settings: the theme's own, or a custom one
@@ -5128,20 +5179,20 @@ fn markdown(ui: &mut egui::Ui, text: &str) {
     let body = ui.text_style_height(&egui::TextStyle::Body);
     for line in text.lines().map(str::trim_end) {
         if let Some(h) = line.strip_prefix("## ") {
-            ui.add_space(4.0);
+            ui.add_space(layout::GAP_SMALL);
             ui.label(RichText::new(h).strong().size(body * 1.15));
         } else if let Some(h) = line.strip_prefix("### ") {
-            ui.add_space(2.0);
+            ui.add_space(layout::LINE_GAP);
             ui.label(RichText::new(h).strong());
         } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
             ui.horizontal_top(|ui| {
-                ui.add_space(6.0);
+                ui.add_space(layout::INDENT);
                 ui.label("•");
                 let job = inline_markdown(ui, item);
                 ui.label(job);
             });
         } else if line.trim().is_empty() {
-            ui.add_space(2.0);
+            ui.add_space(layout::LINE_GAP);
         } else if !line.starts_with("# ") {
             let job = inline_markdown(ui, line.trim_start());
             ui.label(job);
@@ -5224,7 +5275,7 @@ fn transfer_choices(ui: &mut egui::Ui, kind: OpKind, d: &mut TransferDefaults) {
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut d.background, tr("Run in background"))
             .on_hover_text(tr("The progress window doesn't open; the status bar shows the progress (click it to see the window)"));
-        ui.add_space(12.0);
+        ui.add_space(layout::GAP_LARGE);
         // a safe copy always tells how it went: ticked and fixed
         let safe = d.verify != Verify::None;
         let mut shown = d.show_result || safe;
@@ -5338,8 +5389,8 @@ fn report_body(ui: &mut egui::Ui, r: &Report) {
         ui.label(RichText::new(trf("at {time}", &[("time", &time)])).weak());
     });
     ui.add(egui::Label::new(r.spec.describe()).wrap());
-    ui.add_space(4.0);
-    egui::Grid::new(("report", r.spec.id)).num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+    ui.add_space(layout::GAP_SMALL);
+    layout::table_grid(("report", r.spec.id)).num_columns(2).show(ui, |ui| {
         for (head, text) in report_rows(r) {
             ui.label(RichText::new(head).weak());
             if r.result.is_err() {
@@ -5352,7 +5403,7 @@ fn report_body(ui: &mut egui::Ui, r: &Report) {
     });
     if let Ok(s) = &r.result {
         if !s.problems.is_empty() {
-            ui.add_space(4.0);
+            ui.add_space(layout::GAP_SMALL);
             let more = if s.problems.len() >= fileops::MAX_PROBLEMS { "+" } else { "" };
             egui::CollapsingHeader::new(RichText::new(format!("{} ({}{more})", tr("Problems"), s.problems.len())).color(visuals.warn_fg_color))
                 .id_salt(("problems", r.spec.id))
@@ -5361,7 +5412,7 @@ fn report_body(ui: &mut egui::Ui, r: &Report) {
                     for (path, message) in &s.problems {
                         ui.add(egui::Label::new(RichText::new(display_path(path)).small()).wrap());
                         ui.add(egui::Label::new(RichText::new(message).small().color(visuals.error_fg_color)).wrap());
-                        ui.add_space(2.0);
+                        ui.add_space(layout::GAP_SMALL);
                     }
                 });
         }
@@ -5446,11 +5497,11 @@ fn job_progress_ui(ui: &mut egui::Ui, job: &Job, now: Instant, act: &mut Option<
         // no progress reported (Recycle Bin): egui animates only rounded bars
         ui.add(progress_bar(0.0).text(tr("working…")));
     }
-    ui.add_space(4.0);
+    layout::before_buttons(ui);
     let paused = job.is_paused();
     let pause = if paused { tr("Resume") } else { tr("Pause") };
     let labels: Vec<(&str, &str)> = if job.spec.kind.can_pause() { vec![(pause, ""), (tr("Cancel"), "")] } else { vec![(tr("Cancel"), "")] };
-    match centered_buttons(ui, &labels) {
+    match layout::buttons(ui, &labels) {
         Some(0) if labels.len() == 2 => *act = Some(JobAct::Pause(id, !paused)),
         Some(_) => *act = Some(JobAct::Cancel(id)),
         None => {}
@@ -5465,7 +5516,7 @@ fn conflict_table(ui: &mut egui::Ui, src: &Path, dst: &Path) {
     let (ss, ds) = (size(&s), size(&d));
     let (st, dt) = (time(&s), time(&d));
     let weak = ui.visuals().weak_text_color();
-    let col_w = ((ui.available_width() - 90.0 - 2.0 * 14.0) / 2.0).max(120.0);
+    let col_w = ((ui.available_width() - 90.0 - 2.0 * layout::TABLE_SPACING.x) / 2.0).max(120.0);
     let row_h = ui.spacing().interact_size.y;
     // every cell is one line of the same height, so the columns line up; long
     // texts are cut to the column, the whole text is in the tooltip
@@ -5491,7 +5542,7 @@ fn conflict_table(ui: &mut egui::Ui, src: &Path, dst: &Path) {
     let size_text = |n: Option<u64>| n.map_or_else(|| tr("folder").to_owned(), |n| trf("{size} ({bytes} bytes)", &[("size", &format_size(n)), ("bytes", &format_thousands(n))]));
     let newer = |a: Option<std::time::SystemTime>, b: Option<std::time::SystemTime>| matches!((a, b), (Some(a), Some(b)) if a > b);
     let larger = |a: Option<u64>, b: Option<u64>| matches!((a, b), (Some(a), Some(b)) if a > b);
-    egui::Grid::new("conflict").num_columns(3).striped(true).spacing([14.0, 4.0]).show(ui, |ui| {
+    layout::table_grid("conflict").num_columns(3).striped(true).show(ui, |ui| {
         cell(ui, RichText::new(""), head_w, None);
         cell(ui, RichText::new(tr("Existing target")).strong(), col_w, None);
         cell(ui, RichText::new(tr("Source")).strong(), col_w, None);
@@ -5513,30 +5564,6 @@ fn conflict_table(ui: &mut egui::Ui, src: &Path, dst: &Path) {
         cell(ui, RichText::new(fmt_time(st)), col_w, newer(st, dt).then(|| tr("newer")));
         ui.end_row();
     });
-}
-
-/// A row of buttons centred in the available width, each with an optional
-/// tooltip; returns the index of the clicked one.
-pub(crate) fn centered_buttons(ui: &mut egui::Ui, buttons: &[(&str, &str)]) -> Option<usize> {
-    let font = egui::TextStyle::Button.resolve(ui.style());
-    let pad = ui.spacing().button_padding.x * 2.0;
-    let gap = ui.spacing().item_spacing.x;
-    let total: f32 = buttons.iter().map(|(l, _)| ui.fonts(|f| f.layout_no_wrap(l.to_string(), font.clone(), Color32::WHITE).size().x) + pad).sum::<f32>()
-        + gap * buttons.len().saturating_sub(1) as f32;
-    let mut hit = None;
-    ui.horizontal(|ui| {
-        ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-        for (i, (label, tip)) in buttons.iter().enumerate() {
-            let mut r = ui.button(*label);
-            if !tip.is_empty() {
-                r = r.on_hover_text(*tip);
-            }
-            if r.clicked() {
-                hit = Some(i);
-            }
-        }
-    });
-    hit
 }
 
 /// The icons of a panel's items without Windows' own (Material Design Icons).
@@ -5784,13 +5811,11 @@ fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
     shellmenu::set_menu_theme(menus);
 }
 
-/// Room around the text of every button (egui's default is 4 × 1).
-const BUTTON_PADDING: egui::Vec2 = egui::vec2(12.0, 4.0);
-
-/// Font size and button padding for both the dark and the light style.
+/// Font size and the common spacing ([`sal_ui::layout`]) for both the dark
+/// and the light style.
 fn apply_font_size(ctx: &egui::Context, size: f32) {
     ctx.all_styles_mut(|s| {
-        s.spacing.button_padding = BUTTON_PADDING;
+        s.spacing.button_padding = sal_ui::layout::BUTTON_PADDING;
         use egui::TextStyle::*;
         for (style, factor) in [(Body, 1.0), (Button, 1.0), (Monospace, 1.0), (Small, 0.8), (Heading, 1.4)] {
             if let Some(f) = s.text_styles.get_mut(&style) {
@@ -6007,7 +6032,7 @@ impl App {
         // room below as at the sides (egui's panels leave only 2 points)
         let frame = egui::Frame::side_top_panel(&ctx.style());
         let side = frame.inner_margin.left;
-        let frame = frame.inner_margin(egui::Margin { left: side, right: side, top: 4.0, bottom: side });
+        let frame = frame.inner_margin(egui::Margin { left: side, right: side, top: layout::GAP_SMALL, bottom: side });
         egui::TopBottomPanel::bottom("fkeys").frame(frame).show(ctx, |ui| {
             self.jobs_indicator(ui);
             if !self.status.is_empty() {
@@ -7832,6 +7857,35 @@ mod tests {
         ui.frames(2);
     }
 
+    /// The drive selector's last row (Alt+F1 left, Alt+F2 right) takes the
+    /// other panel's folder.
+    #[test]
+    fn drive_menu_goes_to_the_other_panels_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let (left, right) = (t.path().join("levý"), t.path().join("pravý").join("hlubší"));
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        let mut ui = Ui::new(&left, &right);
+        for (key, panel, from) in [(Key::F1, 0, &right), (Key::F2, 1, &left)] {
+            // the other panel somewhere else first
+            ui.app.panels[1 - panel].load(from, ui.app.vis(), None).unwrap();
+            ui.key_mod(key, Modifiers::ALT);
+            let Dialog::Drive { drives, conns, paths, .. } = &ui.app.dialog else { panic!("drive menu not open") };
+            let rows = drives.len() + conns.len() + paths.len() + 1;
+            ui.frames(2);
+            for _ in 0..rows {
+                ui.key(Key::ArrowDown);
+            }
+            let Dialog::Drive { cursor, .. } = &ui.app.dialog else { panic!("drive menu closed") };
+            assert_eq!(*cursor, rows - 1, "the last row");
+            ui.key(Key::Enter);
+            assert!(matches!(ui.app.dialog, Dialog::None));
+            assert_eq!(ui.app.panels[panel].path(), from.as_path(), "panel {panel}");
+            // back, for the next round
+            ui.app.panels[panel].load(t.path(), ui.app.vis(), None).unwrap();
+        }
+    }
+
     #[test]
     fn drive_icons_draw_for_every_type() {
         use sal_core::drives::DriveType;
@@ -9072,7 +9126,7 @@ mod tests {
         let popup = ui.app.drive_popup_rect.expect("drawn");
         assert!(popup.top() >= -0.5 && popup.bottom() <= 320.5, "{popup:?}");
         let Dialog::Drive { drives, conns, paths, cursor, .. } = &ui.app.dialog else { panic!() };
-        assert_eq!(*cursor, drives.len() + conns.len() + paths.len() - 1);
+        assert_eq!(*cursor, drives.len() + conns.len() + paths.len(), "on the last row, From left panel");
     }
 
     #[cfg(windows)]
@@ -9458,6 +9512,16 @@ mod tests {
         let bg = ui.ctx.style().visuals.panel_fill;
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("plugin_form.png"));
+        // the Search plugin's form
+        ui.app.dialog = Dialog::None;
+        ui.frames(3);
+        let Some(search) = found.get("search").cloned() else { return };
+        ui.screen = egui::vec2(1100.0, 760.0);
+        ui.app.run_plugin_command(&ctx, search, "find".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        ui.frames(25);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("search_form.png"));
     }
 
     /// The operations window (a paused copy and two queued operations) and a

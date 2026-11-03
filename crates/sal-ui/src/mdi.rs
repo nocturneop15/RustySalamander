@@ -53,6 +53,10 @@ pub const FOLDER_PLUS_OUTLINE: &str = "\u{F0B9D}";
 pub const REFRESH: &str = "\u{F0450}";
 pub const SELECT_ALL: &str = "\u{F0486}";
 pub const DOTS_HORIZONTAL: &str = "\u{F01D8}";
+/// "From the right pane": the other panel's folder, into the left one.
+pub const REWIND: &str = "\u{F045F}";
+/// "From the left pane": the other panel's folder, into the right one.
+pub const FAST_FORWARD: &str = "\u{F0211}";
 
 // marks
 pub const MAGNIFY: &str = "\u{F0349}";

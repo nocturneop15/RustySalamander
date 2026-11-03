@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.6.2-alpha (2026-11-03)
+
+- **The program's spacing:** the toolbar, the find bar and the text use the same margins, button padding and control height as RustySalamander's own windows, and the text starts at the same edge as the toolbar's buttons.
+
 ## 0.6.1-alpha (2026-11-03)
 
 - **Room around the controls:** the toolbar and the find bar have padding, so buttons, lists, tick boxes and the find field no longer touch each other or the edges of the bars. The find field is as tall as the buttons beside it.

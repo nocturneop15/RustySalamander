@@ -2,6 +2,11 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `search-v<version>` in the RustySalamander repository.
 
+## 0.5.4-alpha (2026-11-03)
+
+- **Find folders too is on by default:** a search finds matching folders as well as files unless you untick it.
+- **A clearer form** (with RustySalamander 0.8.3-beta, which draws it): wider, labels in one left-aligned column, tick boxes with their text beside them, fields that reach the same right edge, and the notes in small type across the whole width.
+
 ## 0.5.3-alpha (2026-11-01)
 
 - **The program's masks:** name masks are read as the program's Select by mask reads them: `;;` stands for a `;` in a name, and a mask that can't be read (`*.txt|`, `a<b`) gets a message saying where, instead of being guessed at. Matching many `*` no longer slows down on long names.

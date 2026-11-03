@@ -1,9 +1,10 @@
 //! What the program's windows and its plugins' windows share, so a
 //! plugin's window (a viewer) looks like the program: the fonts, the scroll
-//! bars and the accent color.
+//! bars, the accent color, and the spacing and alignment ([`layout`]).
 
 pub mod fonts;
 pub mod icon;
+pub mod layout;
 pub mod mdi;
 pub mod native;
 

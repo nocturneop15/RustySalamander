@@ -122,7 +122,7 @@ fn form(values: &Values, error: Option<String>) -> Form {
         },
         Field { id: "dir".into(), label: tr("Look in:"), kind: FieldKind::Folder, value: v("dir", ""), ..Default::default() },
         check("subdirs", &tr("Include subfolders"), "1", None),
-        check("folders", &tr("Find folders too"), "", None),
+        check("folders", &tr("Find folders too"), "1", None),
         check("hidden", &tr("Include hidden and system items"), "1", None),
         Field { id: "text".into(), label: tr("Containing text:"), value: v("text", ""), ..Default::default() },
         check("text_regex", &tr("The text is a regular expression"), "", None),

@@ -78,12 +78,12 @@ pub fn show(ctx: &egui::Context, pos: Pos2, top: &[Entry], rows: &[Row], icons: 
     let screen = ctx.screen_rect();
     let pos = pos2(pos.x.min(screen.right() - est.x).max(screen.left()), pos.y.min(screen.bottom() - est.y).max(screen.top()));
     let resp = egui::Area::new(Id::new("context_menu")).order(Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
-        let frame = egui::Frame::menu(ui.style()).rounding(8.0).inner_margin(egui::Margin::same(6.0));
+        let frame = egui::Frame::menu(ui.style()).rounding(8.0).inner_margin(sal_ui::layout::MENU_MARGIN);
         frame.show(ui, |ui| {
             // fixed width: rows fill the available width, which in a free
             // floating area would otherwise be the whole screen
             ui.set_width(MENU_WIDTH);
-            ui.spacing_mut().item_spacing = vec2(2.0, 1.0);
+            ui.spacing_mut().item_spacing = vec2(sal_ui::layout::CHIP_SPACING, sal_ui::layout::MENU_ROW_SPACING);
             if !top.is_empty() {
                 ui.horizontal(|ui| {
                     for e in top {
@@ -99,15 +99,15 @@ pub fn show(ctx: &egui::Context, pos: Pos2, top: &[Entry], rows: &[Row], icons: 
                         }
                     }
                 });
-                ui.add_space(2.0);
+                ui.add_space(sal_ui::layout::MENU_GAP);
                 ui.separator();
             }
             for row in rows {
                 match row {
                     Row::Separator => {
-                        ui.add_space(2.0);
+                        ui.add_space(sal_ui::layout::MENU_GAP);
                         ui.separator();
-                        ui.add_space(2.0);
+                        ui.add_space(sal_ui::layout::MENU_GAP);
                     }
                     Row::Entry(e) => {
                         let h = ui.text_style_height(&egui::TextStyle::Body) + 12.0;

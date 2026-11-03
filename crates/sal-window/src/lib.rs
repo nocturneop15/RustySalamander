@@ -210,6 +210,8 @@ impl Look {
         // programs before 0.7.1 don't say: animated, as they were
         self.animations = get("animations") != "off";
         sal_ui::apply_animations(ctx, self.animations);
+        // the program's spacing
+        sal_ui::layout::apply(ctx);
         // programs before 0.5.9 send one color for both themes
         let one = |k: &str| if options.contains_key(k) { sal_ui::parse_accent(&get(k)) } else { sal_ui::parse_accent(&get("accent")) };
         self.accent = (one("accent_light"), one("accent_dark"));

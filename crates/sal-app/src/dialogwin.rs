@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use eframe::egui::{self, Align2, Key, ViewportBuilder, ViewportClass, ViewportCommand, ViewportId};
 use sal_core::config::ThemeMode;
 
-/// Inner margin of a dialog window.
-const MARGIN: f32 = 12.0;
+/// Inside the window, along its edges (the common measure).
+const MARGIN: f32 = sal_ui::layout::MARGIN;
 
 /// State of one open dialog window.
 pub struct Place {
@@ -159,7 +159,7 @@ impl DialogWin {
                     .show(vctx, |ui| body(ui));
                 return;
             }
-            let frame = egui::Frame::central_panel(&vctx.style()).inner_margin(MARGIN);
+            let frame = sal_ui::layout::dialog_frame(&vctx.style());
             let height = egui::CentralPanel::default().frame(frame).show(vctx, |ui| {
                 // the panel itself always fills the window: measure the content in
                 // a room as tall as it wants (a scroll area keeps its own maximum),

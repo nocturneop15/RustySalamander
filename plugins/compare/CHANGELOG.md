@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.3-alpha (2026-11-03)
+
+- **The program's spacing:** the toolbar has room around its buttons and the same margins and control height as the Viewer's and the program's windows; the texts start at the same edge as the toolbar.
+
 ## 0.1.2-alpha (2026-11-02)
 
 - **No window animation with animations off:** with View → Animations turned off in the program (RustySalamander 0.7.4-alpha and later), Windows no longer fades or zooms its windows in and out.

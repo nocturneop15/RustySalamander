@@ -134,8 +134,8 @@ impl Content for ViewerWin {
         if find.open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             find.open = false;
         }
-        egui::TopBottomPanel::top("viewer_bar").frame(bar_frame(ctx)).show(ctx, |ui| {
-            roomy(ui);
+        egui::TopBottomPanel::top("viewer_bar").frame(sal_ui::layout::bar_frame(&ctx.style())).show(ctx, |ui| {
+            sal_ui::layout::controls(ui);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut doc.hex, false, tr("Text"));
                 ui.selectable_value(&mut doc.hex, true, tr("Hex")).on_hover_text(tr("F4 toggles"));
@@ -198,12 +198,12 @@ impl Content for ViewerWin {
             });
         });
         if find.open {
-            egui::TopBottomPanel::top("find_bar").frame(bar_frame(ctx)).show(ctx, |ui| {
-                roomy(ui);
+            egui::TopBottomPanel::top("find_bar").frame(sal_ui::layout::bar_frame(&ctx.style())).show(ctx, |ui| {
+                sal_ui::layout::controls(ui);
                 ui.horizontal(|ui| {
                     ui.label(tr("Find:"));
                     let hint = if find.query.wildcards { tr("text, * any characters, ? one") } else { tr("text") };
-                    let field = ui.add(egui::TextEdit::singleline(&mut find.query.text).desired_width(260.0).margin(egui::vec2(6.0, 4.0)).hint_text(hint));
+                    let field = ui.add(egui::TextEdit::singleline(&mut find.query.text).desired_width(260.0).margin(sal_ui::layout::FIELD_MARGIN).hint_text(hint));
                     if std::mem::take(&mut find.focus) {
                         field.request_focus();
                         select_all(ui, &field, &find.query.text);
@@ -248,7 +248,7 @@ impl Content for ViewerWin {
             doc.hex = false;
         }
         let top_line = &mut self.top_line;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().frame(sal_ui::layout::content_frame(&ctx.style())).show(ctx, |ui| {
             if let Some(e) = &doc.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
                 return;
@@ -301,21 +301,6 @@ impl Content for ViewerWin {
         });
         true
     }
-}
-
-/// The toolbar's and the find bar's frame: room around the controls, so none
-/// touches the bar's edge or the line under it.
-fn bar_frame(ctx: &egui::Context) -> egui::Frame {
-    egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(10.0, 7.0))
-}
-
-/// Room between and inside the controls of a bar: buttons, boxes and the
-/// text field don't touch each other or their text.
-fn roomy(ui: &mut egui::Ui) {
-    let s = ui.spacing_mut();
-    s.item_spacing = egui::vec2(8.0, 6.0);
-    s.button_padding = egui::vec2(8.0, 4.0);
-    s.interact_size.y = s.interact_size.y.max(24.0);
 }
 
 /// Select all text of a text field (so typing replaces what was looked for).

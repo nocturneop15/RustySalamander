@@ -218,7 +218,7 @@ impl ResultsWin {
         if let Some(e) = &self.error {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
-        ui.add_space(4.0);
+        ui.add_space(sal_ui::layout::GAP_SMALL);
 
         // the keyboard moves through the list
         let n = self.rows.len();
@@ -347,7 +347,7 @@ impl ResultsWin {
             act = self.rows.get(i).map(|r| Act::Open(r.inner.clone()));
         }
 
-        ui.add_space(6.0);
+        sal_ui::layout::before_buttons(ui);
         let mut list: Vec<(String, String, Act)> = Vec::new();
         if let Some(sel) = self.selected() {
             list.push((
@@ -380,7 +380,7 @@ impl ResultsWin {
         }
         list.push((tr("Close").into(), String::new(), Act::Close));
         let labels: Vec<(&str, &str)> = list.iter().map(|(l, t, _)| (l.as_str(), t.as_str())).collect();
-        if let Some(i) = crate::app::centered_buttons(ui, &labels) {
+        if let Some(i) = sal_ui::layout::buttons(ui, &labels) {
             act = Some(list[i].2.clone());
         }
         act

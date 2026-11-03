@@ -172,6 +172,42 @@ fn fit_tail(p: &egui::Painter, text: &str, font: &egui::FontId, color: Color32, 
     p.layout_no_wrap("…".into(), font.clone(), color)
 }
 
+/// A full-width row for a command: `icon` (one of [`mdi`]) in `icon_color`,
+/// `label`, and `detail` (a path) right-aligned and dimmed, shortened from
+/// the left when it doesn't fit.
+pub fn glyph_row(ui: &mut Ui, icon: &str, icon_color: Color32, label: &str, detail: &str, selected: bool) -> Response {
+    let h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let vis = ui.visuals();
+        let fill = if selected {
+            vis.selection.bg_fill
+        } else if resp.hovered() {
+            vis.widgets.hovered.weak_bg_fill
+        } else {
+            Color32::TRANSPARENT
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, 3.0, fill);
+        let size = h - 6.0;
+        let ir = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - size / 2.0), vec2(size, size));
+        paint_glyph(p, ir, icon, icon_color);
+        let fg = if selected { vis.selection.stroke.color } else { vis.text_color() };
+        let weak = if selected { fg } else { vis.weak_text_color() };
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let x = ir.right() + 8.0;
+        let g = p.layout_no_wrap(label.to_owned(), font.clone(), fg);
+        let label_end = x + g.size().x;
+        p.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, fg);
+        let room = rect.right() - 8.0 - (label_end + 16.0);
+        if room > 20.0 {
+            let d = fit_tail(p, detail, &font, weak, room);
+            p.galley(pos2(rect.right() - 8.0 - d.size().x, rect.center().y - d.size().y / 2.0), d, weak);
+        }
+    }
+    resp
+}
+
 /// A full-width row for a remembered path: drive or network icon and the path.
 pub fn path_row(ui: &mut Ui, kind: DriveType, path: &str, selected: bool) -> Response {
     let h = ui.text_style_height(&egui::TextStyle::Body) + 8.0;

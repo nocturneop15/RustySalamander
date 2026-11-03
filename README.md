@@ -54,7 +54,8 @@ crates/sal-app    GUI (egui/eframe)
   res/            the exe's icon
   build.rs        copies the languages, builds the plugins into target\<profile>\plugins, gives the exe its icon and version
 crates/sal-ui     what the program's and the plugins' windows share: fonts (Unicode fallback), scroll bars,
-                  the accent color, the Material Design Icons (mdi.rs) and the window icons drawn from them (icon.rs)
+                  the accent color, spacing and alignment (layout.rs), the Material Design Icons (mdi.rs)
+                  and the window icons drawn from them (icon.rs)
 crates/sal-plugin-api   what the program and plugins share (no GUI)
   lib.rs          FolderPlugin / Plugin traits, Item, Index, Updates (where a plugin is published)
   ui.rs           commands, forms, replies, openers (viewers and editors), as text across the interface
