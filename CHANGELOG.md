@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.4-beta (2026-11-03)
+
+- **Drag and drop:** drag files, folders or the selection from a panel onto the other panel or onto a folder's row. On the same drive they are moved, onto another drive copied; **Shift** moves and **Ctrl** copies. The target is outlined and a label at the pointer says what will happen; the drop opens the Copy or Move dialog with the target filled in (Settings → General → Files → *Drag and drop* can start it at once). Esc cancels.
+- **With other programs:** dragged out of the window, the items go to Explorer, the desktop or any program that takes files, which copies or moves them by the same rule. Files dragged in from Explorer can be dropped on a panel or a folder's row the same way.
+
 ## 0.8.3-beta (2026-11-03)
 
 - **From the other panel:** the drive selector (Alt+F1, Alt+F2) ends with **From right panel** in the left panel and **From left panel** in the right one: the panel goes straight to the folder the other one shows. With *All drives* in Settings, the same is a button (⏪ / ⏩) at the end of the drive buttons.

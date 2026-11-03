@@ -157,6 +157,9 @@ pub struct Config {
     pub show_system: bool,
     pub use_recycle_bin: bool,
     pub confirm_delete: bool,
+    /// Items dropped on a folder or panel: the Copy or Move dialog first
+    /// (off: the operation starts at once).
+    pub confirm_drop: bool,
     /// What F3 opens files with, unless their suffix has its own.
     pub view_with: OpenWith,
     /// What F4 opens files with, unless their suffix has its own.
@@ -274,6 +277,7 @@ impl Default for Config {
             show_system: true,
             use_recycle_bin: true,
             confirm_delete: true,
+            confirm_drop: true,
             view_with: OpenWith::viewer_plugin(),
             edit_with: OpenWith::Notepad,
             suffix_rules: Vec::new(),

@@ -2,7 +2,7 @@
 
 RustySalamander is a two-panel file manager for Windows 10 and 11. It is a rewrite of Open Salamander that handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
 
-Version 0.8.3-beta.
+Version 0.8.4-beta.
 
 ## Contents
 
@@ -209,6 +209,16 @@ Options below the target. The dialog opens with the defaults from Settings → G
   - **SHA-256 checksums:** the copy is read back and its SHA-256 checksum compared with the original's. This takes about as long again as the copy. The checksums of all files are also written to a file named `RustySalamander <date> <time>.sha256`, one in the target folder and one in the source folder, in the format `sha256sum -c` checks (`<checksum> *<path>`).
 
   A copy that fails the check is removed and you are asked to **Retry**, **Skip** or **Cancel**. A safe move deletes an original only after its copy passed the check; the checksum file in the source folder stays as a record. A move within the same drive only renames, so no data is copied: its files are listed in the checksum files but there is nothing to compare. A safe copy always shows the *Operation result* window when it ends. Inside archives and on servers (plugins) nothing is checked.
+
+### Drag and drop
+
+Drag a file or folder from a panel onto the other panel, or onto a folder's row (`..` included) in either panel. Dragging a selected item takes the whole selection. While you drag, the target folder is outlined and a label at the pointer says what will happen: *Move 3 items to Photos* or *Copy …*. Esc cancels the drag.
+
+- **On the same drive** the items are **moved**, onto **another drive** (or into an archive, or to a server) **copied**, as in Explorer.
+- **Shift** moves and **Ctrl** copies, whatever the drives. Hold the key when you release the button.
+- The **Copy or Move dialog** opens with the target filled in, so you can check it, pick a safe copy or run it in the background. Settings → General → Files → *Drag and drop* can start the operation at once instead.
+- **Out of the window:** drag past the window's edge and the items go to Explorer, the desktop or any program that takes files; that program copies or moves them by the same rule. (Items inside an archive or on a server stay inside the window.)
+- **Into the window:** files dragged from Explorer or another program can be dropped on a panel or a folder's row, the same way.
 
 ### Create directory (F7)
 
@@ -439,6 +449,7 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 | Visibility → *Show system files* | on | Lists protected system items. An item that is both hidden and system needs both on. |
 | Deleting → *Delete to Recycle Bin* | on | Off: F8 and Delete delete permanently. |
 | Deleting → *Confirm delete* | on | Asks before deleting. |
+| Drag and drop → *Confirm copying and moving by drag and drop* | on | Dropped items open the Copy or Move dialog first; off, the operation starts at once. |
 | *Copying (F5)*, *Moving (F6)* → *Run in background* | off | What the Copy and the Move dialog offer when they open: start without the progress window. A change in the dialog is for that operation only. |
 | *Copying (F5)*, *Moving (F6)* → *Show the result when finished* | off | Show the *Operation result* window at the end. Always on with a safe copy or move. |
 | *Copying (F5)*, *Moving (F6)* → *Safe copy* / *Safe move* | Off | What the dialogs offer: *Off*, *Compare sizes* or *SHA-256 checksums* (see [Copy and move](#copy-and-move-f5-f6)). |
@@ -649,4 +660,4 @@ Everything is in the program's folder:
 
 ### Not available yet
 
-Password-protected archives, FTP and SFTP, saved server sites, other panel views (thumbnails, brief), and drag and drop.
+Password-protected archives, FTP and SFTP, saved server sites, and other panel views (thumbnails, brief).

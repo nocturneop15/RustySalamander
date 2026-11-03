@@ -27,6 +27,7 @@ mod ctxmenu;
 mod debuglog;
 mod dialogwin;
 mod dirsize;
+mod dnd;
 mod drive_icon;
 #[cfg(test)]
 mod exe_icon;
@@ -60,7 +61,9 @@ fn main() -> eframe::Result<()> {
             .with_title(concat!("RustySalamander ", env!("CARGO_PKG_VERSION")))
             .with_icon(sal_ui::icon::program())
             .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 400.0]),
+            .with_min_inner_size([640.0, 400.0])
+            // the program takes drops itself (dnd.rs): where, and copy or move
+            .with_drag_and_drop(false),
         ..Default::default()
     };
     debuglog::write("startup: creating the window");

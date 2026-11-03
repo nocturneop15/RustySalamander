@@ -20,6 +20,7 @@ use sal_core::{EntryKind, FileEntry, MaskGroup, SortKey};
 use crate::ctxmenu::{self, MenuAction};
 use crate::dialogwin::{self, DialogWin};
 use crate::dirsize::DirSizes;
+use crate::dnd;
 use crate::drive_icon;
 use crate::i18n::{n_, tr, trf, trn};
 use crate::icons::Icons;
@@ -437,6 +438,14 @@ pub struct App {
     size_report: Option<(usize, Vec<PathBuf>)>,
     /// Native window handle (for the shell menu and shell dialogs).
     hwnd: Option<isize>,
+    /// Items dragged from a panel, while the button is held.
+    panel_drag: Option<PanelDrag>,
+    /// What Windows' drop handler and the window share: the drop zones, and
+    /// files dragged in from other programs.
+    drop_shared: Option<dnd::SharedRef>,
+    /// Windows' drag (out of the window) took the button's release: egui
+    /// gets it in the next frame.
+    release_pointer: bool,
     /// What the last operation did, shown in the status bar for a moment
     /// ([`JOB_DONE_SHOWN`]) instead of "No operations running".
     job_done: Option<(String, Instant)>,
@@ -622,6 +631,60 @@ fn describe_drive(d: &Drive) -> String {
 }
 
 /// The items of an operation for its question: the name of one, or how many.
+/// A folder as the Copy and Move dialogs show their target: ending with
+/// a separator (`/` for a connection's URL).
+fn transfer_target(folder: &Path) -> String {
+    let mut target = display_path(folder);
+    let sep = if location::virtual_parts(folder).is_some() { '/' } else { MAIN_SEPARATOR };
+    if !target.ends_with(sep) {
+        target.push(sep);
+    }
+    target
+}
+
+/// Items dragged from a panel.
+struct PanelDrag {
+    sources: Vec<PathBuf>,
+    /// Their volume, for the copy-or-move rule.
+    volume: String,
+    /// Real files and folders (not in an archive or on a server): they can
+    /// be dragged out of the window.
+    real: bool,
+}
+
+/// A drag over the window: the folder or panel it would go into outlined,
+/// and at the pointer what would happen.
+fn paint_drop(ctx: &egui::Context, pos: egui::Pos2, sources: &[PathBuf], hit: Option<&(dnd::Zone, OpKind)>) {
+    let what = describe(sources);
+    let text = match hit {
+        Some((z, kind)) => {
+            let folder = z.folder.file_name().map(|n| display_name(&n.to_string_lossy()).into_owned()).unwrap_or_else(|| display_path(&z.folder));
+            let icon = if *kind == OpKind::Move { sal_ui::mdi::CONTENT_CUT } else { sal_ui::mdi::CONTENT_COPY };
+            let line = if *kind == OpKind::Move {
+                trf("Move {what} to {folder}", &[("what", &what), ("folder", &folder)])
+            } else {
+                trf("Copy {what} to {folder}", &[("what", &what), ("folder", &folder)])
+            };
+            format!("{icon} {line}")
+        }
+        None => what,
+    };
+    if let Some((z, _)) = hit {
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_zone")));
+        let accent = ctx.style().visuals.selection.bg_fill;
+        painter.rect_stroke(z.rect.shrink(1.0), 2.0f32, egui::Stroke::new(2.0f32, accent));
+    }
+    egui::Area::new(egui::Id::new("drag_label")).order(egui::Order::Tooltip).fixed_pos(pos + egui::vec2(16.0, 18.0)).interactable(false).show(ctx, |ui| {
+        egui::Frame::popup(ui.style()).show(ui, |ui| {
+            let mut t = RichText::new(text);
+            if hit.is_none() {
+                t = t.weak();
+            }
+            ui.add(egui::Label::new(t).extend());
+        });
+    });
+}
+
 fn describe(sources: &[PathBuf]) -> String {
     match sources {
         [one] => format!("\"{}\"", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
@@ -721,6 +784,9 @@ impl App {
             font_filter: String::new(),
             size_report: None,
             hwnd: None,
+            panel_drag: None,
+            drop_shared: None,
+            release_pointer: false,
             job_done: None,
             ctx_menu: None,
             diag_since: None,
@@ -1932,12 +1998,7 @@ impl App {
             Cmd::Copy | Cmd::Move => {
                 let sources = self.act().targets();
                 if !sources.is_empty() {
-                    let mut target = display_path(self.panels[other].path());
-                    // a connection is shown as a URL: its folders end with /
-                    let sep = if location::virtual_parts(self.panels[other].path()).is_some() { '/' } else { MAIN_SEPARATOR };
-                    if !target.ends_with(sep) {
-                        target.push(sep);
-                    }
+                    let target = transfer_target(self.panels[other].path());
                     let kind = if cmd == Cmd::Copy { OpKind::Copy } else { OpKind::Move };
                     // what Settings sets; a change in the dialog is for this operation only
                     let d = if kind == OpKind::Copy { self.cfg.copy_defaults } else { self.cfg.move_defaults };
@@ -2327,6 +2388,8 @@ impl App {
         let active = self.active == idx;
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 6.0;
         let mut clicked: Option<(usize, Modifiers, bool)> = None;
+        // a row dragged: its items (or the selection it is in) start a drag
+        let mut drag_from: Option<usize> = None;
         let mut sort_click = None;
         let mut path_start_edit = false;
         let mut path_submit: Option<bool> = None;
@@ -2588,7 +2651,7 @@ impl App {
                         .striped(true)
                         .resizable(false)
                         .auto_shrink([false, false])
-                        .sense(Sense::click())
+                        .sense(Sense::click_and_drag())
                         .max_scroll_height(body_h)
                         .cell_layout(Layout::left_to_right(Align::Center))
                         .column(Column::remainder().at_least(name_min).clip(true))
@@ -2750,6 +2813,9 @@ impl App {
                             });
                             let r = row.response();
                             row_hits.push((r.rect, i));
+                            if r.drag_started() {
+                                drag_from = Some(i);
+                            }
                             if r.double_clicked() {
                                 clicked = Some((i, Modifiers::NONE, true));
                             } else if r.clicked() {
@@ -2952,6 +3018,9 @@ impl App {
                 self.error(e);
             }
         }
+        if let Some(i) = drag_from {
+            self.start_drag(idx, i);
+        }
         if let Some((i, m, double)) = clicked {
             self.active = idx;
             let p = &mut self.panels[idx];
@@ -2971,6 +3040,123 @@ impl App {
             } else {
                 p.cursor = i;
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- drag and drop
+
+    /// The volume of `p` for the copy-or-move rule: an archive or a plugin's
+    /// connection is one of its own, otherwise the drive or share.
+    fn volume_of(&self, p: &Path) -> String {
+        match self.archive_folder(p) {
+            Some((_, file, _)) => file.to_string_lossy().to_lowercase(),
+            None => dnd::volume(p),
+        }
+    }
+
+    /// The places items can be dropped on: the folders' rows (and ..), then
+    /// each panel as a whole (its folder).
+    fn drop_zones(&self) -> Vec<dnd::Zone> {
+        let mut zones = Vec::new();
+        for idx in 0..2 {
+            let body = self.body_rects[idx];
+            let entries = &self.panels[idx].listing.entries;
+            for (rect, i) in &self.row_hits[idx] {
+                if let Some(e) = entries.get(*i).filter(|e| e.kind != EntryKind::File) {
+                    let rect = rect.intersect(body);
+                    if rect.height() > 0.0 {
+                        zones.push(dnd::Zone { rect, folder: e.path.clone(), volume: self.volume_of(&e.path) });
+                    }
+                }
+            }
+        }
+        for idx in 0..2 {
+            let folder = self.panels[idx].path().to_path_buf();
+            zones.push(dnd::Zone { rect: self.body_rects[idx], volume: self.volume_of(&folder), folder });
+        }
+        zones
+    }
+
+    /// Row `i` of panel `idx` is dragged: the selection when the row is in it,
+    /// otherwise its item (which gets the cursor).
+    fn start_drag(&mut self, idx: usize, i: usize) {
+        let p = &mut self.panels[idx];
+        let Some(e) = p.listing.entries.get(i).filter(|e| e.kind != EntryKind::UpDir) else { return };
+        let sources = if e.selected {
+            p.targets()
+        } else {
+            let path = e.path.clone();
+            p.cursor = i;
+            vec![path]
+        };
+        // a plugin's items (an archive, a server) can't leave the window
+        let real = p.archive.is_none();
+        let volume = self.volume_of(&sources[0]);
+        self.active = idx;
+        self.panel_drag = Some(PanelDrag { sources, volume, real });
+    }
+
+    /// Drags, every frame: files from other programs over the window, items
+    /// dragged from a panel (where they would go, the drop, Esc), and out of
+    /// the window a Windows drag.
+    fn drag_ui(&mut self, ctx: &egui::Context) {
+        let zones = self.drop_zones();
+        let outside = self.drop_shared.as_ref().map(|s| {
+            let mut s = s.lock().unwrap();
+            s.zones = zones.clone();
+            (s.outside.hover.clone(), s.outside.dropped.take())
+        });
+        if let Some((hover, dropped)) = outside {
+            if let Some((pos, files, shift, ctrl)) = hover {
+                let volume = files.first().map(|f| dnd::volume(f)).unwrap_or_default();
+                paint_drop(ctx, pos, &files, dnd::resolve(&zones, pos, &files, &volume, shift, ctrl).as_ref());
+            }
+            if let Some((files, folder, kind)) = dropped {
+                self.drop_items(ctx, kind, files, &folder);
+            }
+        }
+        let Some(drag) = &self.panel_drag else { return };
+        let (pos, down, escape, m) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down(), i.key_pressed(Key::Escape), i.modifiers));
+        if escape {
+            self.panel_drag = None;
+            return;
+        }
+        let Some(pos) = pos else { return };
+        let hit = dnd::resolve(&zones, pos, &drag.sources, &drag.volume, m.shift, m.ctrl);
+        // out of the window: a Windows drag, to Explorer or another program,
+        // which copies or moves by the same rule
+        if drag.real && !ctx.screen_rect().contains(pos) {
+            let drag = self.panel_drag.take().unwrap();
+            if let Some(h) = self.hwnd {
+                if let Err(e) = dnd::drag_out(h, &drag.sources) {
+                    self.error(e);
+                }
+                self.release_pointer = true;
+                self.reload_all();
+            }
+            return;
+        }
+        if !down {
+            let drag = self.panel_drag.take().unwrap();
+            if let Some((z, kind)) = hit {
+                self.drop_items(ctx, kind, drag.sources, &z.folder);
+            }
+            return;
+        }
+        ctx.set_cursor_icon(if hit.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::NoDrop });
+        paint_drop(ctx, pos, &drag.sources, hit.as_ref());
+        ctx.request_repaint();
+    }
+
+    /// `sources` dropped on `folder`: the Copy or Move dialog for them, or,
+    /// with the confirmation off in Settings, the operation at once.
+    fn drop_items(&mut self, ctx: &egui::Context, kind: OpKind, sources: Vec<PathBuf>, folder: &Path) {
+        let opts = if kind == OpKind::Copy { self.cfg.copy_defaults } else { self.cfg.move_defaults };
+        let d = Dialog::Transfer { kind, sources, target: transfer_target(folder), opts };
+        if self.cfg.confirm_drop {
+            self.open_dialog(d);
+        } else {
+            self.dialog_ok(ctx, d);
         }
     }
 
@@ -3631,6 +3817,12 @@ impl App {
                                         ui.checkbox(&mut cfg.use_recycle_bin, tr(LBL_RECYCLE));
                                         ui.checkbox(&mut cfg.confirm_delete, tr(LBL_CONFIRM));
                                     });
+                                    ui.end_row();
+
+                                    ui.label(tr("Drag and drop"));
+                                    ui.checkbox(&mut cfg.confirm_drop, tr(LBL_CONFIRM_DROP)).on_hover_text(tr(
+                                        "On the same drive dropped items are moved, onto another drive copied; Shift moves and Ctrl copies. Ticked, the Copy or Move dialog opens first.",
+                                    ));
                                     ui.end_row();
 
                                     // what the Copy and Move dialogs offer each time they open
@@ -5597,6 +5789,7 @@ const LBL_QS_PREFIX: &str = n_("From first letter");
 const LBL_QS_ANYWHERE: &str = n_("Anywhere in name");
 const LBL_QS_ARROWS: &str = n_("Arrows jump between matches");
 const LBL_CONFIRM: &str = n_("Confirm delete");
+const LBL_CONFIRM_DROP: &str = n_("Confirm copying and moving by drag and drop");
 const THEMES: [(ThemeMode, &str); 3] = [(ThemeMode::System, n_("System default")), (ThemeMode::Light, n_("Light")), (ThemeMode::Dark, n_("Dark"))];
 
 /// Which program a Settings "Browse…" button chooses.
@@ -5841,6 +6034,16 @@ const FIXED_KEYS: &[(Section, &str, &str)] = &[
 ];
 
 impl eframe::App for App {
+    /// Windows' drag (out of the window) ends with the button released, a
+    /// release the window never saw: egui gets it here, or it would hold the
+    /// button down.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if std::mem::take(&mut self.release_pointer) {
+            let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();
+            raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: raw.modifiers });
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         if self.hwnd.is_none() {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -5848,6 +6051,8 @@ impl eframe::App for App {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
                     self.hwnd = Some(w.hwnd.get());
                     crate::rawkeys::install(w.hwnd.get());
+                    self.drop_shared = dnd::register(w.hwnd.get(), ctx.clone());
+                    crate::debuglog::write(format!("startup: drop target {}", if self.drop_shared.is_some() { "registered" } else { "not registered" }));
                     apply_theme(ctx, self.cfg.theme);
                     // the shell extensions load in the background, not on the first right-click
                     shellmenu::warm_up(self.panels.iter().filter(|p| p.archive.is_none()).map(|p| p.path().to_path_buf()).collect());
@@ -6064,6 +6269,7 @@ impl App {
         self.report_sizes();
         self.icons.poll(ctx);
         timing.mark("sizes and icons");
+        self.drag_ui(ctx);
         self.context_menu_ui(ctx);
         self.dialogs(ctx);
         timing.mark("dialogs");
@@ -7855,6 +8061,81 @@ mod tests {
         // the cursor starts on the panel's own drive
         assert_eq!(drives[*cursor].root, drives::root_of(t.path()));
         ui.frames(2);
+    }
+
+    /// Drag `from` → `to` with the button held, `m` held at the end.
+    fn drag(ui: &mut Ui, from: egui::Pos2, to: egui::Pos2, m: Modifiers) {
+        ui.run(vec![Event::PointerMoved(from)], Modifiers::NONE);
+        ui.run(vec![Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }], Modifiers::NONE);
+        for i in 1..=6 {
+            ui.run(vec![Event::PointerMoved(from + (to - from) * (i as f32 / 6.0))], m);
+        }
+        ui.run(vec![Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: m }], m);
+        ui.frames(2);
+    }
+
+    /// The middle of the row of `name` in panel `idx`.
+    fn row_of(ui: &Ui, idx: usize, name: &str) -> egui::Pos2 {
+        let i = ui.app.panels[idx].listing.entries.iter().position(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+        ui.app.row_hits[idx].iter().find(|(_, k)| *k == i).map(|(r, _)| r.center()).expect("row shown")
+    }
+
+    /// Items dragged from a panel: onto the other panel, onto a folder's row,
+    /// the same drive moves, Ctrl copies, nothing where they are already; the
+    /// selection goes as a whole.
+    #[test]
+    fn drag_and_drop_between_panels() {
+        let t = tempfile::tempdir().unwrap();
+        let (left, right) = (t.path().join("vlevo"), t.path().join("vpravo"));
+        fs::create_dir_all(left.join("složka")).unwrap();
+        fs::create_dir_all(right.join("cíl")).unwrap();
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(left.join(n), n).unwrap();
+        }
+        let mut ui = Ui::new(&left, &right);
+        ui.frames(2);
+        let target = |ui: &Ui| match &ui.app.dialog {
+            Dialog::Transfer { kind, sources, target, .. } => Some((*kind, sources.iter().map(|s| s.file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>(), target.clone())),
+            _ => None,
+        };
+        // onto the other panel (same drive): Move, its folder
+        let (from, to) = (row_of(&ui, 0, "a.txt"), ui.app.body_rects[1].center());
+        drag(&mut ui, from, to, Modifiers::NONE);
+        assert_eq!(target(&ui), Some((OpKind::Move, vec!["a.txt".to_owned()], transfer_target(&right))));
+        ui.key(Key::Escape);
+        // Ctrl copies
+        drag(&mut ui, from, to, Modifiers::CTRL);
+        assert_eq!(target(&ui).map(|t| t.0), Some(OpKind::Copy));
+        ui.key(Key::Escape);
+        // onto a folder's row: that folder
+        let to = row_of(&ui, 1, "cíl");
+        drag(&mut ui, from, to, Modifiers::NONE);
+        assert_eq!(target(&ui).map(|t| t.2), Some(transfer_target(&right.join("cíl"))));
+        ui.key(Key::Escape);
+        // onto a folder in its own panel; onto its own panel: nothing
+        let to = row_of(&ui, 0, "složka");
+        drag(&mut ui, from, to, Modifiers::NONE);
+        assert_eq!(target(&ui).map(|t| t.2), Some(transfer_target(&left.join("složka"))));
+        ui.key(Key::Escape);
+        let to = ui.app.body_rects[0].center_bottom() - egui::vec2(0.0, 10.0);
+        drag(&mut ui, from, to, Modifiers::NONE);
+        assert_eq!(target(&ui), None, "where it is already");
+        // the selection, dragged by one of its rows
+        for n in ["b.txt", "c.txt"] {
+            let i = ui.app.panels[0].listing.entries.iter().position(|e| e.name == n).unwrap();
+            ui.app.panels[0].listing.entries[i].selected = true;
+        }
+        ui.frames(1);
+        let (from, to) = (row_of(&ui, 0, "c.txt"), ui.app.body_rects[1].center());
+        drag(&mut ui, from, to, Modifiers::SHIFT);
+        assert_eq!(target(&ui).map(|t| (t.0, t.1)), Some((OpKind::Move, vec!["b.txt".to_owned(), "c.txt".to_owned()])));
+        ui.key(Key::Escape);
+        // without the confirmation: done at once
+        ui.app.cfg.confirm_drop = false;
+        drag(&mut ui, from, to, Modifiers::CTRL);
+        ui.wait_job();
+        assert!(right.join("b.txt").is_file() && left.join("b.txt").is_file(), "copied");
+        assert!(ui.app.panel_drag.is_none());
     }
 
     /// The drive selector's last row (Alt+F1 left, Alt+F2 right) takes the
