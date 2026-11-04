@@ -1,17 +1,17 @@
 # RustySalamander
 
-A Rust rewrite of [Open Salamander](https://github.com/OpenSalamander/salamander), the dual-pane file manager for Windows, with full Unicode (UTF-8) support.
+A modern dual-pane file manager for Windows, inspired by the long-proven efficiency and functionality of Altap Salamander. Written in Rust, with full Unicode (UTF-8) support: file names in every language work everywhere.
 
-The original is ~1.3 million lines of ANSI C++ (`char*` + `MAX_PATH`), so files whose names fall outside the system code page show up as `?` and can't be opened. RustySalamander uses lossless paths everywhere. See [docs/ANALYSIS.md](docs/ANALYSIS.md) for the analysis of the original code and the rewrite plan.
+RustySalamander is not a clone. It keeps what has made Salamander quick to work with for decades (two keyboard-driven panels, masks, quick search, archives and servers in panels, plugins) and builds everything else anew, for today's Windows. A few algorithms (masks, quick search, sorting) are ported from [Open Salamander](https://github.com/OpenSalamander/salamander), the open-source release of Altap Salamander; [docs/ANALYSIS.md](docs/ANALYSIS.md) is the study of its code that the project started from.
 
-> **Status: alpha.** The everyday file manager works (panels, file operations, archives, viewer, settings), but many of Salamander's features are still missing, and the plugin interface may change between releases.
+> **Status: alpha.** The everyday file manager works (panels, file operations, archives, viewer, settings), but many features are still to come, and the plugin interface may change between releases.
 
 Documentation:
 
 - [docs/USER-MANUAL.md](docs/USER-MANUAL.md): **the user manual**: everyday use, every setting, menu and key
 - [docs/PLUGINS.md](docs/PLUGINS.md): writing plugins
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): building, testing and contributing
-- [docs/ANALYSIS.md](docs/ANALYSIS.md): the original code and the rewrite plan
+- [docs/ANALYSIS.md](docs/ANALYSIS.md): the study of Open Salamander's code the project started from
 - [CHANGELOG.md](CHANGELOG.md): what each release contains
 
 ## Unicode model

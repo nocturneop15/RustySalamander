@@ -1,6 +1,6 @@
 # RustySalamander user manual
 
-RustySalamander is a two-panel file manager for Windows 10 and 11. It is a rewrite of Open Salamander that handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
+RustySalamander is a modern two-panel file manager for Windows 10 and 11, inspired by the long-proven efficiency and functionality of Altap Salamander. It handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
 
 Version 0.8.4-beta.
 

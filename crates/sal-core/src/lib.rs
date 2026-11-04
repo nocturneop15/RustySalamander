@@ -1,4 +1,4 @@
-//! Core of RustySalamander, a Rust rewrite of Open Salamander.
+//! Core of RustySalamander, a modern file manager inspired by Altap Salamander.
 //!
 //! Text model: every file is identified by a lossless [`std::path::PathBuf`]
 //! (WTF-8 on Windows, so even names with unpaired UTF-16 surrogates round-trip),

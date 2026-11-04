@@ -1,5 +1,5 @@
-//! RustySalamander: a dual-pane file manager for Windows, a Unicode-native
-//! rewrite of Open Salamander in Rust.
+//! RustySalamander: a modern, Unicode-native dual-pane file manager for
+//! Windows, inspired by Altap Salamander.
 //!
 //! This crate is the GUI (egui/eframe). The file system logic that needs no
 //! window lives in `sal-core`; plugins are separate DLLs that talk to the

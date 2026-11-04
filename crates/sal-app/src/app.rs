@@ -5187,7 +5187,7 @@ impl App {
                         text: format!(
                             "RustySalamander {}\n{}",
                             env!("CARGO_PKG_VERSION"),
-                            tr("A Rust rewrite of Open Salamander with full Unicode (UTF-8) support.\n\nBased on Open Salamander © Open Salamander Authors, GPL-2.0-or-later.")
+                            tr("A modern file manager for Windows, inspired by the long-proven efficiency and functionality of Altap Salamander. Full Unicode (UTF-8) support.\n\nParts are based on Open Salamander © Open Salamander Authors, GPL-2.0-or-later.")
                         ),
                     });
                     ui.close_menu();
