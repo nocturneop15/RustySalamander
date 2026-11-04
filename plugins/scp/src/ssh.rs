@@ -235,12 +235,26 @@ impl Connection {
     /// `scp -f`. `progress` gets the bytes received in this session
     /// (counted in `done`); false cancels.
     pub async fn download(&self, remote: &str, out: &Path, progress: &mut dyn FnMut(u64) -> bool, done: &mut u64) -> io::Result<()> {
+        let mut to = ToDisk { out: out.to_path_buf(), file: None, progress, done };
+        let r = self.receive(&[remote.to_owned()], &mut to).await;
+        // a file cut short isn't left behind
+        if let Some((path, _)) = to.file.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        r
+    }
+
+    /// Receive the files and folders `remotes` (paths on the server, in one
+    /// folder) with `scp -r -p -f`, through one channel: `to` gets each
+    /// folder and file, with paths below that folder.
+    pub async fn receive(&self, remotes: &[String], to: &mut dyn Receive) -> io::Result<()> {
         let ch = self.handle.channel_open_session().await.map_err(|e| self.lost(e))?;
-        ch.exec(true, format!("scp -r -p -f -- {}", quote(remote))).await.map_err(io_error)?;
+        let args: Vec<String> = remotes.iter().map(|r| quote(r)).collect();
+        ch.exec(true, format!("scp -r -p -f -- {}", args.join(" "))).await.map_err(io_error)?;
         let (r, mut w) = tokio::io::split(ch.into_stream());
         let mut r = BufReader::new(r);
         ack(&mut w).await?;
-        let mut dirs = vec![out.to_path_buf()];
+        let mut dirs: Vec<String> = Vec::new();
         let mut times: Option<SystemTime> = None;
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -257,23 +271,21 @@ impl Connection {
                 }
                 b'D' => {
                     let (_, name) = header(&text)?;
-                    let dir = dirs.last().expect("dirs").join(name);
-                    std::fs::create_dir_all(&dir)?;
-                    dirs.push(dir);
+                    dirs.push(name);
+                    to.folder(&dirs)?;
                     times = None;
                     ack(&mut w).await?;
                 }
                 b'E' => {
-                    if dirs.len() > 1 {
-                        dirs.pop();
-                    }
+                    dirs.pop();
                     ack(&mut w).await?;
                 }
                 b'C' => {
                     let (size, name) = header(&text)?;
-                    let path = dirs.last().expect("dirs").join(name);
+                    dirs.push(name);
+                    let wanted = to.file(&dirs, size)?;
+                    dirs.pop();
                     ack(&mut w).await?;
-                    let mut file = std::fs::File::create(&path)?;
                     let mut left = size;
                     while left > 0 {
                         let want = left.min(buf.len() as u64) as usize;
@@ -281,24 +293,21 @@ impl Connection {
                         if n == 0 {
                             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, tr("The connection ended in the middle of a file.")));
                         }
-                        std::io::Write::write_all(&mut file, &buf[..n])?;
                         left -= n as u64;
-                        *done += n as u64;
-                        if !progress(*done) {
-                            drop(file);
-                            let _ = std::fs::remove_file(&path);
+                        // not wanted: read past it
+                        if wanted && !to.data(&buf[..n])? {
                             return Err(io::Error::new(io::ErrorKind::Interrupted, tr("Cancelled.")));
                         }
                     }
-                    drop(file);
                     let mut status = [0u8];
                     r.read_exact(&mut status).await?;
                     if status[0] != 0 {
                         return Err(remote_error(b"", 1));
                     }
-                    if let Some(t) = times.take() {
-                        let _ = std::fs::File::options().write(true).open(&path).and_then(|f| f.set_modified(t));
+                    if wanted {
+                        to.done(times.take())?;
                     }
+                    times = None;
                     ack(&mut w).await?;
                 }
                 _ => return Err(io::Error::new(io::ErrorKind::InvalidData, tr("The server answered in a way SCP doesn't expect."))),
@@ -325,6 +334,62 @@ impl Connection {
             Some(1) | Some(2) => Err(remote_error(&rest[1..], 1)),
             _ => Ok(()),
         }
+    }
+}
+
+/// What `scp -f` sends, as [`Connection::receive`] reads it. Paths are the
+/// names from the folder the remotes are in down to the item.
+pub trait Receive {
+    /// A folder starts.
+    fn folder(&mut self, path: &[String]) -> io::Result<()>;
+    /// A file starts, `size` bytes long: whether its bytes are wanted.
+    fn file(&mut self, path: &[String], size: u64) -> io::Result<bool>;
+    /// The next bytes of the file; false stops everything (cancelled).
+    fn data(&mut self, bytes: &[u8]) -> io::Result<bool>;
+    /// The file is complete; `modified` as the server keeps it.
+    fn done(&mut self, modified: Option<SystemTime>) -> io::Result<()>;
+}
+
+/// [`Receive`] into a folder on disk, with progress.
+struct ToDisk<'a> {
+    out: PathBuf,
+    /// The file being written.
+    file: Option<(PathBuf, std::fs::File)>,
+    progress: &'a mut dyn FnMut(u64) -> bool,
+    done: &'a mut u64,
+}
+
+impl ToDisk<'_> {
+    fn path(&self, path: &[String]) -> PathBuf {
+        path.iter().fold(self.out.clone(), |p, n| p.join(n))
+    }
+}
+
+impl Receive for ToDisk<'_> {
+    fn folder(&mut self, path: &[String]) -> io::Result<()> {
+        std::fs::create_dir_all(self.path(path))
+    }
+    fn file(&mut self, path: &[String], _: u64) -> io::Result<bool> {
+        let p = self.path(path);
+        let f = std::fs::File::create(&p)?;
+        self.file = Some((p, f));
+        Ok(true)
+    }
+    fn data(&mut self, bytes: &[u8]) -> io::Result<bool> {
+        if let Some((_, f)) = self.file.as_mut() {
+            std::io::Write::write_all(f, bytes)?;
+        }
+        *self.done += bytes.len() as u64;
+        Ok((self.progress)(*self.done))
+    }
+    fn done(&mut self, modified: Option<SystemTime>) -> io::Result<()> {
+        if let Some((p, f)) = self.file.take() {
+            drop(f);
+            if let Some(t) = modified {
+                let _ = std::fs::File::options().write(true).open(&p).and_then(|f| f.set_modified(t));
+            }
+        }
+        Ok(())
     }
 }
 

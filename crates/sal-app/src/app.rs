@@ -476,6 +476,9 @@ struct CtxMenu {
     dir: PathBuf,
     pos: egui::Pos2,
     can_paste: bool,
+    /// The items are the files on disk a plugin's items stand for: no
+    /// rename, paste or size calculation, which are the panel's own.
+    plugin: bool,
 }
 
 /// Right button pressed over a panel (for click vs. long press).
@@ -647,9 +650,19 @@ struct PanelDrag {
     sources: Vec<PathBuf>,
     /// Their volume, for the copy-or-move rule.
     volume: String,
-    /// Real files and folders (not in an archive or on a server): they can
-    /// be dragged out of the window.
-    real: bool,
+    /// What a drag out of the window gives other programs.
+    outside: DragOut,
+}
+
+/// What items dragged from a panel are out of the window.
+enum DragOut {
+    /// The files on disk they are, or a plugin's items stand for.
+    Files(Vec<PathBuf>),
+    /// A plugin's items (an archive's, a server's): files in the plugin's
+    /// mount, read from the plugin only as other programs read them.
+    Mount,
+    /// Nothing (a comparison's placeholders): they stay in the window.
+    No,
 }
 
 /// A drag over the window: the folder or panel it would go into outlined,
@@ -1282,6 +1295,29 @@ impl App {
         plugin.real_path(&file, &inner)
     }
 
+    /// The files on disk `items` stand for, for the clipboard, a drag out of
+    /// the window and the shell's context menu: a plugin's items through
+    /// [`FolderPlugin::real_path`] (those without one are left out), others
+    /// as they are. An error when none of them is a file on disk.
+    fn real_items(&self, items: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+        let real: Vec<PathBuf> = items
+            .iter()
+            .filter_map(|p| match self.in_archive(p) {
+                Some((plugin, file, inner)) => plugin.real_path(&file, &inner),
+                None => Some(p.clone()),
+            })
+            .collect();
+        if real.is_empty() && !items.is_empty() {
+            return Err(tr("These items aren't files on disk.").into());
+        }
+        Ok(real)
+    }
+
+    /// The folder the shell runs a verb in for `items`: the first one's.
+    fn folder_of(items: &[PathBuf]) -> PathBuf {
+        items.first().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default()
+    }
+
     /// Close a connection: panels showing it go back to where they were
     /// before, and the plugin releases it in the background.
     fn close_connection(&mut self, root: &Path) {
@@ -1526,10 +1562,7 @@ impl App {
     /// clicked item.
     fn open_context_menu(&mut self, ctx: &egui::Context, panel: usize, row: Option<usize>, pos: egui::Pos2, from_mouse: bool) {
         self.active = panel;
-        if self.panels[panel].archive.is_some() {
-            self.status = tr("The context menu isn't available in plugin panels.").into();
-            return;
-        }
+        let plugin = self.panels[panel].archive.is_some();
         let p = &mut self.panels[panel];
         p.qs.clear();
         let entry = row.and_then(|i| p.entries().get(i).cloned().map(|e| (i, e))).filter(|(_, e)| e.kind != EntryKind::UpDir);
@@ -1545,8 +1578,27 @@ impl App {
             }
             None => Vec::new(),
         };
-        let dir = p.path().to_path_buf();
-        let menu = CtxMenu { panel, items, dir, pos, can_paste: shellmenu::clipboard_has_files() };
+        let mut dir = p.path().to_path_buf();
+        // a plugin's items: the files on disk they stand for, if any
+        let items = if plugin {
+            if items.is_empty() {
+                self.status = tr("The context menu isn't available in plugin panels.").into();
+                return;
+            }
+            match self.real_items(&items) {
+                Ok(real) => {
+                    dir = Self::folder_of(&real);
+                    real
+                }
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            }
+        } else {
+            items
+        };
+        let menu = CtxMenu { panel, items, dir, pos, can_paste: shellmenu::clipboard_has_files(), plugin };
         match (self.cfg.context_menu_style, self.hwnd) {
             (ContextMenuStyle::Classic, _) => self.show_classic(ctx, menu.items, menu.dir, pos, from_mouse),
             (ContextMenuStyle::Windows11, Some(h)) => {
@@ -1655,23 +1707,26 @@ impl App {
         let entry = |action, label: &str, shortcut: String, enabled| ctxmenu::Entry { action, label: label.to_owned(), shortcut, enabled };
         let n = menu.items.len();
         let p = &self.panels[menu.panel];
-        let kinds: Vec<EntryKind> = menu.items.iter().map(|i| p.entries().iter().find(|e| &e.path == i).map_or(EntryKind::File, |e| e.kind)).collect();
+        let on_disk = |i: &PathBuf| if i.is_dir() { EntryKind::Dir } else { EntryKind::File };
+        let kinds: Vec<EntryKind> = menu.items.iter().map(|i| p.entries().iter().find(|e| &e.path == i).map_or_else(|| on_disk(i), |e| e.kind)).collect();
         let any_dir = kinds.contains(&EntryKind::Dir);
         let single_file = n == 1 && kinds[0] == EntryKind::File;
         let single_dir = n == 1 && kinds[0] == EntryKind::Dir;
         if n > 0 {
             let mut top = vec![entry(MenuAction::Cut, tr("Cut"), key(Cmd::ClipboardPut(true)), true), entry(MenuAction::Copy, tr("Copy"), key(Cmd::ClipboardPut(false)), true)];
-            if menu.can_paste && single_dir {
+            if menu.can_paste && single_dir && !menu.plugin {
                 top.push(entry(MenuAction::Paste, tr("Paste into folder"), key(Cmd::ClipboardPaste), true));
             }
-            top.push(entry(MenuAction::Rename, tr("Rename"), key(Cmd::Rename), n == 1));
+            if !menu.plugin {
+                top.push(entry(MenuAction::Rename, tr("Rename"), key(Cmd::Rename), n == 1));
+            }
             top.push(entry(MenuAction::Delete, tr("Delete"), key(Cmd::Delete { permanent: false }), true));
             let mut rows = vec![
                 ctxmenu::Row::Entry(entry(MenuAction::Open, tr("Open"), "Enter".into(), true)),
                 ctxmenu::Row::Entry(entry(MenuAction::OpenWith, tr("Open with…"), String::new(), single_file)),
                 ctxmenu::Row::Separator,
             ];
-            if any_dir {
+            if any_dir && !menu.plugin {
                 rows.push(ctxmenu::Row::Entry(entry(MenuAction::CalcSize, tr("Calculate size"), key(Cmd::CalcSelectionSize), true)));
             }
             rows.push(ctxmenu::Row::Entry(entry(MenuAction::CopyPath, tr("Copy as path"), key(Cmd::CopyPaths), true)));
@@ -2015,7 +2070,6 @@ impl App {
                 self.delete_items(ctx, sources, permanent);
                 Ok(())
             }
-            Cmd::ContextMenu if self.act().archive.is_some() => Err(tr("The context menu isn't available in plugin panels.").into()),
             Cmd::ContextMenu => {
                 let idx = self.active;
                 let cursor = self.panels[idx].cursor;
@@ -2026,7 +2080,15 @@ impl App {
                 self.open_context_menu(ctx, idx, Some(cursor), pos, false);
                 Ok(())
             }
-            Cmd::Properties if self.act().archive.is_some() => Err(tr("Properties aren't available in plugin panels.").into()),
+            Cmd::Properties if self.act().archive.is_some() => {
+                // a plugin's items: the files on disk they stand for
+                let items = self.act().targets();
+                if items.is_empty() {
+                    Err(tr("Properties aren't available in plugin panels.").into())
+                } else {
+                    self.real_items(&items).and_then(|real| self.shell_verb(&real, &Self::folder_of(&real), "properties"))
+                }
+            }
             Cmd::Properties => {
                 let mut items = self.act().targets();
                 if items.is_empty() {
@@ -2195,20 +2257,32 @@ impl App {
                 sal_core::shell::open_terminal(self.cfg.terminal, &self.cfg.terminal_custom, &p).map_err(|e| e.to_string())
             }
             Cmd::CopyPaths => {
-                let paths: Vec<String> = self.act().targets().iter().map(|p| display_path(p)).collect();
+                // a plugin's items: the file on disk each stands for, if any
+                let paths: Vec<String> = self.act().targets().iter().map(|p| display_path(&self.real_file(p).unwrap_or_else(|| p.clone()))).collect();
                 if !paths.is_empty() {
                     self.status = trf("Copied {paths} to the clipboard", &[("paths", &plural(paths.len(), "path"))]);
                     ctx.copy_text(paths.join("\r\n"));
                 }
                 Ok(())
             }
-            Cmd::ClipboardPut(_) | Cmd::ClipboardPaste if self.act().archive.is_some() => Err(tr("The clipboard isn't available in plugin panels.").into()),
+            Cmd::ClipboardPaste if self.act().archive.is_some() => Err(tr("The clipboard isn't available in plugin panels.").into()),
             Cmd::ClipboardPut(cut) => {
                 let items = self.act().targets();
                 if items.is_empty() {
                     return;
                 }
-                let dir = self.act().path().to_path_buf();
+                // a plugin's items: the files on disk they stand for
+                let (items, dir) = if self.act().archive.is_some() {
+                    match self.real_items(&items) {
+                        Ok(real) => {
+                            let dir = Self::folder_of(&real);
+                            (real, dir)
+                        }
+                        Err(e) => return self.error(e),
+                    }
+                } else {
+                    (items, self.act().path().to_path_buf())
+                };
                 self.shell_verb(&items, &dir, if cut { "cut" } else { "copy" }).map(|()| {
                     let what = plural(items.len(), "item");
                     self.status = if cut { trf("{items} cut to the clipboard", &[("items", &what)]) } else { trf("{items} copied to the clipboard", &[("items", &what)]) };
@@ -3054,11 +3128,35 @@ impl App {
         }
     }
 
+    /// A plugin's items dragged out of the window: their paths in the
+    /// plugin's mount (Windows' Projected File System), where other programs
+    /// see them as files on disk, read from the plugin only as they are read.
+    fn mount_items(&self, sources: &[PathBuf]) -> Result<Vec<PathBuf>, plugins::mount::MountError> {
+        let Some((plugin, file, _)) = self.in_archive(&sources[0]) else { return Ok(Vec::new()) };
+        if !plugins::mount::available() {
+            return Err(plugins::mount::MountError::NotEnabled);
+        }
+        let inners: Vec<String> = sources.iter().filter_map(|s| self.in_archive(s).map(|(_, _, inner)| inner)).collect();
+        let m = plugins::mount::mount(plugin, &file)?;
+        m.prepare(inners.clone());
+        Ok(inners.iter().map(|i| m.path_of(i)).collect())
+    }
+
+    /// Whether items can be dropped into panel `idx`: not into a plugin's
+    /// panel that takes no files (search results, a read-only archive).
+    fn takes_drops(&self, idx: usize) -> bool {
+        match self.archive_folder(self.panels[idx].path()) {
+            Some((plugin, file, _)) => !plugins::is_search_results(&file) && plugin.can_write(&file),
+            None => true,
+        }
+    }
+
     /// The places items can be dropped on: the folders' rows (and ..), then
     /// each panel as a whole (its folder).
     fn drop_zones(&self) -> Vec<dnd::Zone> {
         let mut zones = Vec::new();
-        for idx in 0..2 {
+        let takes = [self.takes_drops(0), self.takes_drops(1)];
+        for idx in (0..2).filter(|&i| takes[i]) {
             let body = self.body_rects[idx];
             let entries = &self.panels[idx].listing.entries;
             for (rect, i) in &self.row_hits[idx] {
@@ -3070,7 +3168,7 @@ impl App {
                 }
             }
         }
-        for idx in 0..2 {
+        for idx in (0..2).filter(|&i| takes[i]) {
             let folder = self.panels[idx].path().to_path_buf();
             zones.push(dnd::Zone { rect: self.body_rects[idx], volume: self.volume_of(&folder), folder });
         }
@@ -3089,11 +3187,17 @@ impl App {
             p.cursor = i;
             vec![path]
         };
-        // a plugin's items (an archive, a server) can't leave the window
-        let real = p.archive.is_none();
+        // a plugin's items leave the window as the files on disk they stand
+        // for, or as files in the plugin's mount (an archive's, a
+        // server's); a comparison's placeholders can't
+        let outside = match self.real_items(&sources) {
+            Ok(real) if !real.is_empty() => DragOut::Files(real),
+            _ if self.in_archive(&sources[0]).is_some_and(|(_, file, _)| !plugins::is_results(&file)) => DragOut::Mount,
+            _ => DragOut::No,
+        };
         let volume = self.volume_of(&sources[0]);
         self.active = idx;
-        self.panel_drag = Some(PanelDrag { sources, volume, real });
+        self.panel_drag = Some(PanelDrag { sources, volume, outside });
     }
 
     /// Drags, every frame: files from other programs over the window, items
@@ -3121,14 +3225,30 @@ impl App {
             self.panel_drag = None;
             return;
         }
-        let Some(pos) = pos else { return };
-        let hit = dnd::resolve(&zones, pos, &drag.sources, &drag.volume, m.shift, m.ctrl);
+        // every frame while dragging: the window hears little of a pointer
+        // outside it, so where the pointer is is asked of Windows
+        ctx.request_repaint();
+        let gone = self.hwnd.and_then(dnd::pointer_outside).unwrap_or(false) || pos.is_some_and(|p| !ctx.screen_rect().contains(p));
         // out of the window: a Windows drag, to Explorer or another program,
         // which copies or moves by the same rule
-        if drag.real && !ctx.screen_rect().contains(pos) {
+        if !matches!(drag.outside, DragOut::No) && down && gone {
             let drag = self.panel_drag.take().unwrap();
             if let Some(h) = self.hwnd {
-                if let Err(e) = dnd::drag_out(h, &drag.sources) {
+                let r = match drag.outside {
+                    DragOut::Files(files) => dnd::drag_out(h, &files, true),
+                    // copied, never moved: the plugin's items stay where they are
+                    _ => match self.mount_items(&drag.sources) {
+                        Ok(paths) => dnd::drag_out(h, &paths, false),
+                        Err(plugins::mount::MountError::NotEnabled) => {
+                            // Windows' Projected File System, which makes them files on disk, is off
+                            let text = tr("Dragging items out of archives and servers to other programs needs the Windows feature \"Windows Projected File System\", which is turned off.\n\nTo turn it on, open Turn Windows features on or off (optionalfeatures.exe), check Windows Projected File System and confirm. Or run this in PowerShell as administrator:\nEnable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS\n\nUntil then, copy the items with F5, or drag them to the other panel.");
+                            self.open_dialog(Dialog::Message { title: tr("Dragging out of the window").into(), text: text.into() });
+                            Ok(())
+                        }
+                        Err(plugins::mount::MountError::Failed(e)) => Err(e),
+                    },
+                };
+                if let Err(e) = r {
                     self.error(e);
                 }
                 self.release_pointer = true;
@@ -3136,6 +3256,8 @@ impl App {
             }
             return;
         }
+        let Some(pos) = pos else { return };
+        let hit = dnd::resolve(&zones, pos, &drag.sources, &drag.volume, m.shift, m.ctrl);
         if !down {
             let drag = self.panel_drag.take().unwrap();
             if let Some((z, kind)) = hit {
@@ -3143,9 +3265,10 @@ impl App {
             }
             return;
         }
-        ctx.set_cursor_icon(if hit.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::NoDrop });
+        // the arrow where they can go (Windows has no "grabbing" hand: it
+        // would be the four-way move arrows), "no" where they can't
+        ctx.set_cursor_icon(if hit.is_some() { egui::CursorIcon::Default } else { egui::CursorIcon::NoDrop });
         paint_drop(ctx, pos, &drag.sources, hit.as_ref());
-        ctx.request_repaint();
     }
 
     /// `sources` dropped on `folder`: the Copy or Move dialog for them, or,
@@ -6225,6 +6348,7 @@ impl App {
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_config();
             self.close_all_connections();
+            plugins::mount::unmount_all();
             plugins::cleanup_temp();
         }
         self.poll_plugin_task(ctx);
@@ -6696,6 +6820,67 @@ mod tests {
         assert!(arc.is_file(), "still the archive file, not a folder");
         ui.app.panels[1].reload(ui.app.vis());
         assert_eq!(names(&ui, 1), ["..", "docs", "přidaný.txt", "top.txt"]);
+    }
+
+    /// Drag and drop with a panel showing a zip: into it and out of it, in
+    /// the window and from other programs.
+    #[test]
+    fn drag_and_drop_with_an_archive() {
+        let t = tempfile::tempdir().unwrap();
+        if built_library().is_none() {
+            return;
+        }
+        let arc = make_archive(t.path(), "zip");
+        let src = t.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("přidaný.txt"), "nový").unwrap();
+        let Some(mut ui) = arc_ui(&src, &arc) else { return };
+        ui.app.cfg.confirm_drop = false;
+        ui.frames(2);
+        // in the window: into the archive
+        let (from, to) = (row_of(&ui, 0, "přidaný.txt"), ui.app.body_rects[1].center());
+        drag(&mut ui, from, to, Modifiers::CTRL);
+        ui.wait_job();
+        if let Dialog::Message { text, .. } = &ui.app.dialog {
+            panic!("into: {text}");
+        }
+        ui.app.panels[1].reload(ui.app.vis());
+        ui.frames(2);
+        assert_eq!(names(&ui, 1), ["..", "docs", "přidaný.txt", "top.txt"], "dropped into the archive");
+        // out of the archive, onto the other panel
+        let (from, to) = (row_of(&ui, 1, "top.txt"), ui.app.body_rects[0].center());
+        drag(&mut ui, from, to, Modifiers::CTRL);
+        ui.wait_job();
+        if let Dialog::Message { text, .. } = &ui.app.dialog {
+            panic!("out: {text}");
+        }
+        assert_eq!(fs::read_to_string(src.join("top.txt")).unwrap(), "nahoře", "dropped out of the archive");
+        // from another program: the archive panel takes them
+        let zones = ui.app.drop_zones();
+        let outside = vec![src.join("top.txt")];
+        let hit = dnd::resolve(&zones, ui.app.body_rects[1].center(), &outside, &dnd::volume(&outside[0]), false, false);
+        assert_eq!(hit.map(|(z, k)| (z.folder, k)), Some((arc.clone(), OpKind::Copy)));
+        // out of the window: files on disk in the plugin's mount (when
+        // Windows' Projected File System is on), read from the archive as
+        // they are read, folders with their contents
+        assert!(ui.app.panel_drag.is_none());
+        match ui.app.mount_items(&[arc.join("docs"), arc.join("top.txt")]) {
+            Ok(paths) => {
+                assert_eq!(paths[0].file_name().unwrap(), "docs");
+                assert_eq!(fs::read_to_string(&paths[1]).unwrap(), "nahoře");
+                assert_eq!(fs::read_to_string(paths[0].join("sub").join("deep.txt")).unwrap(), "hluboko");
+                assert_eq!(fs::read_to_string(paths[0].join("zpráva 🦎.txt")).unwrap(), "ahoj");
+            }
+            Err(plugins::mount::MountError::NotEnabled) => assert!(!plugins::mount::available()),
+            Err(plugins::mount::MountError::Failed(e)) => panic!("{e}"),
+        }
+        // search results take nothing; a comparison's side does
+        let root = sal_plugin_api::mount_root("hledej", "1");
+        plugins::add_mount(&root, "7zip", &root, Some(("hledání", "")));
+        assert!(plugins::is_search_results(&root));
+        plugins::set_paired(&root);
+        assert!(!plugins::is_search_results(&root));
+        plugins::remove_mount(&root);
     }
 
     #[test]
@@ -8821,16 +9006,16 @@ mod tests {
 
         // folder actions
         let dir = t.path().join("složka");
-        let menu = CtxMenu { panel: 0, items: vec![dir.clone()], dir: t.path().to_path_buf(), pos: egui::pos2(100.0, 100.0), can_paste: false };
+        let menu = CtxMenu { panel: 0, items: vec![dir.clone()], dir: t.path().to_path_buf(), pos: egui::pos2(100.0, 100.0), can_paste: false, plugin: false };
         ui.app.run_menu_action(&ui.ctx.clone(), menu, MenuAction::CalcSize);
         wait_sizes(&mut ui);
         assert_eq!(ui.app.dir_sizes.get(&dir).unwrap().size.bytes, 4096);
-        let menu = CtxMenu { panel: 0, items: vec![dir.clone()], dir: t.path().to_path_buf(), pos: egui::pos2(100.0, 100.0), can_paste: false };
+        let menu = CtxMenu { panel: 0, items: vec![dir.clone()], dir: t.path().to_path_buf(), pos: egui::pos2(100.0, 100.0), can_paste: false, plugin: false };
         ui.app.run_menu_action(&ui.ctx.clone(), menu, MenuAction::Open);
         assert_eq!(ui.app.panels[0].path(), dir.as_path());
 
         // Delete goes through the normal confirmation with exactly the menu's items
-        let menu = CtxMenu { panel: 0, items: vec![dir.join("x.bin")], dir: dir.clone(), pos: egui::pos2(100.0, 100.0), can_paste: false };
+        let menu = CtxMenu { panel: 0, items: vec![dir.join("x.bin")], dir: dir.clone(), pos: egui::pos2(100.0, 100.0), can_paste: false, plugin: false };
         ui.app.run_menu_action(&ui.ctx.clone(), menu, MenuAction::Delete);
         assert!(matches!(&ui.app.dialog, Dialog::Delete { sources, .. } if sources == &[dir.join("x.bin")]));
     }

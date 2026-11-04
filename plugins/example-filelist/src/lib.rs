@@ -2,8 +2,9 @@
 //! line, and the plugin shows it as a folder of those files.
 //!
 //! It is small on purpose and shows every part a folder plugin has:
-//! listing, copying out (with progress and cancelling), copying in,
-//! deleting, refusing what it can't do, and translated texts. The guide that
+//! listing, copying out (with progress and cancelling), streaming out
+//! (dragged out of the window as files on disk), copying in, deleting,
+//! refusing what it can't do, and translated texts. The guide that
 //! walks through it is `docs/PLUGINS.md`.
 //!
 //! ```text
@@ -16,10 +17,10 @@
 //! "folder" is flat; files that no longer exist are left out.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use sal_plugin_api::{export_plugin, n_, tr, FolderPlugin, Index, Item, Plugin, Progress};
+use sal_plugin_api::{export_plugin, n_, tr, FolderPlugin, Index, Item, Plugin, Progress, Sink};
 
 /// The plugin's state. It has none: everything is read from the file each
 /// time, which also makes it trivially thread-safe.
@@ -122,6 +123,31 @@ impl FolderPlugin for FileList {
         Ok(())
     }
 
+    fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+        // the same files as extract, but each one's bytes go to the sink:
+        // dragged out of the window, they are read only as the program they
+        // are dropped on reads them, with no temporary copy
+        let mut buf = vec![0u8; 64 * 1024];
+        for path in entries(file)?.into_iter().map(|(_, p)| p).filter(|p| items.contains(&name_of(p))) {
+            let mut f = fs::File::open(&path)?;
+            // false: the program doesn't want this one; go on with the next
+            if !sink.begin(&name_of(&path), f.metadata()?.len()) {
+                continue;
+            }
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                // false: the program wants no more (the drag was cancelled)
+                if !sink.write(&buf[..n]) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, tr("Cancelled.")));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn add(&self, file: &Path, items: &[(PathBuf, String)], progress: &mut Progress) -> io::Result<()> {
         let mut paths: Vec<PathBuf> = if file.exists() { entries(file)?.into_iter().map(|(_, p)| p).collect() } else { Vec::new() };
         for (i, (disk, inner)) in items.iter().enumerate() {
@@ -201,6 +227,23 @@ mod tests {
         assert_eq!((fs::read(out.join("b.bin")).unwrap().len(), last), (1000, (1000, 1000)));
         let e = p.extract(&list, &["b.bin".into()], &out, &mut |_, _| false).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+
+        // streamed (dragged out of the window): the bytes, file by file
+        struct Got(Vec<(String, u64, Vec<u8>)>);
+        impl Sink for Got {
+            fn begin(&mut self, inner: &str, size: u64) -> bool {
+                self.0.push((inner.to_owned(), size, Vec::new()));
+                true
+            }
+            fn write(&mut self, data: &[u8]) -> bool {
+                self.0.last_mut().unwrap().2.extend_from_slice(data);
+                true
+            }
+        }
+        let mut got = Got(Vec::new());
+        p.stream(&list, &["zpráva 🦎.txt".into(), "b.bin".into()], &mut got).unwrap();
+        let got: Vec<(&str, u64, usize)> = got.0.iter().map(|(n, s, d)| (n.as_str(), *s, d.len())).collect();
+        assert_eq!(got, [("zpráva 🦎.txt", 4, 4), ("b.bin", 1000, 1000)]);
 
         // copy in, delete, and what it refuses
         let c = t.path().join("c.txt");

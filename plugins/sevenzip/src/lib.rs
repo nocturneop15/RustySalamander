@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use sal_plugin_api::{export_plugin, join_inner, n_, trf, under, FolderPlugin, Index, Item, Plugin, Progress, Updates, ATTR_DIRECTORY};
+use sal_plugin_api::{export_plugin, join_inner, n_, trf, under, FolderPlugin, Index, Item, Plugin, Progress, Sink, Updates, ATTR_DIRECTORY};
 
 use self::library::{Library, OpenArchive, UpdateItem};
 
@@ -176,6 +176,16 @@ impl FolderPlugin for SevenZip {
         Ok(())
     }
 
+    fn stream(&self, archive: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+        let open = self.lib.open(archive)?;
+        let index = Self::index_of(&open);
+        // the files asked for (folders with what they hold), by archive index
+        let chosen: BTreeMap<u32, &Item> = index.items.iter().filter(|it| !it.dir && items.iter().any(|w| under(&it.path, w))).filter_map(|it| it.index.map(|i| (i, it))).collect();
+        let name = |i: u32| chosen.get(&i).map(|it| (it.path.clone(), it.size));
+        let indices: Vec<u32> = chosen.keys().copied().collect();
+        open.stream(&indices, &name, sink)
+    }
+
     fn add(&self, archive: &Path, items: &[(PathBuf, String)], progress: &mut Progress) -> io::Result<()> {
         let mut new = Vec::new();
         for (disk, inner) in items {
@@ -312,6 +322,25 @@ mod tests {
             assert_eq!(fs::read(out.join("nová").join("hluboko").join("x.bin")).unwrap().len(), 100_000);
             assert!(out.join("nová").join("prázdná").is_dir());
             assert!(!out.join("vnořená").exists(), "only what was asked for");
+            // streamed without disk: each file once, skipped ones send
+            // nothing, and a sink that wants no more stops it
+            struct Got(Vec<(String, u64, usize)>, &'static str, usize);
+            impl Sink for Got {
+                fn begin(&mut self, inner: &str, size: u64) -> bool {
+                    self.0.push((inner.to_owned(), size, 0));
+                    !inner.ends_with(self.1)
+                }
+                fn write(&mut self, data: &[u8]) -> bool {
+                    self.0.last_mut().unwrap().2 += data.len();
+                    self.0.last().unwrap().2 < self.2
+                }
+            }
+            let mut got = Got(Vec::new(), "🦎.txt", usize::MAX);
+            z.stream(&arc, &["nová".into()], &mut got).unwrap();
+            got.0.sort();
+            assert_eq!(got.0, [("nová\\hluboko\\x.bin".to_owned(), 100_000, 100_000), ("nová\\soubor 🦎.txt".to_owned(), 4, 0)], "{ext}");
+            let e = z.stream(&arc, &["nová\\hluboko".into()], &mut Got(Vec::new(), "-", 10)).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::Interrupted, "{ext}");
             z.delete(&arc, &["nová".into(), "druhý.txt".into()], &mut |_, _| true).unwrap();
             let ix = z.list(&arc, "").unwrap();
             assert_eq!(ix.items.iter().filter(|i| !i.dir).map(|i| i.path.as_str()).collect::<Vec<_>>(), ["vnořená\\-a.txt"], "{ext}");

@@ -13,6 +13,7 @@
 //!   `scp://me@host/home/f.txt`. The open mounts are listed here, with the
 //!   plugin each belongs to.
 
+pub mod mount;
 pub mod ops;
 
 use std::ffi::c_void;
@@ -100,6 +101,12 @@ pub fn results_name(root: &Path) -> Option<String> {
 /// Whether `root` holds results a plugin filled (closed, not disconnected).
 pub fn is_results(root: &Path) -> bool {
     MOUNTS.lock().unwrap().iter().any(|c| c.root == root && c.results)
+}
+
+/// Whether `root` holds a search's results (not a side of a comparison):
+/// nothing can be dropped into them.
+pub fn is_search_results(root: &Path) -> bool {
+    MOUNTS.lock().unwrap().iter().any(|c| c.root == root && c.results && !c.paired)
 }
 
 /// Forget a connection (after the plugin closed it).

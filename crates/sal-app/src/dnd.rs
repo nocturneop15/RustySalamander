@@ -88,10 +88,15 @@ pub fn resolve(zones: &[Zone], pos: egui::Pos2, sources: &[PathBuf], source_volu
 }
 
 #[cfg(windows)]
-pub use win::{drag_out, register};
+pub use win::{drag_out, pointer_outside, register};
 
 #[cfg(not(windows))]
-pub fn drag_out(_: isize, _: &[PathBuf]) -> Result<(), String> {
+pub fn pointer_outside(_: isize) -> Option<bool> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn drag_out(_: isize, _: &[PathBuf], _: bool) -> Result<(), String> {
     Err("not supported".into())
 }
 
@@ -106,8 +111,12 @@ mod win {
     use std::cell::RefCell;
 
     use windows::core::{implement, Result as WinResult, PCWSTR};
-    use windows::Win32::Foundation::{HWND, POINT, POINTL};
-    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::Foundation::{COLORREF, HWND, POINT, POINTL, SIZE};
+    use windows::Win32::Graphics::Gdi::{CreateDIBSection, DeleteObject, ScreenToClient, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
+    use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+    use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetClientRect, GetCursorPos};
     use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, IDataObject, CLSCTX_INPROC_SERVER, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
     use windows::Win32::System::Ole::{
         IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium, CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
@@ -115,17 +124,18 @@ mod win {
     use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        BHID_DataObject, CLSID_DragDropHelper, DragQueryFileW, IDropTargetHelper, IShellItemArray, SHCreateShellItemArrayFromIDLists, SHDoDragDrop, SHParseDisplayName, HDROP,
+        BHID_DataObject, CLSID_DragDropHelper, DragQueryFileW, IDragSourceHelper, IDropTargetHelper, IShellItemArray, SHCreateShellItemArrayFromIDLists, SHDoDragDrop, SHGetFileInfoW,
+        SHGetImageList, SHParseDisplayName, HDROP, SHDRAGIMAGE, SHFILEINFOW, SHGFI_SYSICONINDEX, SHIL_EXTRALARGE,
     };
 
     fn hwnd(h: isize) -> HWND {
         HWND(h as *mut core::ffi::c_void)
     }
 
-    /// Drag `paths` (real files and folders, in one folder) out of the window
-    /// as Windows does: Explorer, the desktop or another program copies or
-    /// moves them. Returns when the drag ends.
-    pub fn drag_out(owner: isize, paths: &[PathBuf]) -> Result<(), String> {
+    /// Drag `paths` (real files and folders) out of the window as Windows
+    /// does: Explorer, the desktop or another program copies them, or moves
+    /// them if `can_move`. Returns when the drag ends.
+    pub fn drag_out(owner: isize, paths: &[PathBuf], can_move: bool) -> Result<(), String> {
         unsafe {
             let mut pidls: Vec<*mut ITEMIDLIST> = Vec::new();
             for p in paths {
@@ -139,14 +149,155 @@ mod win {
                 let list: Vec<*const ITEMIDLIST> = pidls.iter().map(|p| *p as *const ITEMIDLIST).collect();
                 let array: IShellItemArray = SHCreateShellItemArrayFromIDLists(&list)?;
                 let data: IDataObject = array.BindToHandler(None, &BHID_DataObject)?;
-                // a default drop source, with the drag image
-                SHDoDragDrop(hwnd(owner), &data, None, DROPEFFECT_COPY | DROPEFFECT_MOVE)?;
+                // our own drag image at once: without it Windows shows a
+                // placeholder until it has made a folder's thumbnail
+                if let Some(first) = paths.first() {
+                    set_drag_image(&data, first);
+                }
+                // a default drop source
+                SHDoDragDrop(hwnd(owner), &data, None, if can_move { DROPEFFECT_COPY | DROPEFFECT_MOVE } else { DROPEFFECT_COPY })?;
                 Ok(())
             })();
             for p in pidls {
                 CoTaskMemFree(Some(p as *const _));
             }
             result.map_err(|e| e.message())
+        }
+    }
+
+    /// Whether the mouse pointer is outside the client area of `owner`
+    /// (asked of Windows; `None` when it can't say).
+    pub fn pointer_outside(owner: isize) -> Option<bool> {
+        unsafe {
+            let mut p = POINT::default();
+            GetCursorPos(&mut p).ok()?;
+            ScreenToClient(hwnd(owner), &mut p).ok().ok()?;
+            let mut r = RECT::default();
+            GetClientRect(hwnd(owner), &mut r).ok()?;
+            Some(p.x < r.left || p.y < r.top || p.x >= r.right || p.y >= r.bottom)
+        }
+    }
+
+    /// The drag image of `data`: the large shell icon of `path`, with the
+    /// pointer at its middle. Nothing when the icon can't be had (Windows
+    /// then makes an image itself).
+    fn set_drag_image(data: &IDataObject, path: &Path) {
+        unsafe {
+            let Some(icon) = large_icon(path) else { return };
+            let (w, h) = (icon.width as i32, icon.height as i32);
+            let bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h, // top-down
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let Ok(bmp) = CreateDIBSection(None, &bi, DIB_RGB_COLORS, &mut bits, None, 0) else { return };
+            if bits.is_null() {
+                let _ = DeleteObject(bmp);
+                return;
+            }
+            // premultiplied BGRA, as the drag image wants
+            let out = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (w * h * 4) as usize);
+            for (o, p) in out.as_chunks_mut::<4>().0.iter_mut().zip(icon.pixels.as_chunks::<4>().0) {
+                let a = p[3] as u32;
+                o[0] = (p[2] as u32 * a / 255) as u8;
+                o[1] = (p[1] as u32 * a / 255) as u8;
+                o[2] = (p[0] as u32 * a / 255) as u8;
+                o[3] = p[3];
+            }
+            let image = SHDRAGIMAGE { sizeDragImage: SIZE { cx: w, cy: h }, ptOffset: POINT { x: w / 2, y: h / 2 }, hbmpDragImage: bmp, crColorKey: COLORREF(0xFFFF_FFFF) };
+            let helper: WinResult<IDragSourceHelper> = CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER);
+            // the helper owns the bitmap once it took it
+            if helper.and_then(|h| h.InitializeFromBitmap(&image, data)).is_err() {
+                let _ = DeleteObject(bmp);
+            }
+        }
+    }
+
+    /// The extra-large (48 px) shell icon of `path`, RGBA.
+    fn large_icon(path: &Path) -> Option<crate::icons::Rgba> {
+        unsafe {
+            let wide = path.as_os_str().encode_wide_nul();
+            let mut info = SHFILEINFOW::default();
+            if SHGetFileInfoW(PCWSTR(wide.as_ptr()), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info), std::mem::size_of::<SHFILEINFOW>() as u32, SHGFI_SYSICONINDEX) == 0 {
+                return None;
+            }
+            let list: IImageList = SHGetImageList(SHIL_EXTRALARGE as i32).ok()?;
+            let icon = list.GetIcon(info.iIcon, ILD_TRANSPARENT.0).ok()?;
+            let rgba = crate::icons::icon_to_rgba(icon);
+            let _ = DestroyIcon(icon);
+            rgba
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+        /// `SAL_DRAG_TARGET=<folder> cargo test -p sal-app time_drag_out_setup -- --ignored --nocapture`
+        #[test]
+        #[ignore]
+        fn time_drag_out_setup() {
+            let dir = std::env::var_os("SAL_DRAG_TARGET").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                let _ = OleInitialize(None);
+                let t = std::time::Instant::now();
+                let wide = dir.as_os_str().encode_wide_nul();
+                let mut pidl = std::ptr::null_mut();
+                SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).unwrap();
+                eprintln!("parse {:?}", t.elapsed());
+                let array: IShellItemArray = SHCreateShellItemArrayFromIDLists(&[pidl as *const ITEMIDLIST]).unwrap();
+                eprintln!("array {:?}", t.elapsed());
+                let data: IDataObject = array.BindToHandler(None, &BHID_DataObject).unwrap();
+                eprintln!("data object {:?}", t.elapsed());
+                let _ = large_icon(&dir);
+                eprintln!("icon {:?}", t.elapsed());
+                set_drag_image(&data, &dir);
+                eprintln!("drag image {:?}", t.elapsed());
+                let fmt = FORMATETC { cfFormat: CF_HDROP.0, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+                let mut m = data.GetData(&fmt).unwrap();
+                ReleaseStgMedium(&mut m);
+                eprintln!("CF_HDROP {:?}", t.elapsed());
+                CoTaskMemFree(Some(pidl as *const _));
+            }
+        }
+
+        /// A folder's drag image is ready at once: its 48 px shell icon,
+        /// which Windows takes for the data object of a drag.
+        #[test]
+        fn folder_drag_image_at_once() {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("složka");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("a.txt"), "a").unwrap();
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+            let icon = large_icon(&dir).expect("folder icon");
+            assert_eq!((icon.width, icon.height), (48, 48));
+            assert!(icon.pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "not empty");
+            let wide = dir.as_os_str().encode_wide_nul();
+            unsafe {
+                let mut pidl = std::ptr::null_mut();
+                SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).unwrap();
+                let array: IShellItemArray = SHCreateShellItemArrayFromIDLists(&[pidl as *const ITEMIDLIST]).unwrap();
+                let data: IDataObject = array.BindToHandler(None, &BHID_DataObject).unwrap();
+                set_drag_image(&data, &dir);
+                // the image is stored in the data object
+                let fmt = windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!("DragImageBits"));
+                let f = FORMATETC { cfFormat: fmt as u16, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+                assert!(data.QueryGetData(&f).is_ok(), "drag image set");
+                CoTaskMemFree(Some(pidl as *const _));
+            }
         }
     }
 

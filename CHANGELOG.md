@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Real files from plugin panels:** in search results and compared folders, **Ctrl+C** and **Ctrl+X** put the files on disk on the clipboard, **dragging out of the window** gives them to Explorer or any program, and the **context menu** (right-click, Shift+F10) and **Properties** are those of the real files, even when they come from many folders. **Copy full paths** copies their real paths instead of the plugin's.
+- **Dragging out of archives and servers:** items of a zip, 7z or any other archive, and files on an SCP server, can be dragged out of the window to Explorer, the desktop or any program that takes files. They appear to that program as files on disk (through the Windows feature *Windows Projected File System*), and only what it copies is read, as it copies it: nothing is extracted when you start dragging. A folder comes with everything inside it, and the items are always copied. When the feature is turned off, the program says how to turn it on and suggests F5 or the other panel.
+- **For plugin authors (interface 8):** `FolderPlugin::stream` sends a plugin's files to the program without a temporary copy, for dragging them out of the window. The program does the Windows side for every plugin; plugins without `stream` still work, through a temporary copy. The 7-Zip and SCP plugins stream; see "Dragging out: files on disk" in `docs/PLUGINS.md`.
+- **Dragging out starts at once:** items dragged past the window's edge go to Windows as soon as the pointer leaves, showing their icon, instead of a "no" cursor for a while. Over a panel the pointer stays an arrow (it was the four-way move arrows).
+- **Search results take no dropped files:** dragging files onto search results (from a panel or from another program) is refused, as it is for archives that can't be changed. Compared folders still take them.
+
 ## 0.8.5-beta (2026-11-03)
 
 - **Fixed:** **Overwrite All** in the window about an existing file now holds for the whole operation. When folders were merged into folders already at the target (moving, or copying out of an archive), the window came back for every next folder.

@@ -229,6 +229,30 @@ fn a_session_with_a_real_ssh_server() {
     assert_eq!(seen, (300_004, 300_004));
     let cancelled = scp.extract(&root, &items[..1], &t.path().join("out2"), &mut |_, _| false);
     assert_eq!(cancelled.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    assert!(!t.path().join("out2").join(&home_inner).join("velký.bin").exists(), "a file cut short isn't left");
+
+    // streamed without disk (a drag out of the window): one channel for
+    // all, each file under its inner path; skipped ones are read past
+    struct Got(Vec<(String, u64, usize)>, usize);
+    impl sal_plugin_api::Sink for Got {
+        fn begin(&mut self, inner: &str, size: u64) -> bool {
+            self.0.push((inner.to_owned(), size, 0));
+            !inner.ends_with("velký.bin") || self.1 < usize::MAX
+        }
+        fn write(&mut self, data: &[u8]) -> bool {
+            self.0.last_mut().unwrap().2 += data.len();
+            self.0.last().unwrap().2 < self.1
+        }
+    }
+    let mut got = Got(Vec::new(), usize::MAX);
+    scp.stream(&root, &items, &mut got).unwrap();
+    got.0.sort();
+    let want = |n: &str| format!("{home_inner}\\{n}");
+    assert_eq!(got.0, [(want("složka 日本\\soubor 🦎.txt"), 4, 4), (want("velký.bin"), 300_000, 0)]);
+    let e = scp.stream(&root, &items[..1], &mut Got(Vec::new(), 1000)).unwrap_err();
+    assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+    // the connection is still fine after a stopped transfer
+    assert!(scp.list(&root, &home_inner).is_ok());
 
     // copy in: a file and a folder tree
     let src = t.path().join("src");

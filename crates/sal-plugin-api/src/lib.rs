@@ -54,6 +54,16 @@ pub const ATTR_HIDDEN: u32 = 0x2;
 /// for as long as the operation is paused.
 pub type Progress<'a> = dyn FnMut(u64, u64) -> bool + 'a;
 
+/// Where [`FolderPlugin::stream`] sends the contents of files.
+pub trait Sink {
+    /// The file `inner` (its inner path) starts, `size` bytes long. False:
+    /// it isn't wanted; send none of its data and go on with the next.
+    fn begin(&mut self, inner: &str, size: u64) -> bool;
+    /// The next bytes of the file begun last. False: stop, the program
+    /// doesn't want any more (return [`std::io::ErrorKind::Interrupted`]).
+    fn write(&mut self, data: &[u8]) -> bool;
+}
+
 /// A plugin that shows files it handles, or connections it opens, as
 /// folders.
 ///
@@ -81,6 +91,19 @@ pub trait FolderPlugin: Send + Sync {
     /// Copy `items` (folders with their contents) to `out`, keeping their
     /// paths: `out\inner\item`.
     fn extract(&self, file: &Path, items: &[String], out: &Path, progress: &mut Progress) -> io::Result<()>;
+    /// Send the contents of `items` (folders with every file inside them)
+    /// to `sink`, file by file, without writing them to disk: when they are
+    /// dragged out of the window, the program shows them to Explorer and
+    /// other programs as files on disk (Windows' Projected File System) and
+    /// reads them from here only as those programs read them. Send each
+    /// file once, in whatever order is quickest (an archive's own order);
+    /// folders need no call. The default says
+    /// [`std::io::ErrorKind::Unsupported`]: the program then extracts the
+    /// items to a temporary folder and serves them from there.
+    fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+        let _ = (file, items, sink);
+        Err(io::ErrorKind::Unsupported.into())
+    }
     /// Add files and folders from disk: `(path on disk, path inside)`;
     /// items already at those paths are replaced. Creates the file if needed.
     fn add(&self, file: &Path, items: &[(PathBuf, String)], progress: &mut Progress) -> io::Result<()>;

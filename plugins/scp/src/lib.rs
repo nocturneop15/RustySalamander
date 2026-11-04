@@ -27,10 +27,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use sal_plugin_api::{export_plugin, mount_of, n_, tr, trf, Command, Field, FieldKind, FolderPlugin, Form, Index, Mount, Plugin, Progress, Reply, Updates, Values};
+use sal_plugin_api::{export_plugin, join_inner, mount_of, n_, tr, trf, Command, Field, FieldKind, FolderPlugin, Form, Index, Mount, Plugin, Progress, Reply, Sink, Updates, Values};
 
 use crate::remote::{inner_path, list_command, parse_listing, quote, remote_path};
-use crate::ssh::{Auth, ConnectError, Connection, HostKey, HostKeys, Target};
+use crate::ssh::{Auth, ConnectError, Connection, HostKey, HostKeys, Receive, Target};
 
 export_plugin!(Scp);
 
@@ -249,6 +249,29 @@ fn split_inner(inner: &str) -> (&str, &str) {
     inner.rsplit_once('\\').unwrap_or(("", inner))
 }
 
+/// [`Receive`] into the program's [`Sink`]: each file under its inner path,
+/// the program saying which it wants.
+struct ToSink<'a> {
+    /// The inner folder the items are in.
+    base: String,
+    sink: &'a mut dyn Sink,
+}
+
+impl Receive for ToSink<'_> {
+    fn folder(&mut self, _: &[String]) -> io::Result<()> {
+        Ok(())
+    }
+    fn file(&mut self, path: &[String], size: u64) -> io::Result<bool> {
+        Ok(self.sink.begin(&path.iter().fold(self.base.clone(), |p, n| join_inner(&p, n)), size))
+    }
+    fn data(&mut self, bytes: &[u8]) -> io::Result<bool> {
+        Ok(self.sink.write(bytes))
+    }
+    fn done(&mut self, _: Option<SystemTime>) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Bytes in a file or folder tree on disk.
 fn disk_size(p: &Path) -> u64 {
     match std::fs::metadata(p) {
@@ -300,6 +323,24 @@ impl FolderPlugin for Scp {
             self.block(c.download(&remote_path(inner), &dest, &mut |d| progress(d, total.max(d)), &mut done))?;
         }
         progress(done, done);
+        Ok(())
+    }
+
+    fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+        let c = self.conn(file)?;
+        // one `scp -r -f` per folder the items are in (one, for a drag)
+        let mut folders: Vec<(&str, Vec<String>)> = Vec::new();
+        for inner in items {
+            let (parent, _) = split_inner(inner);
+            match folders.iter_mut().find(|(p, _)| *p == parent) {
+                Some((_, list)) => list.push(remote_path(inner)),
+                None => folders.push((parent, vec![remote_path(inner)])),
+            }
+        }
+        for (parent, remotes) in folders {
+            let mut to = ToSink { base: parent.to_owned(), sink: &mut *sink };
+            self.block(c.receive(&remotes, &mut to))?;
+        }
         Ok(())
     }
 

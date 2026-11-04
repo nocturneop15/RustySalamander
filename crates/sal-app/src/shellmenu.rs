@@ -40,7 +40,7 @@ mod imp {
     use windows::Win32::System::Ole::CF_HDROP;
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
-        DefSubclassProc, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, RemoveWindowSubclass, SHBindToParent, SHParseDisplayName, SetWindowSubclass, CMF_CANRENAME,
+        DefSubclassProc, IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, RemoveWindowSubclass, SHBindToParent, SHGetDesktopFolder, SHParseDisplayName, SetWindowSubclass, CMF_CANRENAME,
         CMF_EXTENDEDVERBS, CMF_NORMAL, CMIC_MASK_PTINVOKE, CMINVOKECOMMANDINFO, CMINVOKECOMMANDINFOEX, GCS_VERBW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -73,7 +73,9 @@ mod imp {
         }
     }
 
-    /// Context menu for items that share one parent folder.
+    /// Context menu for items, usually of one folder. Items of several
+    /// folders (a plugin's search results) get it from the desktop, which
+    /// takes absolute PIDLs, as Explorer's search results do.
     fn context_menu(owner: HWND, items: &[PathBuf]) -> Result<(IContextMenu, Pidls), String> {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -87,6 +89,12 @@ mod imp {
             let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
             unsafe { SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut pidl, 0, None) }.map_err(|e| format!("{}: {}", p.display(), e.message()))?;
             pidls.0.push(pidl);
+        }
+        if items.iter().any(|p| p.parent() != items[0].parent()) {
+            let desktop: IShellFolder = unsafe { SHGetDesktopFolder() }.map_err(|e| e.message().to_string())?;
+            let absolute: Vec<*const ITEMIDLIST> = pidls.0.iter().map(|&p| p as *const ITEMIDLIST).collect();
+            let menu: IContextMenu = unsafe { desktop.GetUIObjectOf(owner, &absolute, None) }.map_err(|e| e.message().to_string())?;
+            return Ok((menu, pidls));
         }
         let mut children: Vec<*const ITEMIDLIST> = Vec::new();
         let mut parent: Option<IShellFolder> = None;
@@ -718,8 +726,17 @@ mod tests {
         // several items from one folder share a menu
         let g = t.path().join("druhý.txt");
         std::fs::write(&g, "y").unwrap();
-        let v = verbs(&[f, g]).unwrap();
+        let v = verbs(&[f.clone(), g]).unwrap();
         assert!(v.iter().any(|x| x.eq_ignore_ascii_case("properties")), "{v:?}");
         assert!(verbs(&[t.path().join("does-not-exist")]).is_err());
+        // and items from several folders (a plugin's search results)
+        let sub = t.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let h = sub.join("třetí.txt");
+        std::fs::write(&h, "z").unwrap();
+        let v = verbs(&[f, h]).unwrap();
+        for want in ["copy", "cut", "properties"] {
+            assert!(v.iter().any(|x| x.eq_ignore_ascii_case(want)), "{want} missing from {v:?}");
+        }
     }
 }

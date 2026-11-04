@@ -5,8 +5,8 @@ This guide is for developers who want to extend RustySalamander. It covers what 
 Three plugins in this repository serve as references:
 
 - **`plugins/example-filelist`**: a small, complete example (about 200 lines with its test). It shows `*.filelist` text files (one path per line) as folders. Read it next to this guide.
-- **`plugins/sevenzip`**: the 7-Zip archive plugin, a real-world plugin that drives a third-party library (`7z.dll`).
-- **`plugins/scp`**: the SCP plugin. It adds a command to the Plugins menu, asks for the server and password in a form, and shows the server's files in a panel as a *connection*.
+- **`plugins/sevenzip`**: the 7-Zip archive plugin, a real-world plugin that drives a third-party library (`7z.dll`), and streams files straight out of archives when they are dragged out of the window.
+- **`plugins/scp`**: the SCP plugin. It adds a command to the Plugins menu, asks for the server and password in a form, and shows the server's files in a panel as a *connection*; dragged out of the window, files are read from the server only as they are copied.
 - **`plugins/viewer`**: the Viewer plugin, the F3 viewer. It registers as the viewer of every file (`openers`, `open_file`) and shows files in windows of its own, on a thread of its own.
 - **`plugins/search`**: the search plugin. Its form starts a search in the background; the program shows the results in a results window while they come in (`Reply::Results`), and they are a connection too, browsed in a panel as a virtual folder of real files (`real_path`).
 
@@ -20,16 +20,17 @@ The API reference is the rustdoc of `crates/sal-plugin-api`. To open it, run `ca
 4. [Folder plugins: concepts](#folder-plugins-concepts)
 5. [The `Plugin` trait](#the-plugin-trait)
 6. [The `FolderPlugin` trait, method by method](#the-folderplugin-trait-method-by-method)
-7. [Commands, forms and connections](#commands-forms-and-connections)
-8. [Errors, progress and cancelling](#errors-progress-and-cancelling)
-9. [Translations](#translations)
-10. [Testing](#testing)
-11. [Building, installing and distributing](#building-installing-and-distributing)
-12. [Rules and pitfalls](#rules-and-pitfalls)
-13. [Viewers and editors](#viewers-and-editors)
-14. [Versions and updates](#versions-and-updates)
-15. [The C interface and versioning](#the-c-interface-and-versioning)
-16. [Checklist](#checklist)
+7. [Dragging out: files on disk](#dragging-out-files-on-disk)
+8. [Commands, forms and connections](#commands-forms-and-connections)
+9. [Errors, progress and cancelling](#errors-progress-and-cancelling)
+10. [Translations](#translations)
+11. [Testing](#testing)
+12. [Building, installing and distributing](#building-installing-and-distributing)
+13. [Rules and pitfalls](#rules-and-pitfalls)
+14. [Viewers and editors](#viewers-and-editors)
+15. [Versions and updates](#versions-and-updates)
+16. [The C interface and versioning](#the-c-interface-and-versioning)
+17. [Checklist](#checklist)
 
 ## What a plugin is
 
@@ -183,6 +184,7 @@ All methods take `&self` and may be called **from several threads at once**: the
 | `status()` | When Settings → Plugins is shown | One line about the plugin's state (e.g. the library it loaded), or empty. |
 | `list(file, folder)` | When the panel opens the file or a folder of a connection | Return the items: everything (`complete: true`) or at least `folder`'s children. Fail with `NotFound` when `folder` isn't a folder. Errors are shown to the user. |
 | `extract(file, items, out, progress)` | F5/F6 out of the file, and F3/F4/Enter on an item (extracted to a temporary folder first) | Write each item in `items` to `out\<inner path>`, creating folders as needed. A folder in `items` means the folder **with everything inside it**, and an empty folder must still be created. `out` exists and is empty. |
+| `stream(file, items, sink)` | Items dragged out of the window are read by Explorer or another program (interface 8) | Send each **file** in `items` (folders with everything inside them) to `sink`: `begin(inner, size)`, then its bytes with `write`. Optional, but implement it whenever you can read an item's contents: see [Dragging out: files on disk](#dragging-out-files-on-disk). |
 | `add(file, items, progress)` | F5/F6 into the file | `items` is a list of `(path on disk, inner path)` pairs. Folders on disk come with their contents. An item already at that inner path is **replaced**: the program has already asked the user about conflicts. If `file` doesn't exist yet, create it. |
 | `delete(file, items, progress)` | F8 inside the file, and after a move out of it | Remove the items, folders with their contents. |
 | `rename(file, old, new, progress)` | F2 inside the file | Rename `old` to `new` (both inner paths). A folder's contents move with it. If `new` exists, fail with `AlreadyExists`. |
@@ -201,8 +203,49 @@ All methods take `&self` and may be called **from several threads at once**: the
 - **Copy in:** `list` to find conflicts, the user's answers, then a single `add` call.
 - **Copy between two files** (of the same or different plugins): `extract` from one, then `add` to the other.
 - **View or edit (F3/F4/Enter):** `extract` of one item into a temporary folder, then the file opens from there. Changes to that copy don't go back into the file.
+- **Drag out of the window:** `list` of each folder as the program the items are dropped on looks into it, then `stream` of the dragged items when it reads the first of their files; `extract` into a temporary folder for a plugin without `stream`.
 
 **Changing a file safely.** Write the new version next to the old one and rename it over the original only when everything has succeeded. The 7-Zip plugin writes `.{name}.{pid}.new`; the example writes `<name>.filelist.new`. A failed or cancelled change then leaves the user's file untouched, and the program relies on this.
+
+## Dragging out: files on disk
+
+Items dragged out of the window onto Explorer, the desktop or another program go there as **files on disk**, through Windows' *Projected File System* (ProjFS, an optional Windows feature). The program mounts the plugin's file or connection in a folder under `%TEMP%\RustySalamander`, and the drag carries the items' paths in that folder, like any files. Windows asks the program for a folder's contents only when something looks into it, and for a file's bytes only when something reads it; what was read stays there until the program ends. So nothing is read until the drop, only what the target copies is read, and programs that take only paths (editors, upload fields) take them too. The items are always copied, never moved.
+
+The program does all of the Windows side for every plugin (`crates/sal-app/src/plugins/mount.rs`). A plugin provides the folders through `list`, as for its panel, and the bytes through `FolderPlugin::stream`:
+
+```rust
+fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+    for f in self.files_under(file, items)? {          // folders with everything in them
+        let mut r = self.open(file, &f.path)?;
+        if !sink.begin(&f.path, f.size) {               // not wanted: next one
+            continue;
+        }
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = r.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            if !sink.write(&buf[..n]) {                 // the program stopped: stop too
+                return Err(io::Error::new(io::ErrorKind::Interrupted, tr("Cancelled.")));
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+- **What to send.** `items` are inner paths, like `extract`'s; a folder means every file inside it, at any depth. Send **files only**, each once, under its full inner path; the program knows the folders from `list`. `size` is the file's size as `list` gave it.
+- **In your own order.** Send the files in whatever order is quickest for you: an archive's own order (the 7-Zip plugin lets `7z.dll` decode a solid archive once, front to back), the order a server sends them in (the SCP plugin receives a whole folder through one `scp -r -f`). The target reads them in its own order: the program hands a file straight to the target when it is reading it, and keeps one sent before it is read until it is (up to a limit, then the plugin waits in `begin`). The dragged items are sent in one run.
+- **`begin` returning false** means that file isn't wanted (the target already has it): send none of its bytes and go on with the next. A plugin that must read past it anyway (a stream, a solid block) reads and discards.
+- **`write` returning false** means the program stopped (it is ending): return `Interrupted` at once. A `write` the target no longer wants is taken and dropped, so finish the file.
+- **The program may call `stream` with a single file**, when something reads a file outside the drag.
+- **It runs on a thread of its own**, so it may block (a server); `begin` and `write` block while the target is behind.
+- **Without `stream`** (the default returns `Unsupported`, as do plugins built for interface 7 or earlier), the program extracts the items with `extract` into a temporary folder when the first file is read, and serves them from there. It works, but the target waits for the whole extraction, so **every plugin that can read an item's contents should implement `stream`**. It is usually a dozen lines next to `extract`: the example plugin's is in `plugins/example-filelist`.
+
+Items that have a `real_path` (search results, compared folders) go out as those files on disk, without a mount, and a comparison's placeholders stay in the window.
+
+**ProjFS has to be turned on** (*Turn Windows features on or off* → *Windows Projected File System*, or `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS` as administrator). When it is off, dragging a plugin's items out of the window tells the user so and suggests F5 or the other panel; dragging within the window works either way. Names Windows can't have (with `:` or `?`, say) aren't in the mount.
 
 ## Commands, forms and connections
 
@@ -263,7 +306,7 @@ Three methods of `FolderPlugin` serve it; each has a default, so other plugins i
 
 - `activity(root) -> Activity { running, text }`: what the plugin is doing for the connection. The window shows `text` as its status line and asks again every 0.4 s while `running`, then every 3 s.
 - `stop(root)`: the window's Stop button. Keep what was done so far.
-- `real_path(file, inner) -> Option<PathBuf>`: the file on disk an item stands for. Go to file shows it in its folder, and Enter, F3 and F4 open, view and edit that file itself instead of a temporary copy (in any connection or archive whose items have one).
+- `real_path(file, inner) -> Option<PathBuf>`: the file on disk an item stands for. Go to file shows it in its folder, and Enter, F3 and F4 open, view and edit that file itself instead of a temporary copy (in any connection or archive whose items have one). In a panel, the clipboard (Ctrl+C, Ctrl+X), Copy full paths, the context menu, Properties and a drag out of the window use these files too; items without one are left out.
 
 A search runs on a thread of the plugin's own, started by `run`, which returns at once. The search plugin keeps its searches in a `Mutex<HashMap<authority, Arc<Job>>>`, with atomic counters and a `Mutex<Vec<Found>>` the search thread fills and `list` and `activity` read.
 
@@ -413,9 +456,11 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 - Strings and lists travel back through callbacks (`StrOut`, `ItemOut`) into memory owned by the caller, so each side frees only what it allocated.
 - Functions that can fail return `0` or an error code (`ERR_*`) and send a message to the `error` callback.
 
+`stream` passes a `SinkFn` (`begin` and `write` callbacks with the program's context), and an error of kind `Unsupported` crosses as `ERR_UNSUPPORTED`, so the program knows to fall back to `extract`.
+
 Commands, replies, forms and values cross the interface as text: lists of strings, each encoded as `<length>:<bytes>,` (`sal_plugin_api::ui::encode`). This way forms can gain new kinds of fields without changing the function table.
 
-**Versioning.** `abi::VERSION` is the interface version (now 7: item marks, `marks` in the function table, and the reply `panels`; 6 added the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
+**Versioning.** `abi::VERSION` is the interface version (now 8: `stream` in the function table, `SinkFn` and `ERR_UNSUPPORTED`; 7 added item marks, `marks` in the function table, and the reply `panels`; 6 added the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
 
 ## Checklist
 
@@ -425,6 +470,7 @@ Commands, replies, forms and values cross the interface as text: lists of string
 - [ ] `start` returns helpful, translated errors (missing library, wrong version).
 - [ ] `handles` decides by name only and is fast (or returns false for a plugin that only opens connections).
 - [ ] `list` returns a complete index, or the asked-for folder (`complete: false`), and `NotFound` for what isn't a folder.
+- [ ] `stream` sends the files of `items` without a temporary copy, if the plugin can read their contents (items dragged out of the window are then read only as they are copied); `begin` false skips a file, `write` false stops.
 - [ ] Menu commands have translated labels; forms use `Password` for secrets, which are never saved or logged.
 - [ ] Connections are released in `close`; names from a server are checked before they become paths on disk.
 - [ ] `can_write` is false for anything you can't change safely.

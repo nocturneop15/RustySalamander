@@ -478,6 +478,34 @@ fn out_stream(f: File) -> Own {
     Own(OutStreamObj::create(&OUT_STREAM_VTBL, &OUT_STREAM_IIDS, f))
 }
 
+// --- ISequentialOutStream over the program's sink (streaming, no disk)
+
+#[repr(C)]
+struct SinkStreamVtbl {
+    base: IUnknownVtbl,
+    write: unsafe extern "system" fn(*mut c_void, *const c_void, u32, *mut u32) -> HRESULT,
+}
+
+/// The extraction whose sink takes the bytes.
+type SinkStreamObj = Obj<SinkStreamVtbl, *mut Extracting<'static>>;
+
+unsafe extern "system" fn sink_write(this: *mut c_void, data: *const c_void, size: u32, processed: *mut u32) -> HRESULT {
+    let d = &mut **SinkStreamObj::data(this);
+    let buf = if size == 0 { &[][..] } else { std::slice::from_raw_parts(data as *const u8, size as usize) };
+    let Some((sink, _)) = d.sink.as_mut() else { return E_FAIL };
+    if !sink.write(buf) {
+        d.progress.cancelled = true;
+        return E_ABORT;
+    }
+    if !processed.is_null() {
+        *processed = size;
+    }
+    S_OK
+}
+
+static SINK_STREAM_VTBL: SinkStreamVtbl = SinkStreamVtbl { base: SinkStreamObj::UNKNOWN, write: sink_write };
+static SINK_STREAM_IIDS: [Guid; 1] = [IID_ISEQUENTIAL_OUT_STREAM];
+
 // --- IArchiveOpenCallback (no password support: encrypted headers fail to open)
 
 #[repr(C)]
@@ -531,6 +559,10 @@ struct ExtractCallbackVtbl {
     set_operation_result: unsafe extern "system" fn(*mut c_void, i32) -> HRESULT,
 }
 
+/// Streaming: where the bytes go, and each item's inner path and size
+/// (`None` skips it).
+type Streaming<'a> = (&'a mut dyn sal_plugin_api::Sink, &'a dyn Fn(u32) -> Option<(String, u64)>);
+
 /// Where each extracted item goes, and what happened.
 struct Extracting<'a> {
     progress: Progress<'a>,
@@ -538,6 +570,9 @@ struct Extracting<'a> {
     target: &'a dyn Fn(u32) -> Option<(PathBuf, bool)>,
     /// Item modification times, applied after writing.
     times: &'a dyn Fn(u32) -> Option<SystemTime>,
+    /// Streaming instead of files: where the bytes go, and each item's
+    /// inner path and size (`None` skips it).
+    sink: Option<Streaming<'a>>,
     current: Option<(PathBuf, u32)>,
     errors: Vec<(PathBuf, i32)>,
     io_error: Option<io::Error>,
@@ -561,6 +596,17 @@ unsafe extern "system" fn ex_get_stream(this: *mut c_void, index: u32, out: *mut
     *out = ptr::null_mut();
     d.current = None;
     if mode != ASK_EXTRACT {
+        return S_OK;
+    }
+    if let Some((sink, name)) = d.sink.as_mut() {
+        // not wanted: 7-Zip skips it (in a solid block it still decodes it)
+        let Some((inner, size)) = name(index) else { return S_OK };
+        if !sink.begin(&inner, size) {
+            return S_OK;
+        }
+        d.current = Some((PathBuf::from(inner), index));
+        let me = d as *mut Extracting;
+        *out = SinkStreamObj::create(&SINK_STREAM_VTBL, &SINK_STREAM_IIDS, me);
         return S_OK;
     }
     let Some((path, is_dir)) = (d.target)(index) else { return S_OK };
@@ -591,6 +637,8 @@ unsafe extern "system" fn ex_set_result(this: *mut c_void, result: i32) -> HRESU
     if let Some((path, index)) = d.current.take() {
         if result != OP_OK {
             d.errors.push((path, result));
+        } else if d.sink.is_some() {
+            // streamed: no file to date
         } else if let Some(t) = (d.times)(index) {
             // the stream is released by 7z.dll before this: the file is closed
             let _ = File::options().write(true).open(&path).and_then(|f| f.set_modified(t));
@@ -968,13 +1016,33 @@ impl OpenArchive {
         times: &dyn Fn(u32) -> Option<SystemTime>,
         progress: &mut ProgressFn,
     ) -> io::Result<()> {
+        self.run_extract(indices, target, times, None, progress)
+    }
+
+    /// Send the files `indices` to `sink` in the archive's order, without
+    /// writing them anywhere; `name` gives each item's inner path and size
+    /// (`None` for those not to send).
+    pub fn stream(&self, indices: &[u32], name: &dyn Fn(u32) -> Option<(String, u64)>, sink: &mut dyn sal_plugin_api::Sink) -> io::Result<()> {
+        self.run_extract(indices, &|_| None, &|_| None, Some((sink, name)), &mut |_, _| true)
+    }
+
+    fn run_extract(
+        &self,
+        indices: &[u32],
+        target: &dyn Fn(u32) -> Option<(PathBuf, bool)>,
+        times: &dyn Fn(u32) -> Option<SystemTime>,
+        sink: Option<Streaming>,
+        progress: &mut ProgressFn,
+    ) -> io::Result<()> {
         let mut sorted = indices.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
+        // 7z.dll holds these only during the call below
         let progress: &mut ProgressFn<'static> = unsafe { std::mem::transmute(progress) };
         let target: &'static dyn Fn(u32) -> Option<(PathBuf, bool)> = unsafe { std::mem::transmute(target) };
         let times: &'static dyn Fn(u32) -> Option<SystemTime> = unsafe { std::mem::transmute(times) };
-        let data = Extracting { progress: Progress { total: 0, report: progress, cancelled: false }, target, times, current: None, errors: Vec::new(), io_error: None };
+        let sink: Option<Streaming<'static>> = unsafe { std::mem::transmute(sink) };
+        let data = Extracting { progress: Progress { total: 0, report: progress, cancelled: false }, target, times, sink, current: None, errors: Vec::new(), io_error: None };
         let cb = ExtractObj::create(&EXTRACT_CALLBACK_VTBL, &EXTRACT_CALLBACK_IIDS, data);
         let hr = unsafe { (self.arc.vtbl().extract)(self.arc.raw(), sorted.as_ptr(), sorted.len() as u32, 0, cb) };
         let (cancelled, io_error, errors) = unsafe {

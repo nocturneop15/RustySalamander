@@ -78,6 +78,7 @@ pub const fn vtable<T: Plugin>() -> VTable {
         openers: openers::<T>,
         open_file: open_file::<T>,
         marks: marks::<T>,
+        stream: stream::<T>,
     }
 }
 
@@ -280,6 +281,23 @@ unsafe extern "C" fn open_file<T: Plugin>(this: *mut c_void, opener: Str, file: 
 unsafe extern "C" fn marks<T: Plugin>(this: *mut c_void, file: Wide, folder: Str, out: *const StrOut) {
     let list = catch_unwind(|| me::<T>(this).marks(&file.path(), folder.get())).unwrap_or_default();
     (*out).send(&crate::ui::encode_marks(&list));
+}
+
+/// The program's [`SinkFn`] as a [`crate::Sink`].
+struct SinkOf<'a>(&'a SinkFn);
+
+impl crate::Sink for SinkOf<'_> {
+    fn begin(&mut self, inner: &str, size: u64) -> bool {
+        unsafe { (self.0.begin)(self.0.ctx, Str::new(inner), size) }
+    }
+    fn write(&mut self, data: &[u8]) -> bool {
+        unsafe { (self.0.write)(self.0.ctx, data.as_ptr(), data.len()) }
+    }
+}
+
+/// [`VTable::stream`].
+unsafe extern "C" fn stream<T: Plugin>(this: *mut c_void, file: Wide, items: *const Str, n: usize, sink: *const SinkFn, error: *const StrOut) -> i32 {
+    run(error, || me::<T>(this).stream(&file.path(), &strings(items, n), &mut SinkOf(&*sink)))
 }
 
 /// [`VTable::real_path`].

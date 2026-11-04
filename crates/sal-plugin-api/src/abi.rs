@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
 /// changes (see the module's "Versions").
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 /// The oldest interface version the program still runs plugins of. Version
 /// 5 is the first that tells the plugin's own version.
@@ -197,6 +197,17 @@ pub struct ProgressFn {
     pub call: unsafe extern "C" fn(ctx: *mut c_void, done: u64, total: u64) -> bool,
 }
 
+/// Receives the files of [`VTable::stream`], the C form of [`crate::Sink`].
+#[repr(C)]
+pub struct SinkFn {
+    /// The program's data, passed back to `begin` and `write`.
+    pub ctx: *mut c_void,
+    /// [`crate::Sink::begin`]: the file `inner` starts, `size` bytes long.
+    pub begin: unsafe extern "C" fn(ctx: *mut c_void, inner: Str, size: u64) -> bool,
+    /// [`crate::Sink::write`]: `len` more bytes at `data`.
+    pub write: unsafe extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize) -> bool,
+}
+
 /// One item inside a plugin's file, the C form of [`crate::Item`].
 #[repr(C)]
 pub struct RawItem {
@@ -239,6 +250,9 @@ pub const ERR_NOT_FOUND: i32 = 4;
 pub const ERR_PERMISSION: i32 = 5;
 /// Bad input or a damaged file ([`std::io::ErrorKind::InvalidData`]).
 pub const ERR_INVALID: i32 = 6;
+/// Version 8: the plugin can't do this ([`std::io::ErrorKind::Unsupported`]);
+/// the program does it another way (see [`crate::FolderPlugin::stream`]).
+pub const ERR_UNSUPPORTED: i32 = 7;
 
 /// What the program offers a plugin. Each plugin gets its own, valid for
 /// the rest of the session.
@@ -338,6 +352,9 @@ pub struct VTable {
     /// Version 7: [`crate::FolderPlugin::marks`] of `folder`, sent to `out`
     /// encoded by [`crate::ui`] (name and mark of each).
     pub marks: unsafe extern "C" fn(this: *mut c_void, file: Wide, folder: Str, out: *const StrOut),
+    /// Version 8: [`crate::FolderPlugin::stream`]: `items` is an array of
+    /// `n` paths inside; the files go to `sink`.
+    pub stream: unsafe extern "C" fn(this: *mut c_void, file: Wide, items: *const Str, n: usize, sink: *const SinkFn, error: *const StrOut) -> i32,
 }
 
 // Only pointers to static data and functions, or to data the program keeps
@@ -356,6 +373,7 @@ pub fn code_of(kind: std::io::ErrorKind) -> i32 {
         K::NotFound => ERR_NOT_FOUND,
         K::PermissionDenied => ERR_PERMISSION,
         K::InvalidInput | K::InvalidData => ERR_INVALID,
+        K::Unsupported => ERR_UNSUPPORTED,
         _ => ERR_OTHER,
     }
 }
@@ -369,6 +387,7 @@ pub fn kind_of(code: i32) -> std::io::ErrorKind {
         ERR_NOT_FOUND => K::NotFound,
         ERR_PERMISSION => K::PermissionDenied,
         ERR_INVALID => K::InvalidData,
+        ERR_UNSUPPORTED => K::Unsupported,
         _ => K::Other,
     }
 }

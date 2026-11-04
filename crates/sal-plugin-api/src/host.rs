@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::abi::*;
-use crate::{Activity, Command, FolderPlugin, Index, Item, ItemMark, Opener, Progress, Reply, Values};
+use crate::{Activity, Command, FolderPlugin, Index, Item, ItemMark, Opener, Progress, Reply, Sink, Values};
 
 /// Who a plugin is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +139,18 @@ fn with_progress<R>(progress: &mut Progress, f: impl FnOnce(*const ProgressFn) -
     f(&pf)
 }
 
+/// [`SinkFn::begin`]: the caller's [`Sink`].
+unsafe extern "C" fn sink_begin(ctx: *mut c_void, inner: Str, size: u64) -> bool {
+    let s = &mut *(ctx as *mut &mut dyn Sink);
+    s.begin(inner.get(), size)
+}
+
+/// [`SinkFn::write`]: the caller's [`Sink`].
+unsafe extern "C" fn sink_write(ctx: *mut c_void, data: *const u8, len: usize) -> bool {
+    let s = &mut *(ctx as *mut &mut dyn Sink);
+    s.write(if len == 0 { &[] } else { std::slice::from_raw_parts(data, len) })
+}
+
 /// The [`ItemOut`] receiver: one item into the listing.
 unsafe extern "C" fn put_item(ctx: *mut c_void, raw: *const RawItem) {
     let items = &mut *(ctx as *mut Vec<Item>);
@@ -181,6 +193,16 @@ impl FolderPlugin for Remote {
         with_progress(progress, |p| call(|e| unsafe { (self.vt.extract)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), Wide::of(&out), p, e) }))
     }
 
+    fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+        if !self.has(8) {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let file = Wide::encode(file);
+        let strs: Vec<Str> = items.iter().map(|s| Str::new(s)).collect();
+        let mut s: &mut dyn Sink = sink;
+        let sf = SinkFn { ctx: &mut s as *mut &mut dyn Sink as *mut c_void, begin: sink_begin, write: sink_write };
+        call(|e| unsafe { (self.vt.stream)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), &sf, e) })
+    }
     fn add(&self, file: &Path, items: &[(PathBuf, String)], progress: &mut Progress) -> io::Result<()> {
         let file = Wide::encode(file);
         let disk_units: Vec<Vec<u16>> = items.iter().map(|(d, _)| Wide::encode(d)).collect();
@@ -309,6 +331,18 @@ mod tests {
             }
             for i in items {
                 std::fs::write(out.join(i), i)?;
+            }
+            Ok(())
+        }
+        fn stream(&self, _: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
+            for i in items {
+                if sink.begin(i, i.len() as u64 * 2) {
+                    for half in [i.as_bytes(), i.as_bytes()] {
+                        if !sink.write(half) {
+                            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped"));
+                        }
+                    }
+                }
             }
             Ok(())
         }
@@ -459,6 +493,28 @@ mod tests {
             false
         });
         assert_eq!((e.unwrap_err().kind(), asked), (io::ErrorKind::Interrupted, Some((1, 2))));
+        // files streamed without disk: skipped ones send nothing, a sink
+        // that wants no more stops it
+        struct Got(Vec<(String, u64, Vec<u8>)>, &'static str);
+        impl Sink for Got {
+            fn begin(&mut self, inner: &str, size: u64) -> bool {
+                self.0.push((inner.to_owned(), size, Vec::new()));
+                inner != self.1
+            }
+            fn write(&mut self, data: &[u8]) -> bool {
+                self.0.last_mut().unwrap().2.extend_from_slice(data);
+                self.0.last().unwrap().2.len() < 100
+            }
+        }
+        let mut got = Got(Vec::new(), "přeskoč");
+        p.stream(file, &["a 🦎".into(), "přeskoč".into(), "b".into()], &mut got).unwrap();
+        let got: Vec<(&str, u64, &[u8])> = got.0.iter().map(|(i, n, d)| (i.as_str(), *n, d.as_slice())).collect();
+        assert_eq!(got, [("a 🦎", 12, "a 🦎a 🦎".as_bytes()), ("přeskoč", 18, &b""[..]), ("b", 2, &b"bb"[..])]);
+        let long = "x".repeat(60);
+        let e = p.stream(file, &[long], &mut Got(Vec::new(), "")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::Interrupted);
+        // what a plugin can't do says so across the interface
+        assert_eq!(p.open_file("other", file, &Values::new()).unwrap_err().kind(), io::ErrorKind::Unsupported);
         let e = p.add(file, &[(src.clone(), "boom".into())], &mut |_, _| true).unwrap_err();
         assert!(e.to_string().starts_with("the plugin failed"), "a panic becomes an error: {e}");
         p.delete(file, &["prázdná".into()], &mut |_, _| true).unwrap();

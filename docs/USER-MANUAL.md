@@ -217,7 +217,8 @@ Drag a file or folder from a panel onto the other panel, or onto a folder's row 
 - **On the same drive** the items are **moved**, onto **another drive** (or into an archive, or to a server) **copied**, as in Explorer.
 - **Shift** moves and **Ctrl** copies, whatever the drives. Hold the key when you release the button.
 - The **Copy or Move dialog** opens with the target filled in, so you can check it, pick a safe copy or run it in the background. Settings → General → Files → *Drag and drop* can start the operation at once instead.
-- **Out of the window:** drag past the window's edge and the items go to Explorer, the desktop or any program that takes files; that program copies or moves them by the same rule. (Items inside an archive or on a server stay inside the window.)
+- **Out of the window:** drag past the window's edge and the items go to Explorer, the desktop or any program that takes files; that program copies or moves them by the same rule. Items inside an archive or on a server go out as files on disk too, always copied: Windows' *Projected File System* shows them in a folder of the program's, and only what the program they are dropped on copies is read from the archive or server, as it copies it (Explorer shows its own progress window and asks about files that already exist). Any program that takes files takes them. This needs the Windows feature *Windows Projected File System*: turn it on in *Turn Windows features on or off*, or run `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS` in PowerShell as administrator. While it is off, dragging such items out of the window says so; copy them with F5 or drag them to the other panel instead. Search results and compared files go out as the files on disk they are.
+- **Where nothing can be dropped:** search results, and archives that can't be changed (such as RAR), take no dropped items.
 - **Into the window:** files dragged from Explorer or another program can be dropped on a panel or a folder's row, the same way.
 
 ### Create directory (F7)
@@ -272,7 +273,9 @@ If you'd rather select with the right button (as in Norton Commander and Salaman
 - **Ctrl+X** cuts them (they are moved when pasted).
 - **Ctrl+V** pastes files from the clipboard into the panel's folder.
 
-This is the Windows clipboard, so you can copy in RustySalamander and paste in Explorer or any other program, and the other way round. It isn't available inside archives, on servers or in search results; use F5 and F6 there.
+This is the Windows clipboard, so you can copy in RustySalamander and paste in Explorer or any other program, and the other way round. It isn't available inside archives or on servers; use F5 and F6 there.
+
+**Search results and comparisons** (panels a plugin fills with files that are on disk) put those files themselves on the clipboard: Ctrl+C, Ctrl+X, the context menu (right-click, Shift+F10), Properties, Copy full paths and dragging out of the window all work with the real files, even when they come from many folders. Pasting into such a panel isn't possible, and the context menu has no Rename, Paste or Calculate size there.
 
 ---
 

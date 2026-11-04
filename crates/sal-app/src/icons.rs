@@ -202,7 +202,7 @@ pub fn load(_: &IconKey, _: &Path) -> Option<Rgba> {
 
 /// An icon's pixels, RGBA.
 #[cfg(windows)]
-fn icon_to_rgba(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<Rgba> {
+pub fn icon_to_rgba(icon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<Rgba> {
     use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP};
     use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
 

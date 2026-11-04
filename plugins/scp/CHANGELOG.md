@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `scp-v<version>` in the RustySalamander repository.
 
+## Unreleased
+
+- **Dragged out of the window, files are read only as they are copied:** the plugin streams them from the server, a whole folder through one `scp -r -f`, with no temporary copy. Built for plugin interface 8 (`stream`).
+
 ## 0.5.2-alpha (2026-11-01)
 
 - **Plugin interface 7:** built for interface 7 (RustySalamander 0.7.0-alpha and later), which lets plugins mark items and show two connections side by side; no change in what it does.
