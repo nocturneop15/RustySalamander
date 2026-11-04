@@ -96,7 +96,7 @@ From top to bottom:
 
 ### Panels that a plugin shows
 
-Inside an archive, on a server, in search results or in a comparison, the panel has a tinted background and a banner under the list naming the plugin. You work there as in any folder.
+Inside an archive, on a server, in search results or in a comparison, the panel has a tinted background and a banner under the list naming the plugin. You work there as in any folder. Items can be dragged out of the window from all of them (see [Dragging out of the window](#dragging-out-of-the-window)); in search results and comparisons the clipboard, the context menu and Properties work with the files on disk too (see [The clipboard](#the-clipboard)).
 
 ---
 
@@ -217,9 +217,31 @@ Drag a file or folder from a panel onto the other panel, or onto a folder's row 
 - **On the same drive** the items are **moved**, onto **another drive** (or into an archive, or to a server) **copied**, as in Explorer.
 - **Shift** moves and **Ctrl** copies, whatever the drives. Hold the key when you release the button.
 - The **Copy or Move dialog** opens with the target filled in, so you can check it, pick a safe copy or run it in the background. Settings → General → Files → *Drag and drop* can start the operation at once instead.
-- **Out of the window:** drag past the window's edge and the items go to Explorer, the desktop or any program that takes files; that program copies or moves them by the same rule. Items inside an archive or on a server go out as files on disk too, always copied: Windows' *Projected File System* shows them in a folder of the program's, and only what the program they are dropped on copies is read from the archive or server, as it copies it (Explorer shows its own progress window and asks about files that already exist). Any program that takes files takes them. This needs the Windows feature *Windows Projected File System*: turn it on in *Turn Windows features on or off*, or run `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS` in PowerShell as administrator. While it is off, dragging such items out of the window says so; copy them with F5 or drag them to the other panel instead. Search results and compared files go out as the files on disk they are.
+- **Out of the window:** drag past the window's edge and the items go to Explorer, the desktop or any program that takes files. See [Dragging out of the window](#dragging-out-of-the-window).
 - **Where nothing can be dropped:** search results, and archives that can't be changed (such as RAR), take no dropped items.
-- **Into the window:** files dragged from Explorer or another program can be dropped on a panel or a folder's row, the same way.
+- **Into the window:** files dragged from Explorer or another program can be dropped on a panel or a folder's row, the same way. RustySalamander does the copy or move itself, with its own dialog and progress window.
+
+### Dragging out of the window
+
+As soon as the pointer leaves the window with the button held, the drag becomes a normal Windows drag, showing the item's icon. Drop the items on Explorer, the desktop, a mail or chat program, an upload field or any other program that takes files.
+
+- **Files in a folder** go out as they are. The program you drop them on copies or moves them by its own rule (in Explorer: moved on the same drive, copied onto another one; Shift moves, Ctrl copies).
+- **Search results and compared folders** go out as the files on disk they stand for, even when they come from many folders. A comparison's grey placeholders (what only the other side has) stay behind.
+- **Items in an archive or on a server** go out as files on disk too, and are always **copied**, never moved:
+  - Nothing is extracted or downloaded when you start dragging, so the drag starts at once even for gigabytes.
+  - When you drop them, the program they are dropped on copies them as ordinary files, and only what it copies is read from the archive or server, as it copies it. Explorer shows its own progress window, asks about files that already exist and can cancel.
+  - A folder comes with everything inside it.
+  - The files are shown to other programs in a folder of RustySalamander's under `%TEMP%\RustySalamander`. What was read stays there, so dragging it again is instant, until RustySalamander ends and removes the folder. Don't close RustySalamander while a copy from an archive or server is still running.
+  - Names Windows doesn't allow (with `:` or `?`, say, from Linux) are left out; copy those with F5.
+
+**Archives and servers need the Windows feature *Windows Projected File System*.** It comes with Windows 10 and 11 but is off unless you turn it on, once:
+
+1. Open **Turn Windows features on or off** (Start, type *Windows features*, or run `optionalfeatures.exe`).
+2. Tick **Windows Projected File System** and click OK. Restart Windows if it asks.
+
+Or run this in PowerShell as administrator: `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS`
+
+While the feature is off, dragging items of an archive or server out of the window shows a message saying so; nothing else happens. Copying them with F5, or dragging them to the other panel, works without it.
 
 ### Create directory (F7)
 
@@ -273,7 +295,7 @@ If you'd rather select with the right button (as in Norton Commander and Salaman
 - **Ctrl+X** cuts them (they are moved when pasted).
 - **Ctrl+V** pastes files from the clipboard into the panel's folder.
 
-This is the Windows clipboard, so you can copy in RustySalamander and paste in Explorer or any other program, and the other way round. It isn't available inside archives or on servers; use F5 and F6 there.
+This is the Windows clipboard, so you can copy in RustySalamander and paste in Explorer or any other program, and the other way round. It isn't available inside archives or on servers; use F5 and F6 there, or drag the items out of the window.
 
 **Search results and comparisons** (panels a plugin fills with files that are on disk) put those files themselves on the clipboard: Ctrl+C, Ctrl+X, the context menu (right-click, Shift+F10), Properties, Copy full paths and dragging out of the window all work with the real files, even when they come from many folders. Pasting into such a panel isn't possible, and the context menu has no Rename, Paste or Calculate size there.
 
@@ -329,10 +351,11 @@ Archives open like folders: press **Enter** on `photos.zip` and browse what is i
 - **Changing** (adding, deleting, renaming, new folders) works for 7z, zip, tar and wim archives.
 - **F3, F4, Enter** on a file inside open a temporary copy. Changes to that copy don't go back into the archive.
 - **F5 / F6** copy or move items out of an archive into the other panel, or into an archive shown in the other panel.
+- **Drag and drop:** drag items onto the other panel to copy them out, or files onto the archive's panel to add them. Dragged out of the window, they go to Explorer or any program, read from the archive only as that program copies them (this needs *Windows Projected File System*; see [Dragging out of the window](#dragging-out-of-the-window)). Archives that can't be changed, such as RAR, take no dropped files.
 - **F8** deletes from the archive, **F7** creates a folder in it, **F2** renames.
 - Folder sizes inside an archive are shown at once.
 
-Changing a large archive takes a while, because the whole archive is written again. If it fails or you cancel, the archive stays as it was. Password-protected archives aren't supported yet. The context menu and Properties aren't available inside archives.
+Changing a large archive takes a while, because the whole archive is written again. If it fails or you cancel, the archive stays as it was. Password-protected archives aren't supported yet. The context menu, Properties and the clipboard aren't available inside archives.
 
 ---
 
@@ -344,7 +367,7 @@ Linux, BSD and macOS servers can be opened in a panel over SSH.
 2. Fill in the server, the port (22), the user name, and either a password or a private key file (with its passphrase if it has one).
 3. The server's files open in the active panel, in your home folder: `scp://user@server/home/user`.
 
-You can then copy and move files in and out (F5, F6), delete (F8), rename (F2), create folders (F7), view and edit (F3, F4), with the usual progress window.
+You can then copy and move files in and out (F5, F6), delete (F8), rename (F2), create folders (F7), view and edit (F3, F4), with the usual progress window. Drag and drop works as with archives: onto the other panel, from Explorer onto the server's panel, and out of the window to Explorer or another program, which then downloads only what it copies (see [Dragging out of the window](#dragging-out-of-the-window)).
 
 - **Server keys:** the first time you connect, the server's key fingerprint is shown for you to confirm; it is remembered after that. If a server's key changes, the connection is refused with a warning. Keys you already trust in `%USERPROFILE%\.ssh\known_hosts` are accepted too.
 - **Remembered:** the last server, port, user and key file, never the password.
@@ -371,7 +394,7 @@ The **results window** fills while the search runs. Columns sort with a click.
 - **Show all in one list** shows everything found in one flat list in the panel.
 - **Stop** ends the search, **New search…** opens the form again, **Refresh** searches again with the same settings, **Close** closes the window.
 
-In both panel views you can copy (F5) the results elsewhere, delete them (F8, to the Recycle Bin), rename them (F2), and view or edit them. Results shown in a panel stay available in the drive selector under *Searches*, with **Refresh** and **Close**.
+In both panel views you can copy (F5) the results elsewhere, delete them (F8, to the Recycle Bin), rename them (F2), and view or edit them. Ctrl+C, Ctrl+X, the context menu, Properties, *Copy full paths* and dragging out of the window work with the found files themselves (see [The clipboard](#the-clipboard)). Nothing can be dropped or pasted into results. Results shown in a panel stay available in the drive selector under *Searches*, with **Refresh** and **Close**.
 
 ---
 
@@ -395,7 +418,7 @@ In both panel views you can copy (F5) the results elsewhere, delete them (F8, to
 - **grey, no size:** only the other side has it;
 - **no color:** the same.
 
-Entering a folder or going up in one panel takes the other along. F5 from one side copies to the other side, F8 deletes, F7 creates a folder, and the colors follow. The folder form asks how files count as the same: by size and date (fast), or by their contents (slow). The comparison is listed in the drive selector under *Comparisons*, with **Refresh** to compare again; closing either side closes both.
+Entering a folder or going up in one panel takes the other along. F5 from one side copies to the other side, F8 deletes, F7 creates a folder, and the colors follow. The clipboard, the context menu, Properties and dragging out of the window work with the compared files themselves. The folder form asks how files count as the same: by size and date (fast), or by their contents (slow). The comparison is listed in the drive selector under *Comparisons*, with **Refresh** to compare again; closing either side closes both.
 
 ---
 
@@ -657,7 +680,9 @@ Everything is in the program's folder:
 - **A folder size has a `*`:** some subfolders couldn't be read (no permission). Running the program as administrator lets it read more.
 - **Archives open with Windows instead of in the panel:** the 7-Zip plugin is off or missing; see Settings → Plugins.
 - **F3 says there is no viewer:** the Viewer plugin is off; turn it on in Settings → Plugins, or choose another viewer in Settings → Viewers and editors.
-- **Ctrl+C / Ctrl+V do nothing in an archive or on a server:** the Windows clipboard only works with real folders; use F5 and F6 there.
+- **Ctrl+C / Ctrl+V do nothing in an archive or on a server:** the Windows clipboard only works with real folders; use F5 and F6 there, or drag the items out of the window.
+- **Dragging out of an archive says *Windows Projected File System* is needed:** turn that Windows feature on once (see [Dragging out of the window](#dragging-out-of-the-window)). Until then, F5 and dragging to the other panel work.
+- **A program refuses items dragged from an archive or server, or gets incomplete files:** RustySalamander must keep running until the copy has finished; the files are read from the archive or server while it copies.
 - **Things move too much:** View → *Animations* off.
 - **Going back to an older version:** after an update the previous version's folder is still there; just run it.
 

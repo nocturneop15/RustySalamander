@@ -180,7 +180,7 @@ All methods take `&self` and may be called **from several threads at once**: the
 |---|---|---|
 | `id()` | Often | Return `Self::ID`. |
 | `handles(name)` | For every file name the user opens or a path passes through | Decide **by name only** (usually the extension); it must be fast. `name` has no folder. Returning true for a file the plugin then can't read is fine: the user gets the `list` error. |
-| `can_write(file)` | Before any change | Whether this file's contents can be changed. If false, the program refuses to add, delete, rename and create folders, and the other methods are never called for that file. Copying out still works. |
+| `can_write(file)` | Before any change, and while items are dragged over the panel | Whether this file's contents can be changed. If false, the program refuses to add, delete, rename and create folders, the panel takes no dropped items, and the other methods are never called for that file. Copying and dragging out still work. |
 | `status()` | When Settings → Plugins is shown | One line about the plugin's state (e.g. the library it loaded), or empty. |
 | `list(file, folder)` | When the panel opens the file or a folder of a connection | Return the items: everything (`complete: true`) or at least `folder`'s children. Fail with `NotFound` when `folder` isn't a folder. Errors are shown to the user. |
 | `extract(file, items, out, progress)` | F5/F6 out of the file, and F3/F4/Enter on an item (extracted to a temporary folder first) | Write each item in `items` to `out\<inner path>`, creating folders as needed. A folder in `items` means the folder **with everything inside it**, and an empty folder must still be created. `out` exists and is empty. |
@@ -211,7 +211,15 @@ All methods take `&self` and may be called **from several threads at once**: the
 
 Items dragged out of the window onto Explorer, the desktop or another program go there as **files on disk**, through Windows' *Projected File System* (ProjFS, an optional Windows feature). The program mounts the plugin's file or connection in a folder under `%TEMP%\RustySalamander`, and the drag carries the items' paths in that folder, like any files. Windows asks the program for a folder's contents only when something looks into it, and for a file's bytes only when something reads it; what was read stays there until the program ends. So nothing is read until the drop, only what the target copies is read, and programs that take only paths (editors, upload fields) take them too. The items are always copied, never moved.
 
-The program does all of the Windows side for every plugin (`crates/sal-app/src/plugins/mount.rs`). A plugin provides the folders through `list`, as for its panel, and the bytes through `FolderPlugin::stream`:
+The program does all of the Windows side for every plugin (`crates/sal-app/src/plugins/mount.rs`); a plugin writes nothing for Windows. What happens for a drag of `docs` out of an archive:
+
+1. The pointer leaves the window: the program mounts the archive (once per archive, reused while it is unchanged; a changed archive gets a new mount) and hands Windows the path `…\a.zip\docs`.
+2. The target looks into `docs`: `list(file, "docs")` (or the complete index, once), and the same for each folder below as it is looked into.
+3. The target opens the first file: `stream(file, ["docs"], sink)` on a thread of its own. Every file under `docs` arrives through `sink`, in your order; each goes straight to the target if it is reading that file, or waits in a spool until it does.
+4. The target opens a file outside the drag (a thumbnail, say): `stream(file, [that file], sink)`.
+5. The program ends: the mount is removed with what was read.
+
+A plugin provides the folders through `list`, as for its panel, and the bytes through `FolderPlugin::stream`:
 
 ```rust
 fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
@@ -243,7 +251,9 @@ fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Resu
 - **It runs on a thread of its own**, so it may block (a server); `begin` and `write` block while the target is behind.
 - **Without `stream`** (the default returns `Unsupported`, as do plugins built for interface 7 or earlier), the program extracts the items with `extract` into a temporary folder when the first file is read, and serves them from there. It works, but the target waits for the whole extraction, so **every plugin that can read an item's contents should implement `stream`**. It is usually a dozen lines next to `extract`: the example plugin's is in `plugins/example-filelist`.
 
-Items that have a `real_path` (search results, compared folders) go out as those files on disk, without a mount, and a comparison's placeholders stay in the window.
+Items that have a `real_path` (search results, compared folders) go out as those files on disk, without a mount, and a comparison's placeholders stay in the window. Those panels also put the real files on the clipboard and use them for the context menu and Properties; see `real_path` under [Results windows](#results-windows).
+
+**Dropping into the plugin's panel** needs nothing extra: items dropped on it (from a panel or another program) go through the Copy dialog to `add`, as F5 does. A panel whose `can_write` is false, and search results, take no drops.
 
 **ProjFS has to be turned on** (*Turn Windows features on or off* → *Windows Projected File System*, or `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS` as administrator). When it is off, dragging a plugin's items out of the window tells the user so and suggests F5 or the other panel; dragging within the window works either way. Names Windows can't have (with `:` or `?`, say) aren't in the mount.
 
@@ -341,7 +351,7 @@ A plugin has its **own version** (`Plugin::VERSION`), apart from the program's, 
 - **`tag`**: what the tags of the plugin's releases start with, followed by the version: `viewer-v` → `viewer-v0.6.0`. The program's own releases are `v<version>`.
 - **`changelog`**: the changelog's path in the repository (`plugins/viewer/CHANGELOG.md`). The update window shows the sections between the installed version and the new one, read at the release's tag.
 
-**Program versions:** a plugin that needs something only newer programs have sets `Plugin::PROGRAM_MIN` (`"0.7.0"`), and one that is being phased out sets `Plugin::PROGRAM_MAX`, the newest program it works with, itself included. Empty, the default, means no limit. A program outside the range doesn't load the plugin and lists it in Settings with the reason ("needs RustySalamander 0.7.0 or later (this is 0.6.0-alpha)"). Versions compare as semantic versions, so `0.7.0-alpha` comes before `0.7.0`.
+**Program versions:** a plugin built for a newer interface (`stream` came with interface 8) loads only in programs that have it; the program skips it otherwise and says why. A plugin that needs something only newer programs have sets `Plugin::PROGRAM_MIN` (`"0.7.0"`), and one that is being phased out sets `Plugin::PROGRAM_MAX`, the newest program it works with, itself included. Empty, the default, means no limit. A program outside the range doesn't load the plugin and lists it in Settings with the reason ("needs RustySalamander 0.7.0 or later (this is 0.6.0-alpha)"). Versions compare as semantic versions, so `0.7.0-alpha` comes before `0.7.0`.
 
 **A release** of a plugin has one zip, named `<id>-<version>-api<interface>.zip` (`viewer-0.6.0-api6.zip`), holding the plugin's folder: the `.spl`, its libraries, `lang`, licenses and the changelog. The interface number is `abi::VERSION` the plugin was built for; the program only offers a zip for an interface it has. Several zips for different interfaces may be attached to one release.
 
@@ -416,7 +426,9 @@ let plugin = unsafe { sal_plugin_api::host::start(desc, &HOST, Path::new(".")) }
 // plugin is an Arc<dyn FolderPlugin>, just as the program sees it
 ```
 
-`plugins/example-filelist/src/lib.rs` has a complete test written this way. It covers listing, copying out with progress, cancelling, copying in, deleting, and refused operations.
+`plugins/example-filelist/src/lib.rs` has a complete test written this way. It covers listing, copying out with progress, cancelling, streaming, copying in, deleting, and refused operations.
+
+**Testing `stream`:** give it a `Sink` of your own that collects what arrives (the example plugin's test has one, a dozen lines): check that every file of a folder comes once, under its full inner path, with the size `list` gives and the same bytes as `extract`; that `begin` returning false skips a file; and that `write` returning false ends the call with `Interrupted`. To try it for real, turn on *Windows Projected File System*, drag a folder of your plugin's out of the program onto Explorer, and compare the copy with what F5 extracts.
 
 **In the program.** Put the built `.spl` into a folder of its own and start the program with `RUSTYSALAMANDER_PLUGINS` pointing at that folder's parent. You don't need to copy anything next to the exe:
 
@@ -425,7 +437,7 @@ $env:RUSTYSALAMANDER_PLUGINS = "D:\dev\myplugins"   # contains mything\mything.s
 target\release\rustysalamander.exe
 ```
 
-Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), large files, cancelling in the middle, and the file opened in both panels.
+Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), large files, cancelling in the middle, the file opened in both panels, and dragging items out of the window.
 
 ## Building, installing and distributing
 
@@ -444,7 +456,8 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 - **Never trust names inside the file.** Inner paths come from data you read. Reject `..` components, drive letters and absolute paths before writing `out\<inner path>` in `extract`.
 - **Keep everything Unicode.** Use `Path`/`PathBuf` for disk paths (they round-trip every Windows name) and `String` for inner paths. Never go through ANSI code pages.
 - **Long paths:** paths may exceed 260 characters, and Rust's `std::fs` handles that. A C library may need the `\\?\` prefix.
-- **Thread safety:** see [the trait section](#the-folderplugin-trait-method-by-method). `list` may run while a background `add` is writing the same file. The write-then-rename pattern keeps that safe.
+- **Thread safety:** see [the trait section](#the-folderplugin-trait-method-by-method). `list` may run while a background `add` is writing the same file. The write-then-rename pattern keeps that safe. Items dragged out of the window are served on Windows' threads: `list` and `stream` may run at the same time as each other and as the panel's own calls, and `stream` may run more than once at a time (the drag's run and a single file).
+- **`stream` must match `list`.** The program serves a file with the size `list` gave it; a file that turns out shorter or longer than that is cut off or fails in the program it was dropped on. Send exactly the bytes `extract` would write.
 - **The DLL is never unloaded** during a session, even when the plugin is turned off. `Drop` of your plugin type runs when it is turned off; release resources there.
 
 ## The C interface and versioning

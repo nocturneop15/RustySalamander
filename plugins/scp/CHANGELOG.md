@@ -2,9 +2,9 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `scp-v<version>` in the RustySalamander repository.
 
-## Unreleased
+## 0.6.0-alpha (2026-11-04)
 
-- **Dragged out of the window, files are read only as they are copied:** the plugin streams them from the server, a whole folder through one `scp -r -f`, with no temporary copy. Built for plugin interface 8 (`stream`).
+- **Dragged out of the window, files are read only as they are copied:** the plugin streams them from the server, a whole folder through one `scp -r -f`, with no temporary copy. Built for plugin interface 8 (`stream`): needs RustySalamander 0.9.0-beta or later.
 
 ## 0.5.2-alpha (2026-11-01)
 
