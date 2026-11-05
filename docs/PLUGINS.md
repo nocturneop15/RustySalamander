@@ -294,7 +294,8 @@ An error from `run` is shown as a message, except `Interrupted`.
 - `side`: which panel is active, `left` or `right`;
 - `cursor`: the path of the item under the active panel's cursor (empty on `..`);
 - `selected`: the paths of the items selected in the active panel, as an encoded list (`sal_plugin_api::ui::decode`);
-- `other`, `other_cursor`, `other_selected`: the same for the other panel.
+- `other`, `other_cursor`, `other_selected`: the same for the other panel;
+- `owner`: the program's window handle as a number; pass the values on to `sal_window::Windows::open` and a window the command opens appears over the program's window, on the same monitor (from RustySalamander 0.9.1).
 
 `side` and the values after it come from interface 7; older programs don't send them, so read them with a default.
 
@@ -337,7 +338,7 @@ A search runs on a thread of the plugin's own, started by `run`, which returns a
 Any plugin can open files for the user: `openers()` returns its viewers (`OpenKind::View`, F3) and editors (`OpenKind::Edit`, F4), each with an id, a translated label and the file names it takes (`masks`: `*.txt;*.log`, `*` for any file). On F3 or F4 the program picks the first plugin, in the order of Settings → Plugins, with an opener of that kind matching the file's name, and calls `open_file(opener id, file, options)`; a program the user chose in Settings comes first, and without an editor plugin F4 opens Notepad.
 
 - **`file` is always a file on disk.** An item inside an archive or on a server is extracted to a temporary folder first; `options["temporary"]` is `1` then, and changes to it are not saved back.
-- **`options`** say how the program looks, so the window can match it: `theme` (`system`, `light`, `dark`), `ui_font` and `mono_font` (font names, empty for the default), `scrollbars` (`solid`, `floating`), `accent_light` and `accent_dark` (the accent colors of the light and the dark theme as `#rrggbb`, empty for the theme's own; `sal_ui::apply_accent` applies them), `animations` (`on`, `off`: fading in and smooth scrolling; `sal_ui::apply_animations`; not sent before RustySalamander 0.7.1, so treat a missing value as `on`).
+- **`options`** say how the program looks, so the window can match it: `theme` (`system`, `light`, `dark`), `ui_font` and `mono_font` (font names, empty for the default), `scrollbars` (`solid`, `floating`), `accent_light` and `accent_dark` (the accent colors of the light and the dark theme as `#rrggbb`, empty for the theme's own; `sal_ui::apply_accent` applies them), `animations` (`on`, `off`: fading in and smooth scrolling; `sal_ui::apply_animations`; not sent before RustySalamander 0.7.1, so treat a missing value as `on`), `owner` (the program's window handle as a number; `sal_window::Windows` opens its windows over it, on the same monitor; not sent before RustySalamander 0.9.1).
 - **Return at once.** `open_file` runs on the program's UI thread: hand the file to your window and return; don't wait for the window to close.
 - **The window is yours.** This is the one place a plugin shows UI of its own. The Viewer plugin uses egui (`eframe`) in a thread of its own with an event loop of its own (`with_any_thread`), kept for the whole session because an event loop can be created only once per DLL; `sal-ui` gives it the program's fonts and scroll bars, and `sal_ui::layout` its spacing: a toolbar in `bar_frame` with `controls`, the content in `content_frame`, so the window lines up like the program's own (the `sal-window` crate applies the common button padding). Close your windows in `Drop`, which runs when the plugin is turned off.
 

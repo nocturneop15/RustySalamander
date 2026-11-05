@@ -146,7 +146,7 @@ fn run(rx: Receiver<Msg>, slot: Slot, frame: Frame) {
                     *slot.lock().unwrap() = Some(cc.egui_ctx.clone());
                     let mut look = Look::default();
                     look.apply(&cc.egui_ctx, &options);
-                    Ok(Box::new(App { wins: vec![Win::new(ViewportId::ROOT, content)], rx: &rx, look, frame, serial: 0, quit: &mut quit }))
+                    Ok(Box::new(App { wins: vec![Win::new(ViewportId::ROOT, content, owner_of(&options), 0)], rx: &rx, look, frame, serial: 0, quit: &mut quit }))
                 }),
             )
         }));
@@ -249,7 +249,8 @@ impl eframe::App for App<'_> {
                         self.wins.iter_mut().for_each(|w| w.themed = false);
                     }
                     self.serial += 1;
-                    self.wins.push(Win::new(ViewportId::from_hash_of(("plugin window", self.serial)), make()));
+                    let step = self.wins.len();
+                    self.wins.push(Win::new(ViewportId::from_hash_of(("plugin window", self.serial)), make(), owner_of(&options), step));
                 }
                 Msg::Quit => {
                     *self.quit = true;
@@ -317,12 +318,22 @@ struct Win {
     settled: bool,
     /// Where it is: the outer position and the inner size.
     place: Option<(egui::Pos2, egui::Vec2)>,
+    /// The program's window, which it opens over (on the same monitor), and
+    /// how many windows were open before it (each one a bit further down).
+    owner: Option<isize>,
+    step: usize,
+}
+
+/// The program's window, from `options` (`owner`: its handle as a number;
+/// programs before 0.9.1 don't send it).
+fn owner_of(options: &Values) -> Option<isize> {
+    options.get("owner")?.parse().ok().filter(|&h: &isize| h != 0)
 }
 
 impl Win {
-    /// A window for `content`.
-    fn new(id: ViewportId, content: Box<dyn Content>) -> Win {
-        Win { id, content, open: true, themed: false, settled: false, place: None }
+    /// A window for `content`, opening over `owner`.
+    fn new(id: ViewportId, content: Box<dyn Content>, owner: Option<isize>, step: usize) -> Win {
+        Win { id, content, open: true, themed: false, settled: false, place: None, owner, step }
     }
 
     /// Draw the window; Escape and F10 close it.
@@ -333,6 +344,10 @@ impl Win {
             // when animations are off, then shown
             if let Some(h) = sal_ui::native::thread_window(&self.content.title()) {
                 sal_ui::native::set_transitions(h, look.animations);
+                // over the program's window, on its monitor
+                if let Some(owner) = self.owner {
+                    sal_ui::native::place_over(h, owner, self.step);
+                }
             }
             // the first window eframe shows itself, once its first frame is drawn
             if self.id != ViewportId::ROOT {

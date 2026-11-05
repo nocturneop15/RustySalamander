@@ -50,3 +50,46 @@ pub fn set_transitions(hwnd: isize, on: bool) {
 /// Elsewhere windows aren't animated by the system here.
 #[cfg(not(windows))]
 pub fn set_transitions(_: isize, _: bool) {}
+
+/// Put the window `hwnd` (not shown yet) over the window `owner`: centred on
+/// it, moved down and right by `step` cascade steps, and kept inside the work
+/// area of the monitor `owner` is on. So a plugin's window opens on the
+/// program's monitor, not where Windows would put it.
+#[cfg(windows)]
+pub fn place_over(hwnd: isize, owner: isize, step: usize) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    use windows::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER};
+    let (h, o) = (HWND(hwnd as *mut _), HWND(owner as *mut _));
+    unsafe {
+        if !IsWindow(o).as_bool() {
+            return;
+        }
+        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(o, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+            return;
+        }
+        let work = info.rcWork;
+        // twice: the first move may take the window to a monitor of another
+        // scale, which resizes it; the second centres it at its new size
+        for _ in 0..2 {
+            let (mut own, mut win) = (RECT::default(), RECT::default());
+            if GetWindowRect(o, &mut own).is_err() || GetWindowRect(h, &mut win).is_err() {
+                return;
+            }
+            let (w, ht) = (win.right - win.left, win.bottom - win.top);
+            let shift = (step % 8) as i32 * 30 * GetDpiForWindow(o).max(96) as i32 / 96;
+            let x = (own.left + own.right - w) / 2 + shift;
+            let y = (own.top + own.bottom - ht) / 2 + shift;
+            // inside the work area; a window larger than it starts at its corner
+            let x = x.min(work.right - w).max(work.left);
+            let y = y.min(work.bottom - ht).max(work.top);
+            let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// Elsewhere the system places windows.
+#[cfg(not(windows))]
+pub fn place_over(_: isize, _: isize, _: usize) {}

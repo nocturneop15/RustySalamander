@@ -884,6 +884,8 @@ impl App {
         values.insert("other".into(), sal_plugin_api::ui::path_value(other.path()));
         values.insert("other_cursor".into(), item(other));
         values.insert("other_selected".into(), selected(other));
+        // a window the command opens (a comparison) opens over the program's
+        values.insert("owner".into(), self.owner_value());
         match plugins::mount_root_of(&here) {
             Some((root, id)) if id == plugin.id() => values.insert("mount".into(), sal_plugin_api::ui::path_value(&root)),
             _ => values.remove("mount"),
@@ -1238,10 +1240,17 @@ impl App {
             ("accent_dark", &dark),
             ("accent", &one),
             ("temporary", if temporary { "1" } else { "" }),
+            ("owner", &self.owner_value()),
         ]
             .into_iter()
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect()
+    }
+
+    /// The program's window, as a number: a plugin's windows open over it,
+    /// on the same monitor.
+    fn owner_value(&self) -> String {
+        self.hwnd.map(|h| h.to_string()).unwrap_or_default()
     }
 
     /// What F3 (`View`) or F4 (`Edit`) opens `file` with: what its suffix
