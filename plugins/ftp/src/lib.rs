@@ -273,6 +273,12 @@ impl FtpPlugin {
                 field("protocol", n_("Protocol:"), choices(&[("sftp", n_("SFTP (SSH)")), ("ftps", n_("FTPS (FTP with TLS)")), ("ftp", n_("FTP (unencrypted)"))]), None),
                 field("host", n_("Server:"), FieldKind::Text, None),
                 field("port", n_("Port:"), FieldKind::Text, None),
+                field(
+                    "mode",
+                    n_("Data connection:"),
+                    choices(&[("auto", n_("Automatic")), ("passive", n_("Passive")), ("active", n_("Active"))]),
+                    Some(("protocol", "ftp|ftps")),
+                ),
                 field("user", n_("User name:"), FieldKind::Text, None),
                 // FTP signs in with a password only: the choice is for SFTP, and
                 // off for FTP it counts as its first option, the password
@@ -280,12 +286,6 @@ impl FtpPlugin {
                 field("password", n_("Password:"), FieldKind::Password, Some(("auth", "password"))),
                 field("key", n_("Key file:"), FieldKind::File, Some(("auth", "key"))),
                 field("passphrase", n_("Key passphrase:"), FieldKind::Password, Some(("auth", "key"))),
-                field(
-                    "mode",
-                    n_("Data connection:"),
-                    choices(&[("auto", n_("Automatic")), ("passive", n_("Passive")), ("active", n_("Active"))]),
-                    Some(("protocol", "ftp|ftps")),
-                ),
                 Field {
                     id: "help".into(),
                     label: tr("An empty port is the protocol's usual one: 22 for SFTP, 21 for FTP and FTPS. With FTP, an empty user name signs in as anonymous. Plain FTP sends the password unencrypted. Automatic data connections try passive mode first and active mode when passive doesn't get through."),

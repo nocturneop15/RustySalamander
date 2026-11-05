@@ -385,8 +385,8 @@ You can then copy and move files in and out (F5, F6), delete (F8), rename (F2), 
    - **FTPS (FTP with TLS):** FTP encrypted with TLS (explicit, `AUTH TLS` on the usual port 21).
    - **FTP (unencrypted):** plain FTP. Everything goes over the network readable, the password too, so use it only where that doesn't matter.
 3. Fill in the server, the user name and the password. Leave the port empty for the protocol's usual one (22 for SFTP, 21 for FTP and FTPS). `user@server:port` typed as the server works too. With FTP, an empty user name signs in as *anonymous*.
-   - **Sign in with** (SFTP only): the password, or a private key file with its passphrase. FTP and FTPS always sign in with the password, so the choice is greyed out for them.
    - **Data connection** (FTP and FTPS only): how files and listings travel. **Automatic** tries passive mode first and active mode when passive doesn't get through; **Passive** (the computer connects to the server, which works through most firewalls and home routers) and **Active** (the server connects back to the computer) use only that one.
+   - **Sign in with** (SFTP only): the password, or a private key file with its passphrase. FTP and FTPS always sign in with the password, so the choice is greyed out for them.
 4. The server's files open in the active panel, in the folder the server starts you in: `sftp://user@server/home/user`, `ftps://…` or `ftp://…`.
 
 Copying and moving in and out, deleting, renaming, new folders, viewing, editing and drag and drop work as on SCP servers, with the same progress window. Files keep their times both ways where the server allows it (SFTP always; FTP servers that offer `MFMT`).

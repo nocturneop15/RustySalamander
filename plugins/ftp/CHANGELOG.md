@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `ftp-v<version>` in the RustySalamander repository.
 
+## 0.1.1-alpha (2026-11-05)
+
+- **Data connection right below the port:** in the connect form, the FTP data connection mode (Automatic, Passive, Active) follows the server and port it belongs with.
+
 ## 0.1.0-alpha (2026-11-05)
 
 - **FTP, FTPS and SFTP servers in a panel:** Plugins → Connect to FTP or SFTP server… connects with a password (or, for SFTP, a private key) and opens the server's files in the active panel as `sftp://`, `ftps://` or `ftp://`. Copying in and out, dragging out of the window (streamed, without a temporary copy), deleting, renaming and new folders work as on SCP servers, with progress and cancelling; a cancelled upload leaves no part on the server.
