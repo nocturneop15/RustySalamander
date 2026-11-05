@@ -144,7 +144,7 @@ Ten quick bookmarks. **Ctrl+Shift+1** remembers the active panel's folder as hot
 Just start typing in a panel: the cursor jumps to the first name that starts with what you typed, and every matching item is highlighted.
 
 - `/` or `\` stand for any characters (`re/port` finds `report` and `red export`).
-- **↑ / ↓** jump to the previous / next match (or **Ctrl+↑ / Ctrl+↓**).
+- **↑ / ↓** jump to the previous / next match (or **Ctrl+↑ / Ctrl+↓**). With Options → Quick search → *Arrows jump between matches* turned off, the arrows and other cursor keys move the cursor as usual and the search stays highlighted.
 - **Backspace** takes back the last letter typed.
 - **Esc** ends the search.
 - Options → Quick search → *Anywhere in name* finds the text anywhere in the name, not just at the start.
@@ -485,7 +485,7 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 | Setting | Choices | Default | What it does |
 |---|---|---|---|
 | Match | From first letter, Anywhere in name | From first letter | Whether typed text must start the name or may be anywhere in it. |
-| Arrow keys | *Arrows jump between matches* | on | While a quick search is active, ↑/↓ go to the previous/next match. Off: they end the search and move the cursor. |
+| Arrow keys | *Arrows jump between matches* | on | While a quick search is active, ↑/↓ go to the previous/next match, and other cursor keys (Page Up/Down, Home, End) end the search. Off: all cursor keys move the cursor as usual and the search stays, matches still highlighted, until Esc; Ctrl+↑/↓ still jump between matches. |
 
 #### Drives
 

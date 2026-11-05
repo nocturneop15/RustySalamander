@@ -435,9 +435,9 @@ impl Panel {
         }
     }
 
-    /// Keyboard cursor movement; ends quick search like in Salamander.
+    /// Keyboard cursor movement (a quick search in progress is the caller's
+    /// to end or keep).
     pub fn move_cursor(&mut self, delta: isize) {
-        self.qs.clear();
         let n = self.listing.entries.len();
         if n == 0 {
             return;

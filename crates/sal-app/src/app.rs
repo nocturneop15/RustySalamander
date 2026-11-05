@@ -2377,6 +2377,14 @@ impl App {
             return self.command(ctx, cmd);
         }
         let page = self.act().visible_rows.max(2) as isize - 1;
+        // with arrows jumping between matches, moving the cursor otherwise
+        // ends the search; without, the search and its highlight stay while
+        // the cursor moves freely (Esc ends it)
+        let moving = matches!(key, Key::ArrowUp | Key::ArrowDown | Key::PageUp | Key::PageDown | Key::Home | Key::End);
+        let jump = matches!(key, Key::ArrowUp | Key::ArrowDown) && (m.ctrl || m.is_none());
+        if moving && !jump && self.cfg.quick_search_arrows {
+            self.act().qs.clear();
+        }
         let digit = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9].iter().position(|&k| k == key);
         if let Some(n) = digit.filter(|_| m.ctrl) {
             return self.command(ctx, if m.shift { Cmd::HotPathSet(n) } else { Cmd::HotPathGo(n) });
@@ -2405,14 +2413,9 @@ impl App {
             }
             (Key::PageUp, ..) => self.act().move_cursor(-page),
             (Key::PageDown, ..) => self.act().move_cursor(page),
-            (Key::Home, ..) => {
-                let p = self.act();
-                p.qs.clear();
-                p.set_cursor(0);
-            }
+            (Key::Home, ..) => self.act().set_cursor(0),
             (Key::End, ..) => {
                 let p = self.act();
-                p.qs.clear();
                 let last = p.entries().len().saturating_sub(1);
                 p.set_cursor(last);
             }
@@ -10149,13 +10152,37 @@ mod tests {
         ui.key(Key::ArrowDown);
         assert!(ui.app.panels[0].qs.is_empty());
 
-        // switched off: an arrow ends the search and moves one row
+        // with them on, Page Down / End end the search
+        ui.key(Key::Home);
+        ui.text("rep");
+        ui.key(Key::End);
+        assert!(ui.app.panels[0].qs.is_empty());
+
+        // switched off: the cursor moves one row at a time, and the search
+        // (its highlight) stays until Esc
         ui.app.cfg.quick_search_arrows = false;
         ui.key(Key::Home);
         ui.text("rep");
         ui.key(Key::ArrowDown);
-        assert!(ui.app.panels[0].qs.is_empty());
         assert_eq!(ui.cursor_name(), "annual.doc");
+        assert_eq!(ui.app.panels[0].qs, "rep");
+        ui.key(Key::ArrowDown);
+        assert_eq!(ui.cursor_name(), "beta.txt");
+        ui.key(Key::End);
+        ui.key(Key::Home);
+        ui.key(Key::PageDown);
+        assert_eq!(ui.app.panels[0].qs, "rep", "kept while the cursor moves");
+        // Ctrl+arrows still jump to a match
+        ui.key(Key::Home);
+        ui.key(Key::ArrowDown);
+        ui.key_mod(Key::ArrowDown, Modifiers::CTRL);
+        assert_eq!(ui.cursor_name(), "Report 2026.xlsx");
+        // typing goes on from where the cursor is
+        ui.text("o");
+        assert_eq!(ui.app.panels[0].qs, "repo");
+        assert_eq!(ui.cursor_name(), "Report 2026.xlsx");
+        ui.key(Key::Escape);
+        assert!(ui.app.panels[0].qs.is_empty());
     }
 
     #[test]
