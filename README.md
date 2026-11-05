@@ -70,6 +70,11 @@ plugins/scp       the SCP plugin (plugins\scp\scp.spl): SSH servers in a panel
   lib.rs          the plugin: the Plugins menu command, forms, file operations
   ssh.rs          the SSH connection (russh): host keys, sign-in, the SCP protocol
   remote.rs       server paths, shell quoting, reading ls output
+plugins/ftp       the FTP / SFTP plugin (plugins\ftp\ftp.spl): FTP, FTPS and SFTP servers in a panel
+  lib.rs          the plugin: the form, signing in, walking folders, the file operations
+  remote.rs       what the protocols share (Remote), server paths, reading MLSD and LIST
+  sftp.rs         SFTP over SSH (russh, russh-sftp): host keys, sign-in
+  ftp.rs          FTP and FTPS (suppaftp, rustls): a few connections per server, certificates
 plugins/search    the search plugin (plugins\search\search.spl): Find files, results windows
 plugins/viewer    the Viewer plugin (plugins\viewer\viewer.spl): F3 text/hex viewer in windows of its own
 plugins/compare   the Compare plugin (plugins\compare\compare.spl): files side by side, folders in both panels
@@ -174,7 +179,19 @@ Archives open as folders in the panel. **Enter** on `archive.zip` shows what is 
 - **Sign-in:** password (servers that ask through keyboard-interactive prompts get it too) or a private key. The last server, port, user and key file are remembered, never a password.
 - **Drive selector:** connected servers are listed under *Connections* in the drive selector (Alt+F1 / Alt+F2), so either panel can open one in its start folder; the selector starts on it while the panel shows that server. Each has a **Disconnect** button there (or press Delete on it).
 - **Disconnecting:** **Plugins → Disconnect from …** lists every open session, one per row (the menu widens to fit), or use the drive selector's Disconnect button; panels go back to the folder they showed before. Quitting the program disconnects too.
-- **Limits:** no SFTP, no saved sites yet, and a lost connection needs a disconnect and a new connection. Panels of a server are refreshed with Ctrl+R, not automatically.
+- **Limits:** no saved sites yet (SFTP and FTP: the FTP / SFTP plugin below), and a lost connection needs a disconnect and a new connection. Panels of a server are refreshed with Ctrl+R, not automatically.
+
+## FTP, FTPS and SFTP servers (the FTP / SFTP plugin)
+
+**Plugins → Connect to FTP or SFTP server…** asks for the protocol (SFTP, FTPS or plain FTP), the server, the port (empty: 22 for SFTP, 21 for FTP), the user name and a password, or for SFTP a private key. The server's files open in the active panel as `sftp://…`, `ftps://…` or `ftp://…`, and everything that works on SCP servers works there: copying in and out, dragging out of the window, deleting, renaming, new folders, viewing and editing, connections in the drive selector, Disconnect.
+
+- **SFTP:** the SFTP subsystem over SSH (`russh`, `russh-sftp`), so nothing needs to be run on the server. Server keys are checked as in the SCP plugin, and keys trusted there or in `%USERPROFILE%\.ssh\known_hosts` are trusted here too.
+- **FTPS:** explicit TLS (`AUTH TLS`, protected data connections) with `rustls`. A certificate a public authority vouches for is accepted; any other is shown with its SHA-256 fingerprint first and remembered in `known_certificates` once trusted; a changed one is refused.
+- **FTP data connections:** *Automatic* (the default) tries passive mode, EPSV then PASV (with the server's own address when PASV names another, as behind NAT), and active mode (PORT/EPRT) when passive doesn't get through; the first way that works is kept for the session, by all connections to the server. *Passive* or *Active* use only that.
+- **FTP:** binary transfers, UTF-8 names; MLSD listings where the server has them, LIST (Unix and DOS forms) otherwise. Up to three connections per server, so browsing doesn't wait for a copy; a connection closed while idle is opened again.
+- **Times:** files keep their times both ways where the protocol allows it (SFTP; FTP with `MFMT`).
+- **The form:** "Sign in with" (password or private key) is for SFTP only and greyed out for FTP, which signs in with the password; "Data connection" is for FTP and FTPS only.
+- **Limits:** no implicit FTPS (port 990); no saved sites.
 
 ## Finding files (the search plugin)
 
@@ -221,7 +238,7 @@ Optional features are plugins: DLLs (`*.spl`) the program doesn't contain. Each 
 - **Viewers and editors:** any plugin can register as the viewer (F3) or editor (F4) of files whose names match its masks (`*.txt;*.log`, or `*` for all). Settings → Viewers and editors offers them as the default viewer or editor, or for a file suffix (see [Viewers and editors](#viewers-and-editors)). Settings → Plugins shows what each plugin views or edits.
 - **Versions of their own:** each plugin has its own version (Settings → Plugins shows it, with the interface it was built for) and its own releases, so a plugin is updated without a new program (see [Updates](#updates)). The program runs plugins built for its interface version or an older one it still supports.
 - **Interface:** the program and a plugin talk only through a C interface (`crates/sal-plugin-api`), so each plugin is built on its own. Each plugin brings its own language files in its `lang` folder (`plugins\7zip\lang\cs.toml`).
-- **Shipped:** the 7-Zip archive plugin, the SCP plugin, the search plugin, the Viewer plugin (the F3 viewer) and the Compare plugin. `plugins/example-filelist` is a small example for plugin authors and isn't installed.
+- **Shipped:** the 7-Zip archive plugin, the SCP plugin, the FTP / SFTP plugin, the search plugin, the Viewer plugin (the F3 viewer) and the Compare plugin. `plugins/example-filelist` is a small example for plugin authors and isn't installed.
 - **Writing a plugin:** see [docs/PLUGINS.md](docs/PLUGINS.md).
 
 ## Portable mode
@@ -235,6 +252,7 @@ lang\en.toml       English UI strings (the template for translations)
 lang\cs.toml       Czech
 plugins\7zip\      the 7-Zip plugin: 7zip.spl and 7z.dll, 7-Zip's archive library
 plugins\scp\       the SCP plugin: scp.spl; known_hosts and the last connection's details
+plugins\ftp\       the FTP / SFTP plugin: ftp.spl; known_hosts, known_certificates and the last connection's details
 plugins\search\    the search plugin
 plugins\viewer\    the Viewer plugin (F3)
 plugins\.updates\  plugin updates downloaded and waiting for the next start
@@ -253,7 +271,9 @@ At start-up the program asks GitHub whether newer releases exist, of the program
 
 **A plugin:** **Update now** downloads it into `plugins\.updates`; it replaces the plugin's files when the program starts again (**Restart now** does that at once). What the plugin saved in its folder stays. A plugin is only offered in a build for an interface version this program has. A plugin release made for other program versions (its notes say which) is shown greyed, with the reason, and can't be installed.
 
-**Update all** appears when more than one update can be installed: it starts all of them at once (not the greyed ones).
+**Update all** appears when more than one update can be installed: it starts all of them at once (not the greyed ones, and no new plugins).
+
+**New official plugins:** the check also reads the list of official plugins (`plugins/official.toml` on the main branch) and offers each one that isn't installed, with a sentence about it: **Install** downloads it like a plugin update, and the next start adds it. A new plugin thus reaches every program as soon as it is released and listed, without a new program. **Don't offer** leaves it out of the check at start (`declined_plugins` in `config.toml`); Help → Check for updates still shows it.
 
 **Plugins for other program versions:** a plugin can say which RustySalamander versions it works with. One made for a newer program, or phased out before this one, isn't loaded; Settings → Plugins lists it with the reason.
 

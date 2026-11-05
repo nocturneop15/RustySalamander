@@ -756,7 +756,7 @@ impl App {
         let languages = time("startup: language list", crate::i18n::available);
         let active = usize::from(cfg.right_active);
         // the headless tests never go online
-        let update_check = (cfg.check_updates && !cfg!(test)).then(|| crate::update::Check::start(ctx, false, update_sources(&plugins)));
+        let update_check = (cfg.check_updates && !cfg!(test)).then(|| crate::update::Check::start(ctx, false, update_sources(&plugins), update_offer(&cfg, false)));
         App {
             cfg,
             update_check,
@@ -1997,7 +1997,7 @@ impl App {
                 Ok(())
             }
             Cmd::CheckUpdates => {
-                self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins)));
+                self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins), update_offer(&self.cfg, true)));
                 Ok(())
             }
             Cmd::Find => match self.plugins.get("search").cloned() {
@@ -3608,8 +3608,13 @@ impl App {
                 let staged = states.iter().any(|s| matches!(s, Some(Progress::Staged)));
                 let ready = startable(rows, &states);
                 let (mut open_page, mut start, mut toggle_log, mut run_new, mut restart) = (None, None, None, None, false);
-                let mut update_all = false;
-                let title = if rows.len() == 1 { tr("Update available") } else { tr("Updates available") };
+                let (mut update_all, mut decline) = (false, None);
+                let title = match (rows.iter().all(|r| r.update.new), rows.len() == 1) {
+                    (true, true) => tr("New plugin available"),
+                    (true, false) => tr("New plugins available"),
+                    (false, true) => tr("Update available"),
+                    (false, false) => tr("Updates available"),
+                };
                 dw.modal().show(ctx, &mut self.dialog_places, "update", title, 560.0, &mut enter, &mut escape, &mut |ui| {
                     for (i, (row, state)) in rows.iter().zip(&states).enumerate() {
                         let u = &row.update;
@@ -3617,11 +3622,18 @@ impl App {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(u.name()).strong());
-                                ui.label(trf("{current} → {new}", &[("current", &u.current), ("new", &u.release.version)]));
+                                if u.new {
+                                    ui.label(trf("new plugin, version {new}", &[("new", &u.release.version)]));
+                                } else {
+                                    ui.label(trf("{current} → {new}", &[("current", &u.current), ("new", &u.release.version)]));
+                                }
                                 if ui.link(tr("Release page")).on_hover_text(u.release.page.as_str()).clicked() {
                                     open_page = Some(u.release.page.clone());
                                 }
                             });
+                            if !u.about.is_empty() {
+                                ui.label(u.about.as_str());
+                            }
                             let plugin = matches!(u.target, Target::Plugin { .. });
                             // a plugin made for other program versions is shown, greyed
                             let fits = u.fits();
@@ -3635,6 +3647,9 @@ impl App {
                                         if ui.add_enabled(!running && fits.is_ok(), egui::Button::new(action)).clicked() {
                                             start = Some(i);
                                         }
+                                        if u.new && ui.button(tr("Don't offer")).on_hover_text(tr("Not offered again when RustySalamander starts; Help → Check for updates still shows it")).clicked() {
+                                            decline = Some(i);
+                                        }
                                     }
                                 });
                             };
@@ -3642,6 +3657,8 @@ impl App {
                                 None => {
                                     if let Err(why) = &fits {
                                         ui.colored_label(ui.visuals().warn_fg_color, trf("This version can't be installed here: it {why}.", &[("why", why)]));
+                                    } else if u.new {
+                                        ui.label(tr("Install downloads it; it is added when RustySalamander starts again."));
                                     } else if plugin {
                                         ui.label(tr("Update now downloads it; it is installed when RustySalamander starts again. What the plugin saved stays."));
                                     } else {
@@ -3651,7 +3668,7 @@ impl App {
                                             &[("folder", &folder)],
                                         ));
                                     }
-                                    offer(ui, Some(tr("Update now")));
+                                    offer(ui, Some(if u.new { tr("Install") } else { tr("Update now") }));
                                 }
                                 Some(Progress::Downloading { done, total }) => {
                                     ui.label(trf("Downloading… {done} of {total}", &[("done", &format_size(*done)), ("total", &format_size(*total))]));
@@ -3749,7 +3766,18 @@ impl App {
                         self.error(format!("{page}: {e}"));
                     }
                 }
-                if let Some(i) = toggle_log {
+                if let Some(i) = decline {
+                    if let Target::Plugin { id, .. } = &rows[i].update.target {
+                        if !self.cfg.declined_plugins.contains(id) {
+                            self.cfg.declined_plugins.push(id.clone());
+                        }
+                    }
+                    rows.remove(i);
+                    if rows.is_empty() {
+                        outcome = 2;
+                    }
+                }
+                if let Some(i) = toggle_log.filter(|&i| i < rows.len()) {
                     let row = &mut rows[i];
                     row.show_log = !row.show_log;
                     if row.changelog.is_none() {
@@ -3757,7 +3785,13 @@ impl App {
                     }
                 }
                 let to_start: Vec<usize> = if update_all { ready } else { start.into_iter().collect() };
+                // nothing starts in the frame a row was taken away (the indexes moved)
+                let to_start = if decline.is_some() { Vec::new() } else { to_start };
                 for i in to_start {
+                    // installing one turned down before offers it again
+                    if let Target::Plugin { id, .. } = &rows[i].update.target {
+                        self.cfg.declined_plugins.retain(|d| d != id);
+                    }
                     if rows[i].update.target == Target::Program {
                         // the settings as they are now go to the new version
                         self.save_config();
@@ -4385,7 +4419,7 @@ impl App {
                     self.apply_plugins();
                 }
                 if check_now {
-                    self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins)));
+                    self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins), update_offer(&self.cfg, true)));
                 }
                 if fonts_changed {
                     crate::fonts::install(ctx, &self.cfg.ui_font, &self.cfg.mono_font);
@@ -5317,11 +5351,12 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
     let gap = layout::FORM_SPACING.x;
     let row_h = ui.spacing().interact_size.y;
     ui.spacing_mut().item_spacing.y = layout::FORM_SPACING.y;
+    let enabled_fields = sal_plugin_api::ui::enabled_fields(&form.fields, values);
     for f in &form.fields {
         if f.kind == FieldKind::Hidden {
             continue;
         }
-        let enabled = f.enabled_if.as_ref().is_none_or(|(id, v)| values.get(id) == Some(v));
+        let enabled = enabled_fields.get(&f.id).copied().unwrap_or(true);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             let label = if matches!(f.kind, FieldKind::Note | FieldKind::Check) { "" } else { f.label.as_str() };
@@ -5354,8 +5389,11 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
                         }
                     }
                     FieldKind::Choice(options) => {
+                        // a disabled choice shows its first option, as it counts as that
+                        // (the pick stays, for when it is enabled again)
+                        let shown = if enabled { value.as_str() } else { options.first().map_or("", |(v, _)| v.as_str()) }.to_owned();
                         for (v, label) in options {
-                            if ui.radio(value == v, label.as_str()).clicked() {
+                            if ui.radio(shown == *v, label.as_str()).clicked() {
                                 *value = v.clone();
                             }
                         }
@@ -5484,14 +5522,15 @@ fn strip_color(v: &egui::Visuals) -> Color32 {
 /// How many search results a session keeps; the oldest are closed.
 const MAX_RESULTS: usize = 10;
 
-/// The updates that can be installed now: not started (or failed), and made
-/// for this program.
+/// The updates that Update all installs now: not started (or failed), made
+/// for this program, and of something installed (a new plugin only on its
+/// own Install).
 fn startable(rows: &[UpdateRow], states: &[Option<crate::update::Progress>]) -> Vec<usize> {
     use crate::update::Progress;
     rows.iter()
         .zip(states)
         .enumerate()
-        .filter(|(_, (row, state))| row.update.fits().is_ok() && matches!(state, None | Some(Progress::Failed(_))))
+        .filter(|(_, (row, state))| !row.update.new && row.update.fits().is_ok() && matches!(state, None | Some(Progress::Failed(_))))
         .map(|(i, _)| i)
         .collect()
 }
@@ -5512,6 +5551,13 @@ fn update_sources(plugins: &Plugins) -> Vec<crate::update::PluginSource> {
             })
         })
         .collect()
+}
+
+/// The official plugins the check offers when they aren't installed: all of
+/// them when asked for from the menu, else those not turned down.
+fn update_offer(cfg: &Config, manual: bool) -> Option<crate::update::Offer> {
+    let lang = if cfg.language.is_empty() { crate::i18n::system_language() } else { cfg.language.clone() };
+    Some(crate::update::Offer { plugins: plugins::plugins_dir()?, lang, declined: if manual { Vec::new() } else { cfg.declined_plugins.clone() } })
 }
 
 /// A changelog's Markdown, simply: `##` and `###` headings, `-` bullets,
@@ -8669,6 +8715,18 @@ mod tests {
         assert_eq!(ui.app.panels[0].path(), sub.as_path());
     }
 
+    /// The middle of the text `text` as last drawn.
+    fn text_pos(ui: &Ui, text: &str) -> Option<egui::Pos2> {
+        fn find(shape: &egui::Shape, text: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos + t.galley.rect.center().to_vec2()),
+                egui::Shape::Vec(v) => v.iter().find_map(|s| find(s, text)),
+                _ => None,
+            }
+        }
+        ui.last.as_ref()?.shapes.iter().find_map(|c| find(&c.shape, text))
+    }
+
     fn click(ui: &mut Ui, pos: egui::Pos2) {
         ui.run(vec![Event::PointerMoved(pos)], Modifiers::NONE);
         let button = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
@@ -9357,6 +9415,8 @@ mod tests {
         let program = Update {
             target: Target::Program,
             current: "0.4.1-alpha".into(),
+            new: false,
+            about: String::new(),
             release: release("0.5.0-alpha", "v0.5.0-alpha", "RustySalamander-0.5.0-alpha-win64.zip"),
             repo: crate::update::REPO.into(),
             changelog: "CHANGELOG.md".into(),
@@ -9364,6 +9424,8 @@ mod tests {
         let plugin = Update {
             target: Target::Plugin { id: "viewer".into(), name: "Viewer".into(), dir: t.path().join("plugins").join("viewer") },
             current: "0.5.0-alpha".into(),
+            new: false,
+            about: String::new(),
             release: release("0.6.0-alpha", "viewer-v0.6.0-alpha", "viewer-0.6.0-alpha-api5.zip"),
             repo: crate::update::REPO.into(),
             changelog: "plugins/viewer/CHANGELOG.md".into(),
@@ -9410,9 +9472,19 @@ mod tests {
         let mut scp = plugin.clone();
         scp.target = Target::Plugin { id: "scp".into(), name: "SCP".into(), dir: t.path().join("plugins").join("scp") };
         assert!(newer.fits().unwrap_err().contains("99.0.0"));
-        let rows = vec![UpdateRow::new(program.clone()), UpdateRow::new(plugin.clone()), UpdateRow::new(newer), UpdateRow::new(scp)];
-        let states = [None, Some(Progress::Staged), None, Some(Progress::Failed("offline".into()))];
-        assert_eq!(startable(&rows, &states), [0, 3], "not the staged one, not the one for a newer program; a failed one again");
+        // an official plugin not installed yet: offered, but only on its own Install
+        let ftp = Update {
+            target: Target::Plugin { id: "ftp".into(), name: "FTP / SFTP".into(), dir: t.path().join("plugins").join("ftp") },
+            current: String::new(),
+            new: true,
+            about: "Connects to FTP, FTPS and SFTP servers and works with their files.".into(),
+            release: release("0.1.0-alpha", "ftp-v0.1.0-alpha", "ftp-0.1.0-alpha-api8.zip"),
+            repo: crate::update::REPO.into(),
+            changelog: "plugins/ftp/CHANGELOG.md".into(),
+        };
+        let rows = vec![UpdateRow::new(program.clone()), UpdateRow::new(plugin.clone()), UpdateRow::new(newer), UpdateRow::new(scp), UpdateRow::new(ftp.clone())];
+        let states = [None, Some(Progress::Staged), None, Some(Progress::Failed("offline".into())), None];
+        assert_eq!(startable(&rows, &states), [0, 3], "not the staged one, not the one for a newer program, not a new plugin; a failed one again");
         ui.app.dialog = Dialog::Update { rows };
         ui.frames(4);
         if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
@@ -9421,6 +9493,22 @@ mod tests {
             ui.snap.render(&ui.ctx, out, bg, &dir.join("update_all.png"));
         }
         ui.app.dialog = Dialog::None;
+        // a new plugin alone; Don't offer remembers it and closes the window
+        ui.app.dialog = Dialog::Update { rows: vec![UpdateRow::new(ftp)] };
+        ui.frames(4);
+        if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {
+            let bg = ui.ctx.style().visuals.panel_fill;
+            let out = ui.last.take().unwrap();
+            ui.snap.render(&ui.ctx, out, bg, &dir.join("update_new_plugin.png"));
+        }
+        ui.frames(2);
+        let button = text_pos(&ui, "Don't offer").expect("the Don't offer button");
+        click(&mut ui, button);
+        ui.frames(3);
+        assert!(matches!(ui.app.dialog, Dialog::None), "closed: nothing left to offer");
+        assert_eq!(ui.app.cfg.declined_plugins, ["ftp"]);
+        assert!(update_offer(&ui.app.cfg, false).is_none_or(|o| o.declined == ["ftp"]));
+        assert!(update_offer(&ui.app.cfg, true).is_none_or(|o| o.declined.is_empty()), "a check from the menu shows it");
         // the changelog's text, as laid out
         let job = inline_markdown(&egui::Ui::new(ui.ctx.clone(), egui::LayerId::background(), egui::Id::new("t"), egui::UiBuilder::new()), "a **b** `c` d");
         let parts: Vec<&str> = job.sections.iter().map(|s| &job.text[s.byte_range.clone()]).collect();
@@ -10015,6 +10103,24 @@ mod tests {
         ui.frames(25);
         let out = ui.last.take().unwrap();
         ui.snap.render(&ui.ctx, out, bg, &out_dir.join("search_form.png"));
+        // the FTP / SFTP plugin's form
+        ui.app.dialog = Dialog::None;
+        ui.frames(3);
+        let Some(ftp) = found.get("ftp").cloned() else { return };
+        ui.screen = egui::vec2(1100.0, 760.0);
+        ui.app.run_plugin_command(&ctx, ftp, "connect".into(), plugins::Values::new());
+        wait_plugin(&mut ui);
+        ui.frames(25);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("ftp_form.png"));
+        // FTP picked after a private key: what doesn't apply is greyed out
+        if let Dialog::PluginForm { values, .. } = &mut ui.app.dialog {
+            values.insert("protocol".into(), "ftp".into());
+            values.insert("auth".into(), "key".into());
+        }
+        ui.frames(5);
+        let out = ui.last.take().unwrap();
+        ui.snap.render(&ui.ctx, out, bg, &out_dir.join("ftp_form_ftp.png"));
     }
 
     /// The operations window (a paused copy and two queued operations) and a

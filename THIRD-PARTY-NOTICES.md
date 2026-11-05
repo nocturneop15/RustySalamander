@@ -4,7 +4,7 @@ RustySalamander is licensed under the GNU General Public License, version 2 or (
 
 ## Open Salamander
 
-RustySalamander is a rewrite of [Open Salamander](https://github.com/OpenSalamander/salamander) (GPL-2.0-or-later). Its behaviour (keyboard model, mask syntax, sort order, file operations) follows the original, and parts are ports of its C++ code: from `masks.cpp`, the mask syntax, renaming by mask and preparing a quick search; from `sort.cpp`, comparing numbers in names by value (used where Windows doesn't sort the names). Open Salamander is the work of its authors; see the AUTHORS file in its repository.
+RustySalamander is a file manager of its own, inspired by Altap Salamander, whose source is published as [Open Salamander](https://github.com/OpenSalamander/salamander) (GPL-2.0-or-later). Much of its behaviour (keyboard model, mask syntax, sort order, file operations) follows Salamander's, and a few parts are ports of Open Salamander's C++ code: from `masks.cpp`, the mask syntax, renaming by mask and preparing a quick search; from `sort.cpp`, comparing numbers in names by value (used where Windows doesn't sort the names). Open Salamander is the work of its authors; see the AUTHORS file in its repository.
 
 ## 7-Zip (the 7-Zip plugin)
 
@@ -21,6 +21,10 @@ The full terms are in `third_party/7zip-26.05/DOC/License.txt` and `DOC/unRarLic
 ## The SCP plugin
 
 The SCP plugin (`plugins\scp`) contains russh (Apache-2.0), its key handling (ssh-key, MIT or Apache-2.0), tokio (MIT), and ring for cryptography (ISC-style and Apache-2.0 licenses, with parts from BoringSSL). They are listed in `Cargo.lock` like the program's own crates.
+
+## The FTP / SFTP plugin
+
+The FTP / SFTP plugin (`plugins\ftp`) contains the same SSH crates as the SCP plugin, with russh-sftp (Apache-2.0) for SFTP; suppaftp (MIT or Apache-2.0) for FTP; rustls (Apache-2.0, ISC or MIT) and rustls-webpki (ISC) for TLS; sha2 (MIT or Apache-2.0); and webpki-roots, Mozilla's list of trusted certification authorities as data (CDLA-Permissive-2.0, <https://cdla.dev/permissive-2-0/>), which checks FTPS certificates.
 
 ## The Viewer plugin's syntax highlighting
 

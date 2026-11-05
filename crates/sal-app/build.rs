@@ -12,6 +12,7 @@
 //! - The search plugin (`plugins/search`) goes to `plugins\search\search.spl`.
 //! - The viewer plugin (`plugins/viewer`) goes to `plugins\viewer\viewer.spl`.
 //! - The compare plugin (`plugins/compare`) goes to `plugins\compare\compare.spl`.
+//! - The FTP / SFTP plugin (`plugins/ftp`) goes to `plugins\ftp\ftp.spl`.
 //!
 //! On Windows it also puts the program's icon (`res/rustysalamander.ico`)
 //! and version information into the exe, with `windres` from the MinGW
@@ -56,6 +57,9 @@ fn main() {
     }
     if let Err(e) = install_plugin(manifest, profile_dir, "sal-plugin-compare", "compare", "compare") {
         println!("cargo:warning=the compare plugin was not built: {e}");
+    }
+    if let Err(e) = install_plugin(manifest, profile_dir, "sal-plugin-ftp", "ftp", "ftp") {
+        println!("cargo:warning=the FTP / SFTP plugin was not built: {e}");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         if let Err(e) = exe_resources(manifest, &out) {

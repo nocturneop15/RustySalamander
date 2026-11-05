@@ -241,6 +241,9 @@ pub struct Config {
     pub hot_paths: Vec<String>,
     /// Look for a new release on GitHub when the program starts.
     pub check_updates: bool,
+    /// Official plugins the user doesn't want offered when the program
+    /// starts (by id); Help → Check for updates still shows them.
+    pub declined_plugins: Vec<String>,
     /// How Copy (F5) starts: what its dialog offers each time.
     pub copy_defaults: TransferDefaults,
     /// How Move (F6) starts: what its dialog offers each time.
@@ -315,6 +318,7 @@ impl Default for Config {
             root_shortcut: None,
             hot_paths: vec![String::new(); 10],
             check_updates: true,
+            declined_plugins: Vec::new(),
             copy_defaults: TransferDefaults::default(),
             move_defaults: TransferDefaults::default(),
         }

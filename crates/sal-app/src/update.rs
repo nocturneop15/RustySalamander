@@ -11,6 +11,12 @@
 //!   `<id>-<version>-api<interface>.zip`, offered only for an interface
 //!   version this program has.
 //!
+//! **Official plugins not installed yet** are offered too: the list of them,
+//! [`OFFICIAL`] in the program's repository, is read from its main branch
+//! at each check, so a new plugin reaches every program as soon as it is
+//! on the list and released, without a new program. A plugin the user
+//! turned down ([`Offer::declined`]) isn't offered by the check at start.
+//!
 //! The changelog of an update is read from the repository at the release's
 //! tag: the sections between the installed version and the new one.
 //!
@@ -44,6 +50,54 @@ pub const REPO: &str = "nocturneop15/RustySalamander";
 /// The folder in `plugins` where downloaded plugin updates wait for the
 /// next start.
 pub const STAGED: &str = ".updates";
+
+/// The list of official plugins, in [`REPO`] on its main branch.
+pub const OFFICIAL: &str = "plugins/official.toml";
+
+/// An official plugin, as [`OFFICIAL`] describes it.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Official {
+    /// Its id, which is also its folder in `plugins` ("ftp").
+    pub id: String,
+    /// What the tags of its releases start with ("ftp-v").
+    pub tag: String,
+    /// Its changelog's path in the repository.
+    #[serde(default)]
+    pub changelog: String,
+    /// Its name and a sentence about it, by language code ("en", "cs").
+    pub name: BTreeMap<String, String>,
+    #[serde(default)]
+    pub description: BTreeMap<String, String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OfficialList {
+    #[serde(default)]
+    plugin: Vec<Official>,
+}
+
+/// The official plugins in the text of [`OFFICIAL`]; ids that can't be a
+/// folder name are left out.
+pub fn parse_official(text: &str) -> Result<Vec<Official>, String> {
+    let list: OfficialList = toml::from_str(text).map_err(|e| format!("{OFFICIAL}: {e}"))?;
+    Ok(list.plugin.into_iter().filter(|p| !p.id.is_empty() && p.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')).collect())
+}
+
+/// The text for the language `lang`, else English, else any.
+fn in_language(texts: &BTreeMap<String, String>, lang: &str) -> String {
+    texts.get(lang).or_else(|| texts.get("en")).or_else(|| texts.values().next()).cloned().unwrap_or_default()
+}
+
+/// What the check offers besides updates: the official plugins that aren't
+/// in `plugins` (the plugins folder) yet, named in `lang`, except those in
+/// `declined`.
+#[derive(Debug, Clone, Default)]
+pub struct Offer {
+    pub plugins: PathBuf,
+    pub lang: String,
+    /// Plugins the user turned down (by id).
+    pub declined: Vec<String>,
+}
 
 /// A release newer than what is installed.
 #[derive(Debug, Clone, PartialEq)]
@@ -92,12 +146,17 @@ pub enum Target {
     Plugin { id: String, name: String, dir: PathBuf },
 }
 
-/// Something installed that has a newer release.
+/// Something installed that has a newer release, or an official plugin
+/// not installed yet ([`Update::new`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Update {
     pub target: Target,
-    /// The version installed.
+    /// The version installed; empty for a new plugin.
     pub current: String,
+    /// A plugin not installed yet, offered from the official list.
+    pub new: bool,
+    /// What a new plugin does (from the official list); empty otherwise.
+    pub about: String,
     pub release: Release,
     /// The repository, and the changelog's path in it ("" for none).
     pub repo: String,
@@ -144,12 +203,13 @@ pub struct Check {
 }
 
 impl Check {
-    /// Look for updates of the program and of `plugins` on a thread.
-    pub fn start(ctx: &egui::Context, manual: bool, plugins: Vec<PluginSource>) -> Check {
+    /// Look for updates of the program and of `plugins`, and for the
+    /// official plugins `offer` says, on a thread.
+    pub fn start(ctx: &egui::Context, manual: bool, plugins: Vec<PluginSource>, offer: Option<Offer>) -> Check {
         let result = Arc::new(Mutex::new(None));
         let (out, ctx) = (result.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let r = check(&plugins, &mut |repo| releases(repo));
+            let r = check(&plugins, offer.as_ref(), &mut |repo| releases(repo), &mut official_list);
             crate::debuglog::write(format!("update check: {r:?}"));
             *out.lock().unwrap() = Some(r);
             ctx.request_repaint();
@@ -174,18 +234,44 @@ fn releases(repo: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
-/// Look for updates of the program and of `plugins`; `list` fetches the
-/// release list of a repository (once per repository). A repository that
-/// can't be read leaves its plugins out; only when nothing could be checked
-/// is that an error.
-pub fn check(plugins: &[PluginSource], list: &mut dyn FnMut(&str) -> Result<String, String>) -> CheckResult {
+/// The text of [`OFFICIAL`] on the main branch.
+fn official_list() -> Result<String, String> {
+    let url = format!("https://raw.githubusercontent.com/{REPO}/main/{OFFICIAL}");
+    let mut body = Vec::new();
+    http_get(&url, "text/plain", &mut |chunk, _| {
+        body.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// Look for updates of the program and of `plugins`, and for the official
+/// plugins not installed yet when `offer` is given; `list` fetches the
+/// release list of a repository (once per repository), `official` the list
+/// of official plugins. A repository that can't be read leaves its plugins
+/// out, and an official list that can't be read leaves out new plugins;
+/// only when nothing could be checked is that an error.
+pub fn check(
+    plugins: &[PluginSource],
+    offer: Option<&Offer>,
+    list: &mut dyn FnMut(&str) -> Result<String, String>,
+    official: &mut dyn FnMut() -> Result<String, String>,
+) -> CheckResult {
     let mut lists: BTreeMap<String, Result<String, String>> = BTreeMap::new();
     let mut get = |repo: &str| lists.entry(repo.to_owned()).or_insert_with(|| list(repo)).clone();
     let mut found = Vec::new();
     let program = get(REPO).and_then(|json| newest(&json, "v", env!("CARGO_PKG_VERSION"), &|name| program_zip(name)));
     let mut error = None;
     match program {
-        Ok(Some(release)) => found.push(Update { target: Target::Program, current: env!("CARGO_PKG_VERSION").into(), release, repo: REPO.into(), changelog: "CHANGELOG.md".into() }),
+        Ok(Some(release)) => found.push(Update {
+            target: Target::Program,
+            current: env!("CARGO_PKG_VERSION").into(),
+            new: false,
+            about: String::new(),
+            release,
+            repo: REPO.into(),
+            changelog: "CHANGELOG.md".into(),
+        }),
         Ok(None) => {}
         Err(e) => error = Some(e),
     }
@@ -199,6 +285,8 @@ pub fn check(plugins: &[PluginSource], list: &mut dyn FnMut(&str) -> Result<Stri
                 found.push(Update {
                     target: Target::Plugin { id: p.id.clone(), name: p.name.clone(), dir: p.dir.clone() },
                     current: p.version.clone(),
+                    new: false,
+                    about: String::new(),
                     release,
                     repo: p.source.repo.clone(),
                     changelog: p.source.changelog.clone(),
@@ -209,6 +297,34 @@ pub fn check(plugins: &[PluginSource], list: &mut dyn FnMut(&str) -> Result<Stri
                 crate::debuglog::write(format!("update check of {}: {e}", p.id));
                 error.get_or_insert(e);
             }
+        }
+    }
+    if let Some(offer) = offer {
+        match official().and_then(|text| parse_official(&text)) {
+            Ok(list) => {
+                for o in list {
+                    // installed (loaded or not), waiting for the next start, or turned down
+                    let dir = offer.plugins.join(&o.id);
+                    if plugins.iter().any(|p| p.id == o.id) || dir.exists() || offer.plugins.join(STAGED).join(&o.id).exists() || offer.declined.contains(&o.id) {
+                        continue;
+                    }
+                    let id = o.id.clone();
+                    match get(REPO).and_then(|json| newest(&json, &o.tag, "0.0.0-0", &|name| plugin_zip(&id, name))) {
+                        Ok(Some(release)) => found.push(Update {
+                            target: Target::Plugin { id: o.id.clone(), name: in_language(&o.name, &offer.lang), dir },
+                            current: String::new(),
+                            new: true,
+                            about: in_language(&o.description, &offer.lang),
+                            release,
+                            repo: REPO.into(),
+                            changelog: o.changelog.clone(),
+                        }),
+                        Ok(None) => {}
+                        Err(e) => crate::debuglog::write(format!("update check of the new plugin {id}: {e}")),
+                    }
+                }
+            }
+            Err(e) => crate::debuglog::write(format!("the official plugins: {e}")),
         }
     }
     match error {
@@ -297,7 +413,7 @@ pub fn changelog(ctx: &egui::Context, update: &Update) -> Changelog {
                 body.extend_from_slice(c);
                 Ok(())
             })
-            .map(|()| changes_between(&String::from_utf8_lossy(&body), &u.current, &u.release.version))
+            .map(|()| changes_between(&String::from_utf8_lossy(&body), if u.new { "0.0.0-0" } else { &u.current }, &u.release.version))
         };
         *slot.lock().unwrap() = Some(r);
         ctx.request_repaint();
@@ -771,14 +887,14 @@ mod tests {
             PluginSource { id: "search".into(), name: "Hledání".into(), dir: PathBuf::from(r"C:\rs\plugins\search"), version: "9.0.0".into(), source: source("search-v") },
         ];
         let mut asked = Vec::new();
-        let found = check(&plugins, &mut |repo| {
+        let found = check(&plugins, None, &mut |repo| {
             asked.push(repo.to_owned());
             if repo == REPO {
                 Err("offline".into())
             } else {
                 Ok(json.clone())
             }
-        })
+        }, &mut || unreachable!("no offer, no list"))
         .unwrap();
         assert_eq!(asked, [REPO, "me/rs"], "each repository once");
         assert_eq!(found.len(), 1, "the program's list failed, the search plugin is up to date");
@@ -786,8 +902,118 @@ mod tests {
         assert_eq!((u.name(), u.current.as_str(), u.release.version.as_str(), u.release.tag.as_str()), ("Prohlížeč", "0.5.0", "0.6.0", "viewer-v0.6.0"));
         assert_eq!(u.release.asset, format!("viewer-0.6.0-api{}.zip", abi::VERSION), "not the zip for a newer interface");
         // nothing could be read: an error
-        assert_eq!(check(&plugins, &mut |_| Err("offline".into())).unwrap_err(), "offline");
+        assert_eq!(check(&plugins, None, &mut |_| Err("offline".into()), &mut || Err("offline".into())).unwrap_err(), "offline");
         assert!(!plugin_zip("viewer", "viewer-0.6.0.zip") && !plugin_zip("viewer", "viewerx-0.6.0-api5.zip"));
+    }
+
+    /// Official plugins not installed yet are offered, named in the user's
+    /// language; installed, waiting, turned down or unreleased ones aren't.
+    #[test]
+    fn new_official_plugins() {
+        let json = format!(
+            r#"[
+            {{"tag_name": "ftp-v0.1.0-alpha", "draft": false, "html_url": "f", "body": "<!-- rustysalamander-program: 0.9.2-beta .. -->", "assets": [{{"name": "ftp-0.1.0-alpha-api{now}.zip", "browser_download_url": "fz", "size": 5}}]}},
+            {{"tag_name": "scp-v0.6.0-alpha", "draft": false, "html_url": "s", "assets": [{{"name": "scp-0.6.0-alpha-api{now}.zip", "browser_download_url": "sz", "size": 4}}]}},
+            {{"tag_name": "gone-v1.0.0", "draft": false, "html_url": "g", "assets": [{{"name": "gone-1.0.0-api{now}.zip", "browser_download_url": "gz", "size": 1}}]}},
+            {{"tag_name": "staged-v1.0.0", "draft": false, "html_url": "w", "assets": [{{"name": "staged-1.0.0-api{now}.zip", "browser_download_url": "wz", "size": 1}}]}}
+        ]"#,
+            now = abi::VERSION
+        );
+        let official = r#"
+            # comment
+            [[plugin]]
+            id = "ftp"
+            tag = "ftp-v"
+            changelog = "plugins/ftp/CHANGELOG.md"
+            name = { en = "FTP / SFTP", cs = "FTP / SFTP (cz)" }
+            description = { en = "Servers.", cs = "Servery." }
+
+            [[plugin]]
+            id = "scp"
+            tag = "scp-v"
+            name = { en = "SCP" }
+
+            [[plugin]]
+            id = "unreleased"
+            tag = "unreleased-v"
+            name = { en = "Not yet" }
+
+            [[plugin]]
+            id = "gone"
+            tag = "gone-v"
+            name = { en = "Turned down" }
+
+            [[plugin]]
+            id = "staged"
+            tag = "staged-v"
+            name = { en = "Waiting" }
+
+            [[plugin]]
+            id = "../evil"
+            tag = "evil-v"
+            name = { en = "Evil" }
+        "#;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("plugins");
+        fs::create_dir_all(dir.join(STAGED).join("staged")).unwrap();
+        let scp = PluginSource {
+            id: "scp".into(),
+            name: "SCP".into(),
+            dir: dir.join("scp"),
+            version: "0.6.0-alpha".into(),
+            source: sal_plugin_api::host::Source { repo: REPO.into(), tag: "scp-v".into(), changelog: String::new() },
+        };
+        let offer = Offer { plugins: dir.clone(), lang: "cs".into(), declined: vec!["gone".into()] };
+        let mut lists = 0;
+        let found = check(
+            &[scp],
+            Some(&offer),
+            &mut |_| {
+                lists += 1;
+                Ok(json.clone())
+            },
+            &mut || Ok(official.to_owned()),
+        )
+        .unwrap();
+        assert_eq!(lists, 1, "the repository is read once");
+        assert_eq!(found.len(), 1, "{found:?}");
+        let u = &found[0];
+        assert!(u.new && u.current.is_empty());
+        assert_eq!((u.name(), u.about.as_str(), u.release.version.as_str()), ("FTP / SFTP (cz)", "Servery.", "0.1.0-alpha"));
+        assert_eq!(u.target, Target::Plugin { id: "ftp".into(), name: "FTP / SFTP (cz)".into(), dir: dir.join("ftp") });
+        assert_eq!(u.release.program_min, "0.9.2-beta");
+        // in a language the list lacks: English
+        let en = Offer { lang: "de".into(), ..offer.clone() };
+        let found = check(&[], Some(&en), &mut |_| Ok(json.clone()), &mut || Ok(official.to_owned())).unwrap();
+        assert!(found.iter().any(|u| u.name() == "FTP / SFTP" && u.about == "Servers."));
+        // the list unreadable: updates still come, without new plugins
+        let found = check(&[], Some(&offer), &mut |_| Ok(json.clone()), &mut || Err("offline".into())).unwrap();
+        assert!(found.is_empty());
+        // a plugin folder already there counts as installed
+        fs::create_dir_all(dir.join("ftp")).unwrap();
+        let found = check(&[], Some(&offer), &mut |_| Ok(json.clone()), &mut || Ok(official.to_owned())).unwrap();
+        assert!(!found.iter().any(|u| u.name().starts_with("FTP")));
+        assert!(parse_official("[[plugin]]\nid = 1").is_err());
+    }
+
+    /// The official list in the repository reads, and names every plugin
+    /// published from here, with its tag and changelog as the plugin says.
+    #[test]
+    fn the_official_list_matches_the_plugins() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let list = parse_official(&fs::read_to_string(root.join(OFFICIAL)).unwrap()).unwrap();
+        let mut ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["7zip", "compare", "ftp", "scp", "search", "viewer"]);
+        for p in &list {
+            assert_eq!(p.tag, format!("{}-v", p.id));
+            assert!(root.join(&p.changelog).is_file(), "{}", p.changelog);
+            assert!(!in_language(&p.name, "en").is_empty() && !in_language(&p.description, "en").is_empty(), "{}", p.id);
+            assert!(p.name.contains_key("cs") && p.description.contains_key("cs"), "{} in Czech", p.id);
+            // the plugin's own source says the same
+            let src = fs::read_to_string(root.join(p.changelog.replace("CHANGELOG.md", "src/lib.rs"))).unwrap();
+            assert!(src.contains(&format!("tag: \"{}\", changelog: \"{}\"", p.tag, p.changelog)), "{}", p.id);
+        }
     }
 
     /// A plugin release's notes say which program versions it works with.
@@ -942,6 +1168,11 @@ mod tests {
         };
         let r = newest(&list, "v", "0.0.1", &program_zip).unwrap().expect("a release with a zip");
         assert!(r.asset_size > 1_000_000, "{r:?}");
+        // the official plugins, once the list is on the main branch
+        match official_list().and_then(|t| parse_official(&t)) {
+            Ok(list) => assert!(list.iter().any(|p| p.id == "viewer"), "{list:?}"),
+            Err(e) => eprintln!("the official list can't be read (yet?): {e}"),
+        }
         let mut got = 0u64;
         http_get(&r.asset_url, "application/octet-stream", &mut |c, _| {
             got += c.len() as u64;

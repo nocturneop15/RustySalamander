@@ -1,0 +1,57 @@
+# The official RustySalamander plugins.
+#
+# The program's update check (at start and Help → Check for updates…) reads
+# this file from the main branch of this repository, and offers every plugin
+# listed here that isn't installed yet, from its newest release: tags
+# `<tag><version>` with a zip `<id>-<version>-api<interface>.zip`, like
+# plugin updates. A new plugin thus reaches every program (0.9.2-beta and
+# later) once it is listed here and released, without a new program.
+#
+# - id: the plugin's id, also its folder in `plugins` (lowercase letters,
+#   digits and `-`)
+# - tag: what its release tags start with
+# - changelog: its changelog in this repository, shown before installing
+# - name, description: as shown in the offer, by language code; English is
+#   used for languages not given
+
+[[plugin]]
+id = "7zip"
+tag = "7zip-v"
+changelog = "plugins/sevenzip/CHANGELOG.md"
+name = { en = "7-Zip archives", cs = "Archivy 7-Zip" }
+description = { en = "Opens zip, 7z, rar, tar, gz, iso, cab and other archives as folders, through 7-Zip's library (7z.dll); 7z, zip, tar and wim archives can also be changed.", cs = "Otevírá archivy zip, 7z, rar, tar, gz, iso, cab a další jako složky pomocí knihovny 7-Zip (7z.dll); archivy 7z, zip, tar a wim lze i měnit." }
+
+[[plugin]]
+id = "scp"
+tag = "scp-v"
+changelog = "plugins/scp/CHANGELOG.md"
+name = { en = "SCP (SSH servers)", cs = "SCP (servery SSH)" }
+description = { en = "Connects to servers over SSH and works with their files through the SCP protocol.", cs = "Připojuje se k serverům přes SSH a pracuje s jejich soubory protokolem SCP." }
+
+[[plugin]]
+id = "ftp"
+tag = "ftp-v"
+changelog = "plugins/ftp/CHANGELOG.md"
+name = { en = "FTP / SFTP", cs = "FTP / SFTP" }
+description = { en = "Connects to FTP, FTPS (FTP with TLS) and SFTP (SSH) servers and works with their files.", cs = "Připojuje se k serverům FTP, FTPS (FTP s TLS) a SFTP (SSH) a pracuje s jejich soubory." }
+
+[[plugin]]
+id = "search"
+tag = "search-v"
+changelog = "plugins/search/CHANGELOG.md"
+name = { en = "Search", cs = "Hledání" }
+description = { en = "Finds files and folders by name (wildcards or regular expressions) and by the text inside files.", cs = "Hledá soubory a složky podle názvu (masky nebo regulární výrazy) a podle textu v souborech." }
+
+[[plugin]]
+id = "viewer"
+tag = "viewer-v"
+changelog = "plugins/viewer/CHANGELOG.md"
+name = { en = "Viewer", cs = "Prohlížeč" }
+description = { en = "Shows files as text, in the encoding it detects or one you choose, or as hex (F3).", cs = "Zobrazuje soubory jako text v rozpoznaném nebo zvoleném kódování, nebo šestnáctkově (F3)." }
+
+[[plugin]]
+id = "compare"
+tag = "compare-v"
+changelog = "plugins/compare/CHANGELOG.md"
+name = { en = "Compare", cs = "Porovnat" }
+description = { en = "Compares two files side by side, or two folders in the two panels, with the differences marked.", cs = "Porovná dva soubory vedle sebe, nebo dvě složky v obou panelech, s vyznačenými rozdíly." }

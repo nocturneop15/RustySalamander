@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.2-beta (2026-11-05)
+
+- **FTP, FTPS and SFTP servers:** the new FTP / SFTP plugin (Plugins → Connect to FTP or SFTP server…) opens them in a panel, with everything that works on SCP servers. FTP finds its way to open data connections by itself (passive, or active when passive doesn't get through), or uses the one you choose.
+- **New official plugins are offered:** the update check reads the list of official plugins from the repository and offers the ones you don't have, with what they do: **Install** downloads one, and it is added at the next start, without a new program. **Don't offer** stops the offer at start; Help → Check for updates still shows it.
+- **Plugin forms show only valid choices:** a field can depend on one of several values of another, and a choice that is greyed out counts as its first option, so what depends on it follows. For plugin authors: see "Commands, forms and connections" in `docs/PLUGINS.md`.
+
 ## 0.9.1-beta (2026-11-05)
 
 - **Enter is visible in every question:** the button that Enter presses is lightly tinted with the accent color, in every dialog that asks something (Delete, Copy and Move, new folder, rename, selection masks, plugin forms, messages). In the window about an existing file Enter **skips** it, never overwrites; after an error Enter **retries**.

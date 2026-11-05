@@ -217,7 +217,11 @@ pub struct Field {
     /// The initial value; for [`FieldKind::Check`] `"1"` or `""`.
     pub value: String,
     /// Enabled only while the field with this id has this value (e.g. the
-    /// key file only when the authentication choice is "key").
+    /// key file only when the authentication choice is "key"), or one of
+    /// several separated by `|` (`"ftp|ftps"`; from RustySalamander 0.9.2).
+    /// A choice that is itself disabled counts as its first option (from
+    /// 0.9.2), so fields can depend on each other in a chain: see
+    /// [`enabled_fields`].
     pub enabled_if: Option<(String, String)>,
 }
 
@@ -435,6 +439,40 @@ pub fn mount_value(values: &Values) -> Option<PathBuf> {
     values.get("mount").filter(|m| !m.is_empty()).map(|m| crate::text_path(m))
 }
 
+/// Which fields of a form are enabled with these values, by id.
+///
+/// A field with [`Field::enabled_if`] `(id, value)` is enabled while the
+/// field `id` has `value`, or one of the values separated by `|`. A
+/// [`FieldKind::Choice`] that is disabled counts as its first option, so
+/// that what depends on it follows what the user can still pick: with
+/// "Sign in with" enabled only for one protocol, its fields for a key stay
+/// off for the others even when the key was picked before.
+pub fn enabled_fields(fields: &[Field], values: &Values) -> BTreeMap<String, bool> {
+    let mut enabled: BTreeMap<String, bool> = fields.iter().map(|f| (f.id.clone(), true)).collect();
+    // each round settles one more link of a chain; a loop stops at the limit
+    for _ in 0..=fields.len() {
+        let value_of = |id: &str| -> Option<&str> {
+            let f = fields.iter().find(|f| f.id == id);
+            match f.map(|f| (&f.kind, enabled.get(id).copied().unwrap_or(true))) {
+                Some((FieldKind::Choice(options), false)) => options.first().map(|(v, _)| v.as_str()),
+                _ => values.get(id).map(String::as_str).or(f.map(|f| f.value.as_str())),
+            }
+        };
+        let next: BTreeMap<String, bool> = fields
+            .iter()
+            .map(|f| {
+                let on = f.enabled_if.as_ref().is_none_or(|(id, v)| value_of(id).is_some_and(|have| v.split('|').any(|w| w == have)));
+                (f.id.clone(), on)
+            })
+            .collect();
+        if next == enabled {
+            break;
+        }
+        enabled = next;
+    }
+    enabled
+}
+
 /// The text a path is passed as in [`Values`].
 pub fn path_value(p: &Path) -> String {
     crate::path_text(p)
@@ -443,6 +481,40 @@ pub fn path_value(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fields_enabled_by_others() {
+        let choice = |id: &str, options: &[&str], cond: Option<(&str, &str)>| Field {
+            id: id.into(),
+            kind: FieldKind::Choice(options.iter().map(|o| (o.to_string(), o.to_string())).collect()),
+            enabled_if: cond.map(|(a, b)| (a.into(), b.into())),
+            ..Default::default()
+        };
+        let text = |id: &str, cond: (&str, &str)| Field { id: id.into(), enabled_if: Some((cond.0.into(), cond.1.into())), ..Default::default() };
+        // in an order where the chain must settle over rounds
+        let fields = [
+            text("key", ("auth", "key")),
+            text("password", ("auth", "password")),
+            choice("auth", &["password", "key"], Some(("protocol", "sftp"))),
+            choice("protocol", &["sftp", "ftps", "ftp"], None),
+            text("mode", ("protocol", "ftp|ftps")),
+        ];
+        let on = |pairs: &[(&str, &str)]| {
+            let v: Values = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let e = enabled_fields(&fields, &v);
+            ["key", "password", "auth", "protocol", "mode"].map(|id| e[id])
+        };
+        assert_eq!(on(&[("protocol", "sftp"), ("auth", "key")]), [true, false, true, true, false]);
+        assert_eq!(on(&[("protocol", "sftp"), ("auth", "password")]), [false, true, true, true, false]);
+        // FTP: the sign-in choice is off and counts as "password", whatever was picked
+        assert_eq!(on(&[("protocol", "ftp"), ("auth", "key")]), [false, true, false, true, true]);
+        assert_eq!(on(&[("protocol", "ftps"), ("auth", "key")]), [false, true, false, true, true]);
+        // values not given yet: the fields' own (no protocol: the choice is off)
+        assert_eq!(on(&[]), [false, true, false, true, false]);
+        // a loop doesn't hang
+        let looped = [text("a", ("b", "x")), text("b", ("a", "x"))];
+        let _ = enabled_fields(&looped, &Values::new());
+    }
 
     #[test]
     fn encoding_survives_any_text() {

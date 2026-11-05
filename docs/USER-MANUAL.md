@@ -16,7 +16,7 @@ Version 0.8.4-beta.
 8. [Folder sizes](#8-folder-sizes)
 9. [Viewing and editing files](#9-viewing-and-editing-files)
 10. [Archives (ZIP, 7z, RAR, …)](#10-archives-zip-7z-rar-)
-11. [Servers over SSH (SCP)](#11-servers-over-ssh-scp)
+11. [Servers: SCP, SFTP and FTP](#11-servers-scp-sftp-and-ftp)
 12. [Finding files](#12-finding-files)
 13. [Comparing files and folders](#13-comparing-files-and-folders)
 14. [Plugins](#14-plugins)
@@ -359,9 +359,11 @@ Changing a large archive takes a while, because the whole archive is written aga
 
 ---
 
-## 11. Servers over SSH (SCP)
+## 11. Servers: SCP, SFTP and FTP
 
-Linux, BSD and macOS servers can be opened in a panel over SSH.
+Files on servers open in a panel through two plugins: **SCP** for Linux, BSD and macOS servers over SSH, and **FTP / SFTP** for FTP, FTPS and SFTP servers. Once connected, both work the same way.
+
+### SCP
 
 1. **Plugins → Connect to server…**
 2. Fill in the server, the port (22), the user name, and either a password or a private key file (with its passphrase if it has one).
@@ -374,6 +376,26 @@ You can then copy and move files in and out (F5, F6), delete (F8), rename (F2), 
 - **Getting back to a server:** the drive selector lists open sessions under *Connections*.
 - **Disconnecting:** Plugins → *Disconnect from …*, the **Disconnect** button in the drive selector (or Delete on it), or quitting the program. Panels showing the server go back to where they were.
 - Ctrl+R refreshes a server's folder; it doesn't refresh on its own.
+
+### FTP, FTPS and SFTP
+
+1. **Plugins → Connect to FTP or SFTP server…**
+2. Choose the protocol:
+   - **SFTP (SSH):** file transfer over SSH, which nearly every Linux, BSD and macOS server offers, and many Windows servers too. Sign in with a password or a private key file.
+   - **FTPS (FTP with TLS):** FTP encrypted with TLS (explicit, `AUTH TLS` on the usual port 21).
+   - **FTP (unencrypted):** plain FTP. Everything goes over the network readable, the password too, so use it only where that doesn't matter.
+3. Fill in the server, the user name and the password. Leave the port empty for the protocol's usual one (22 for SFTP, 21 for FTP and FTPS). `user@server:port` typed as the server works too. With FTP, an empty user name signs in as *anonymous*.
+   - **Sign in with** (SFTP only): the password, or a private key file with its passphrase. FTP and FTPS always sign in with the password, so the choice is greyed out for them.
+   - **Data connection** (FTP and FTPS only): how files and listings travel. **Automatic** tries passive mode first and active mode when passive doesn't get through; **Passive** (the computer connects to the server, which works through most firewalls and home routers) and **Active** (the server connects back to the computer) use only that one.
+4. The server's files open in the active panel, in the folder the server starts you in: `sftp://user@server/home/user`, `ftps://…` or `ftp://…`.
+
+Copying and moving in and out, deleting, renaming, new folders, viewing, editing and drag and drop work as on SCP servers, with the same progress window. Files keep their times both ways where the server allows it (SFTP always; FTP servers that offer `MFMT`).
+
+- **SFTP server keys:** checked as with SCP. Keys you trusted in the SCP plugin or in `%USERPROFILE%\.ssh\known_hosts` are trusted here too.
+- **FTPS certificates:** a certificate a public certification authority vouches for, for that server's name, is accepted at once. Any other (self-signed, issued for another name, expired) is shown with its SHA-256 fingerprint for you to confirm, and is remembered after that. If a server's certificate later changes to another one no authority vouches for, the connection is refused with a warning.
+- **Data connections, in detail:** passive mode asks with EPSV first and with PASV when the server doesn't know EPSV; when PASV names an address other than the server's (a server behind NAT), the server's own address is used. The first way that works is used for the rest of the session. Active mode needs this computer to accept the server's connection: Windows Firewall may ask once whether RustySalamander may do that.
+- **Several transfers at once:** an FTP connection does one thing at a time, so the plugin opens up to three to a server: you can browse while a copy runs. A connection the server closed while idle is opened again without asking.
+- **Remembered:** the last protocol, server, port, user, key file and data connection mode, never the password.
 
 ---
 
@@ -441,6 +463,7 @@ When the program starts, it checks GitHub for newer versions of itself and of it
 - **Update now** for a plugin downloads it; it is installed at the next start (**Restart now** does it at once).
 - **Update all** installs every available update.
 - An update made for a different program version is shown greyed, with the reason.
+- **New plugins:** official plugins you don't have yet are offered in the same window, with what they do. **Install** downloads one; it is added at the next start (**Restart now** does it at once). **Don't offer** stops offering it when the program starts; Help → Check for updates still shows it. **Update all** doesn't install new plugins: only **Install** does.
 
 **Help → Check for updates…** checks at any time. Settings → General → Updates turns the check at start-up off.
 
@@ -662,7 +685,8 @@ Everything is in the program's folder:
 | `config.toml` | All settings, keys, hot paths, remembered paths; written when you exit |
 | `lang\` | Languages (`en.toml`, `cs.toml`) |
 | `plugins\<name>\` | Each plugin, with its own languages and changelog |
-| `plugins\scp\known_hosts` | The server keys you trusted |
+| `plugins\scp\known_hosts` | The server keys you trusted (SCP) |
+| `plugins\ftp\known_hosts`, `known_certificates` | The SFTP server keys and FTPS certificates you trusted |
 | `plugins\.updates\` | Plugin updates waiting for the next start |
 
 - If the program's folder can't be written to (for example under `Program Files`), settings go to `%APPDATA%\RustySalamander\config.toml`.

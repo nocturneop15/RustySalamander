@@ -1,0 +1,31 @@
+[package]
+name = "sal-plugin-ftp"
+description = "RustySalamander plugin: files on FTP, FTPS and SFTP servers"
+# the plugin's own version, apart from the program's
+version = "0.1.0-alpha"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# A DLL the program loads from plugins\ftp\ftp.spl (sal-app's build puts it there).
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sal-plugin-api = { path = "../../crates/sal-plugin-api" }
+# SFTP: pure-Rust SSH (ring instead of aws-lc-rs, which would need cmake and nasm) and its SFTP client
+russh = { version = "0.63", default-features = false, features = ["ring", "rsa", "flate2"] }
+russh-sftp = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "io-util", "fs"] }
+# FTP and FTPS: blocking client, TLS through rustls with ring
+suppaftp = { version = "12", default-features = false, features = ["rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["process", "net"] }
+# the test FTPS server's certificate
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

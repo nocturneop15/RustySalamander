@@ -285,7 +285,7 @@ An error from `run` is shown as a message, except `Interrupted`.
 | `Note` | text to read (`label`), no input | — |
 | `Hidden` | nothing | passed back unchanged |
 
-`enabled_if: Some((id, value))` greys a field out unless another field has that value. For example, the SCP plugin enables its key file only when "Private key" is chosen. `Hidden` fields carry state from one form to the next. The SCP plugin's "unknown server" question carries everything entered before, plus the fingerprint the user is asked to accept.
+`enabled_if: Some((id, value))` greys a field out unless another field has that value. For example, the SCP plugin enables its key file only when "Private key" is chosen. From RustySalamander 0.9.2, `value` can list several values separated by `|` (`"ftp|ftps"`), and a `Choice` that is greyed out counts as its first option for the fields that depend on it, so conditions chain: the FTP / SFTP plugin enables "Sign in with" only for SFTP, and its key fields (enabled when it is "key") stay off for FTP even when the key was picked before, while the password field (enabled when it is "password") stays on. A greyed-out choice shows its first option; the value the user picked stays in the values `run` gets, so check what applies there too. `sal_plugin_api::ui::enabled_fields` tells which fields are enabled, the same way the program does. Plugins that use these need `PROGRAM_MIN` 0.9.2-beta: older programs compare `value` as one whole text. `Hidden` fields carry state from one form to the next. The SCP plugin's "unknown server" question carries everything entered before, plus the fingerprint the user is asked to accept.
 
 **Values.** `run` gets the form's values by field id, plus some that the program adds:
 
@@ -359,6 +359,8 @@ A plugin has its **own version** (`Plugin::VERSION`), apart from the program's, 
 **Its notes** say which program versions it works with, so the update check knows before downloading: a line `<!-- rustysalamander-program: <PROGRAM_MIN> .. <PROGRAM_MAX> -->` (either side empty for no limit; no line, no limit). An update the running program is outside of is shown greyed, with the reason, and isn't installed by Update all.
 
 **Installing:** the zip is unpacked into `plugins\.updates\<folder>`, and the next start copies it over the plugin's folder before the plugins are loaded (the DLL is in use while the program runs). Files the plugin saved in its folder stay.
+
+**Official plugins** are listed in `plugins/official.toml` in this repository: id, tag, changelog, and the name and a sentence about it per language. The update check (from RustySalamander 0.9.2-beta) reads that file from the main branch and offers each listed plugin that isn't installed, from its newest release, as a **new plugin**: Install stages it like an update, and the next start adds it. So a new official plugin reaches programs already out there by being released and added to the list; no new program is needed. The user can turn an offer down (**Don't offer**, kept as `declined_plugins` in `config.toml`); the check at start then leaves it out, and Help → Check for updates still shows it. A plugin folder that is there, loaded or not, counts as installed. A test (`the_official_list_matches_the_plugins`) checks the list against the plugins' own `UPDATES`.
 
 ## Errors, progress and cancelling
 
