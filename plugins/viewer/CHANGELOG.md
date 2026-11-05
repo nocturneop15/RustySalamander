@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.6.3-alpha (2026-11-05)
+
+- **Opens on the program's monitor:** the Viewer's window appears over RustySalamander's window, on the same monitor, each next one a little lower and to the right (with RustySalamander 0.9.1-beta and later; before, it opened where Windows put it). Built for plugin interface 8.
+
 ## 0.6.2-alpha (2026-11-03)
 
 - **The program's spacing:** the toolbar, the find bar and the text use the same margins, button padding and control height as RustySalamander's own windows, and the text starts at the same edge as the toolbar's buttons.

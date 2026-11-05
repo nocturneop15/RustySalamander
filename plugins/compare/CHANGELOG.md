@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.4-alpha (2026-11-05)
+
+- **Opens on the program's monitor:** the comparison window appears over RustySalamander's window, on the same monitor (with RustySalamander 0.9.1-beta and later; before, it opened where Windows put it). Built for plugin interface 8.
+
 ## 0.1.3-alpha (2026-11-03)
 
 - **The program's spacing:** the toolbar has room around its buttons and the same margins and control height as the Viewer's and the program's windows; the texts start at the same edge as the toolbar.

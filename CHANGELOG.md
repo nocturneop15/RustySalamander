@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1-beta (2026-11-05)
+
+- **Enter is visible in every question:** the button that Enter presses is lightly tinted with the accent color, in every dialog that asks something (Delete, Copy and Move, new folder, rename, selection masks, plugin forms, messages). In the window about an existing file Enter **skips** it, never overwrites; after an error Enter **retries**.
+- **Quick search stays while you move:** with *Arrows jump between matches* turned off (Settings → General → Panels), moving the cursor with the arrows, PgUp, PgDn, Home or End keeps the quick search and its highlight; Ctrl+arrows still jump between matches and typing goes on from the cursor.
+- **Plugin windows open on the program's monitor:** the Viewer, Compare and other plugin windows appear over RustySalamander's window, on the same monitor, each next one a little lower and to the right. Viewer 0.6.3-alpha and Compare 0.1.4-alpha are bundled.
+- **New description:** RustySalamander is a modern file manager for Windows, inspired by the long-proven efficiency and functionality of Altap Salamander (README, About, manual).
+- **For plugin authors:** the program sends `owner` (its window handle) to plugin windows and commands; `sal_ui::layout::buttons` takes the index of the default button. See `docs/PLUGINS.md`.
+
 ## 0.9.0-beta (2026-11-04)
 
 - **Real files from plugin panels:** in search results and compared folders, **Ctrl+C** and **Ctrl+X** put the files on disk on the clipboard, **dragging out of the window** gives them to Explorer or any program, and the **context menu** (right-click, Shift+F10) and **Properties** are those of the real files, even when they come from many folders. **Copy full paths** copies their real paths instead of the plugin's.
