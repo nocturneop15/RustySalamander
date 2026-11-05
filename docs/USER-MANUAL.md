@@ -265,9 +265,9 @@ Copy, move and delete run in the background. You can keep working in the panels 
 
 **In the background:** *Run in background*, Esc or the window's close button hides the window; the operations go on and the status bar shows their progress. Click the status bar to bring the window back.
 
-**When a file already exists** at the target, a window shows both side by side (name, folder, size, date; the larger and the newer one marked) and asks what to do: **Overwrite**, **Overwrite All**, **Skip**, **Skip All** or **Cancel**.
+**When a file already exists** at the target, a window shows both side by side (name, folder, size, date; the larger and the newer one marked) and asks what to do: **Overwrite**, **Overwrite All**, **Skip**, **Skip All** or **Cancel**. Enter skips (nothing is overwritten by accident).
 
-**When something fails** (access denied, file in use, a copy that fails its safe-copy check), you get **Retry**, **Skip**, **Skip All** or **Cancel**. These questions appear also while the window is hidden: the window comes back with the question, and goes away again once you have answered.
+**When something fails** (access denied, file in use, a copy that fails its safe-copy check), you get **Retry**, **Skip**, **Skip All** or **Cancel**; Enter retries. These questions appear also while the window is hidden: the window comes back with the question, and goes away again once you have answered.
 
 **The *Operation result* window** opens when an operation started with *Show the result when finished*, or a safe copy or move, ends (see [Copy and move](#copy-and-move-f5-f6)). It is modal: the main window waits until you close it (operations that are still running go on). Results of several operations are listed in it, the newest first; **Close** or Esc closes it. **Save protocol…** saves them to a text file you choose (it starts in the target folder): for each operation what was copied or moved from where to where, when it ended, how it went, how long it took, how the copies were checked, every problem, and, after a check with checksums, every file with its SHA-256 checksum. The window stays open, so you can still remove the checksum files after saving. After a safe copy with checksums, **Close and remove checksum files** also deletes the `.sha256` files it lists, in the target and the source folders (when you only wanted the check, not the record). Like every window of the program, it opens without Windows' animation when View → *Animations* is off, also when it opens while you work in another program.
 
@@ -641,7 +641,7 @@ These are the default keys. Everything in the first three tables can be changed 
 
 ### In dialogs
 
-**Enter** confirms, **Esc** or the window's close button cancels.
+**Enter** presses the button tinted with the accent color (the default: *Delete* in the Delete dialog, *Copy* in Copy), **Esc** or the window's close button cancels.
 
 ### In the viewer
 

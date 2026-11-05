@@ -17,6 +17,13 @@
 //!
 //! - a dialog: its content in [`MARGIN`], [`before_buttons`], then
 //!   [`buttons`] (centred); a note for the whole dialog goes above the buttons;
+//! - a dialog that asks something has a default button: the one Enter
+//!   presses, passed to [`buttons`] and tinted with the accent color, so it is
+//!   clear what Enter does. Enter must do exactly that button's action; prefer
+//!   the safe answer when one is destructive and Enter could be pressed
+//!   without reading (Skip, not Overwrite). A row without a default (Enter
+//!   means something else in that window, or nothing) says why in a comment
+//!   on the line above;
 //! - a form (label and input per row): [`form_grid`], labels in the first
 //!   column, left-aligned; tick boxes in the second column with their label
 //!   to the right;
@@ -167,8 +174,9 @@ pub fn before_buttons(ui: &mut Ui) {
 }
 
 /// A row of buttons centred in the available width, each with an optional
-/// tooltip; the index of the clicked one.
-pub fn buttons(ui: &mut Ui, buttons: &[(&str, &str)]) -> Option<usize> {
+/// tooltip; the index of the clicked one. `default` is the button Enter
+/// presses: it is tinted with the accent color, so it is clear what Enter does.
+pub fn buttons(ui: &mut Ui, buttons: &[(&str, &str)], default: Option<usize>) -> Option<usize> {
     let font = egui::TextStyle::Button.resolve(ui.style());
     let pad = ui.spacing().button_padding.x * 2.0;
     let gap = ui.spacing().item_spacing.x;
@@ -178,7 +186,12 @@ pub fn buttons(ui: &mut Ui, buttons: &[(&str, &str)]) -> Option<usize> {
     ui.horizontal(|ui| {
         ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
         for (i, (label, tip)) in buttons.iter().enumerate() {
-            let mut r = ui.button(*label);
+            let mut b = egui::Button::new(*label);
+            if default == Some(i) {
+                let (fill, stroke) = default_button_colors(ui.visuals());
+                b = b.fill(fill).stroke(stroke);
+            }
+            let mut r = ui.add(b);
             if !tip.is_empty() {
                 r = r.on_hover_text(*tip);
             }
@@ -188,6 +201,16 @@ pub fn buttons(ui: &mut Ui, buttons: &[(&str, &str)]) -> Option<usize> {
         }
     });
     hit
+}
+
+/// The default button's fill and outline: the usual button color with a
+/// little of the accent mixed in, outlined in the accent.
+pub fn default_button_colors(v: &egui::Visuals) -> (Color32, egui::Stroke) {
+    let accent = v.selection.bg_fill;
+    let base = v.widgets.inactive.weak_bg_fill;
+    let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * 0.28).round() as u8;
+    let fill = Color32::from_rgb(mix(base.r(), accent.r()), mix(base.g(), accent.g()), mix(base.b(), accent.b()));
+    (fill, egui::Stroke::new(1.0_f32, accent))
 }
 
 // the scale grows, a toolbar's sides match a dialog's edge, forms and tables
@@ -234,5 +257,44 @@ mod tests {
             }
         }
         assert!(found.is_empty(), "spacing of its own, use sal_ui::layout:\n{}", found.join("\n"));
+    }
+
+    #[test]
+    fn button_rows_have_a_default_or_say_why() {
+        let sources = [
+            ("sal-app/src/app.rs", include_str!("../../sal-app/src/app.rs")),
+            ("sal-app/src/results.rs", include_str!("../../sal-app/src/results.rs")),
+            ("sal-window/src/lib.rs", include_str!("../../sal-window/src/lib.rs")),
+            ("plugins/viewer/src/window.rs", include_str!("../../../plugins/viewer/src/window.rs")),
+            ("plugins/compare/src/window.rs", include_str!("../../../plugins/compare/src/window.rs")),
+        ];
+        let mut found = Vec::new();
+        for (name, text) in sources {
+            let code = text.split("#[cfg(test)]").next().unwrap_or(text);
+            let lines: Vec<&str> = code.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                let row = line.contains("layout::buttons(") && line.contains(", None)");
+                if row && !(n > 0 && lines[n - 1].trim_start().starts_with("//")) {
+                    found.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(found.is_empty(), "a button row without a default button must say why (a comment above):\n{}", found.join("\n"));
+    }
+
+    #[test]
+    fn the_default_button_is_tinted_with_the_accent() {
+        for v in [egui::Visuals::light(), egui::Visuals::dark()] {
+            use super::default_button_colors;
+            use egui::Color32;
+            let (fill, stroke) = default_button_colors(&v);
+            let (base, accent) = (v.widgets.inactive.weak_bg_fill, v.selection.bg_fill);
+            assert_ne!(fill, base, "tinted");
+            assert_ne!(fill, accent, "only lightly");
+            assert_eq!(stroke.color, accent);
+            // between the two, nearer the button's own color
+            let d = |a: Color32, b: Color32| (a.r() as i32 - b.r() as i32).abs() + (a.g() as i32 - b.g() as i32).abs() + (a.b() as i32 - b.b() as i32).abs();
+            assert!(d(fill, base) < d(fill, accent));
+        }
     }
 }

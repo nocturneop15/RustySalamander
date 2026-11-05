@@ -380,7 +380,8 @@ impl ResultsWin {
         }
         list.push((tr("Close").into(), String::new(), Act::Close));
         let labels: Vec<(&str, &str)> = list.iter().map(|(l, t, _)| (l.as_str(), t.as_str())).collect();
-        if let Some(i) = sal_ui::layout::buttons(ui, &labels) {
+        // no default: Enter opens the item under the cursor
+        if let Some(i) = sal_ui::layout::buttons(ui, &labels, None) {
             act = Some(list[i].2.clone());
         }
         act

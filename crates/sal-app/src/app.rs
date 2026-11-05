@@ -3325,7 +3325,7 @@ impl App {
         };
         let buttons = |ui: &mut egui::Ui, ok: &str| -> u8 {
             layout::before_buttons(ui);
-            match layout::buttons(ui, &[(ok, ""), (tr("Cancel"), "")]) {
+            match layout::buttons(ui, &[(ok, ""), (tr("Cancel"), "")], Some(0)) {
                 Some(0) => 1,
                 Some(_) => 2,
                 None => 0,
@@ -3362,7 +3362,7 @@ impl App {
                         (tr("Queue last"), tr("Wait until the running and the waiting operations finish")),
                         (tr("Cancel"), ""),
                     ];
-                    match layout::buttons(ui, &buttons) {
+                    match layout::buttons(ui, &buttons, Some(0)) {
                         Some(0) => outcome = 1,
                         Some(1) => outcome = 3,
                         Some(2) => outcome = 4,
@@ -3593,7 +3593,7 @@ impl App {
                 dw.modal().show(ctx, &mut self.dialog_places, "message", title.as_str(), 440.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(text.as_str());
                     layout::before_buttons(ui);
-                    if layout::buttons(ui, &[(tr("OK"), "")]).is_some() {
+                    if layout::buttons(ui, &[(tr("OK"), "")], Some(0)).is_some() {
                         outcome = 2;
                     }
                 });
@@ -3726,7 +3726,9 @@ impl App {
                         buttons.push((tr("Restart now"), tr("Closes and starts RustySalamander again")));
                     }
                     buttons.push((tr("Close"), ""));
-                    if let Some(b) = layout::buttons(ui, &buttons) {
+                    // Enter closes, except while a download runs
+                    let default = (!running).then(|| buttons.len() - 1);
+                    if let Some(b) = layout::buttons(ui, &buttons, default) {
                         match (b, all, staged) {
                             (0, true, _) => update_all = true,
                             (0, false, true) | (1, true, true) => restart = true,
@@ -4360,7 +4362,7 @@ impl App {
                     }
                     layout::before_buttons(ui);
                     ui.small(tr("Settings apply immediately and are saved on exit."));
-                    if layout::buttons(ui, &[(tr("Close"), "")]).is_some() {
+                    if layout::buttons(ui, &[(tr("Close"), "")], Some(0)).is_some() {
                         outcome = 2;
                     }
                 });
@@ -4433,7 +4435,7 @@ impl App {
                     });
                     layout::before_buttons(ui);
                     ui.small(tr("Shortcuts are configured in Options → Settings… → Keyboard shortcuts."));
-                    if layout::buttons(ui, &[(tr("Close"), "")]).is_some() {
+                    if layout::buttons(ui, &[(tr("Close"), "")], Some(0)).is_some() {
                         outcome = 2;
                     }
                 });
@@ -4685,7 +4687,8 @@ impl App {
                     (tr("Cancel all"), tr("Stop the running operations and empty the queue")),
                     (tr("Run in background"), tr("Hide this window; the progress stays in the status bar")),
                 ];
-                match layout::buttons(ui, &buttons) {
+                // no default: the window asks nothing, and Enter isn't for it
+                match layout::buttons(ui, &buttons, None) {
                     Some(0) => act = Some(JobAct::PauseAll(!all_paused)),
                     Some(1) => act = Some(JobAct::CancelAll),
                     Some(_) => act = Some(JobAct::Hide),
@@ -4721,7 +4724,10 @@ impl App {
         }
     }
 
-    /// The question of an operation that hit a conflict or an error, in its own window.
+    /// The button Enter presses when the target exists: Skip.
+const CONFLICT_DEFAULT: usize = 2;
+
+/// The question of an operation that hit a conflict or an error, in its own window.
     fn prompt_ui(&mut self, ctx: &egui::Context) {
         let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None, animations: self.cfg.animations };
         let Some(job) = self.jobs.running.iter_mut().find(|j| j.prompt.is_some()) else {
@@ -4758,10 +4764,14 @@ impl App {
                         (tr("Skip All"), tr("Skip this and all further existing items")),
                         (tr("Cancel"), tr("Stop the whole operation")),
                     ];
-                    if let Some(i) = layout::buttons(ui, &labels) {
+                    // Enter skips: the safe answer, nothing is overwritten
+                    if let Some(i) = layout::buttons(ui, &labels, Some(Self::CONFLICT_DEFAULT)) {
                         reply = Some(Reply::Conflict(actions[i]));
                     }
                 });
+                if enter && reply.is_none() {
+                    reply = Some(Reply::Conflict(ConflictAction::Skip));
+                }
                 if escape && reply.is_none() {
                     reply = Some(Reply::Conflict(ConflictAction::Cancel));
                 }
@@ -4782,10 +4792,14 @@ impl App {
                     let actions = [ErrorAction::Retry, ErrorAction::Skip, ErrorAction::SkipAll, ErrorAction::Cancel];
                     let labels =
                         [(tr("Retry"), ""), (tr("Skip"), ""), (tr("Skip All"), tr("Skip this and all further items that fail")), (tr("Cancel"), tr("Stop the whole operation"))];
-                    if let Some(i) = layout::buttons(ui, &labels) {
+                    // Enter tries again
+                    if let Some(i) = layout::buttons(ui, &labels, Some(0)) {
                         reply = Some(Reply::Error(actions[i]));
                     }
                 });
+                if enter && reply.is_none() {
+                    reply = Some(Reply::Error(ErrorAction::Retry));
+                }
                 if escape && reply.is_none() {
                     reply = Some(Reply::Error(ErrorAction::Cancel));
                 }
@@ -4882,7 +4896,7 @@ impl App {
             if has_sums {
                 buttons.push((tr("Close and remove checksum files"), tr("Delete the .sha256 files listed above, in the target and in the source folders")));
             }
-            match layout::buttons(ui, &buttons) {
+            match layout::buttons(ui, &buttons, Some(0)) {
                 Some(1) => save = true,
                 Some(2) => remove = true,
                 Some(_) => close = true,
@@ -5828,7 +5842,8 @@ fn job_progress_ui(ui: &mut egui::Ui, job: &Job, now: Instant, act: &mut Option<
     let paused = job.is_paused();
     let pause = if paused { tr("Resume") } else { tr("Pause") };
     let labels: Vec<(&str, &str)> = if job.spec.kind.can_pause() { vec![(pause, ""), (tr("Cancel"), "")] } else { vec![(tr("Cancel"), "")] };
-    match layout::buttons(ui, &labels) {
+    // no default: progress asks nothing, and Enter must not cancel it
+    match layout::buttons(ui, &labels, None) {
         Some(0) if labels.len() == 2 => *act = Some(JobAct::Pause(id, !paused)),
         Some(_) => *act = Some(JobAct::Cancel(id)),
         None => {}
