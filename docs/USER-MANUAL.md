@@ -711,7 +711,12 @@ Everything is in the program's folder:
 - **A program refuses items dragged from an archive or server, or gets incomplete files:** RustySalamander must keep running until the copy has finished; the files are read from the archive or server while it copies.
 - **Things move too much:** View → *Animations* off.
 - **Going back to an older version:** after an update the previous version's folder is still there; just run it.
+- **The program doesn't start, or something else goes wrong:** run it with `-debug` and attach the log to the bug report (see below).
+
+### Debug log
+
+When something goes wrong, start the program as `rustysalamander.exe -debug`. It then writes a log of everything it does to `rustysalamander-debug-<date>-<time>.log` next to `rustysalamander.exe` (or in the temporary folder, when it can't write there; `-debug=<file>` chooses the file). The title bar shows *[debug log]*, and the status line where the log is. Each thing you do is numbered (`>>> #12 USER key Ctrl+C`), followed by what the program did (`#12 DO`) and what came of it (`<<< #12 RESULT`). Passwords are not written; of what you type into a dialog, only how many characters. Attach the log to the bug report.
 
 ### Not available yet
 
-Password-protected archives, FTP and SFTP, saved server sites, and other panel views (thumbnails, brief).
+Password-protected archives, saved server sites, and other panel views (thumbnails, brief).

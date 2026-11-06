@@ -353,6 +353,14 @@ The shell extensions are loaded in the background when the program starts, so th
 
 Troubleshooting: run with the environment variable `SAL_DIAG_MENU=1` to open both menus once on start-up, close them by timer and log each step to stderr.
 
+## Debug log
+
+`rustysalamander.exe -debug` writes everything the program does to `rustysalamander-debug-<date>-<time>.log` next to the program (in the temporary folder when that folder can't be written); `-debug=<file>` names the file. The title bar says *[debug log]* and the status line where the log is. Attach the log to a bug report.
+
+The log starts with the computer: Windows version, Remote Desktop or not, the display adapters, the OpenGL version and graphics driver. Then every user action is numbered and marked `>>> #N USER` (a key, typed text, a click and what was under it, a window closed), what the program did for it `#N DO` (the command, a confirmed dialog, an operation started, a plugin command), and what came of it `<<< #N RESULT` (folders, cursor, selection, dialogs and messages, the status line, operations, settings). Changes that come later by themselves are marked `··· after #N`, and a finished operation is logged under the action that started it. The messages of the window and graphics libraries (`LIB`), errors and panics (`!!!`) are there too. Passwords are not logged: of what is typed into a dialog only the number of characters is.
+
+`RUSTYSALAMANDER_LOG` (a file path, or `1` for the temporary folder) writes only the timing of the start and of slow frames.
+
 ## Quick search
 
 Typing in a panel starts a quick search (`/` or `\` match any characters; keys that match nothing are ignored). Every item the typed text matches has a faintly tinted row and the matched part marked, in the name and, where the match runs into it, in the extension. **Options → Quick search** (also in **Settings → General → Quick search**):

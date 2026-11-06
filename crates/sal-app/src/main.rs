@@ -52,13 +52,19 @@ use sal_ui::fonts;
 /// Start: the log, then the main window with the panels on the folders
 /// given on the command line.
 fn main() -> eframe::Result<()> {
-    debuglog::init();
-    // optional start directories: rustysalamander [left] [right]
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // optional start directories: rustysalamander [left] [right]; -debug
+    // writes the debug log (debuglog.rs)
+    let (debug, args) = debuglog::parse_args(std::env::args().skip(1).collect());
+    debuglog::init(debug, &args);
+    // the version in the title bar ("RustySalamander 0.7.1-alpha"), and
+    // that the debug log is being written
+    let mut title = concat!("RustySalamander ", env!("CARGO_PKG_VERSION")).to_owned();
+    if debuglog::full() {
+        title.push_str(" [debug log]");
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            // the version in the title bar ("RustySalamander 0.7.1-alpha")
-            .with_title(concat!("RustySalamander ", env!("CARGO_PKG_VERSION")))
+            .with_title(title)
             .with_icon(sal_ui::icon::program())
             .with_inner_size([1200.0, 760.0])
             .with_min_inner_size([640.0, 400.0])
@@ -67,5 +73,10 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     debuglog::write("startup: creating the window");
-    eframe::run_native("RustySalamander", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))))
+    let r = eframe::run_native("RustySalamander", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))));
+    match &r {
+        Ok(()) => debuglog::write("---- RustySalamander closed"),
+        Err(e) => debuglog::error(format!("the program could not run: {e} ({e:?})")),
+    }
+    r
 }

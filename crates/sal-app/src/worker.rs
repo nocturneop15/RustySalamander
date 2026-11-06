@@ -19,11 +19,13 @@ use crate::i18n::{tr, trf, trn};
 use crate::plugins::ops::{self, FolderOp};
 use crate::plugins::FolderPlugin;
 
+#[derive(Debug)]
 pub enum Prompt {
     Conflict { src: PathBuf, dst: PathBuf },
     Error { path: PathBuf, message: String },
 }
 
+#[derive(Debug)]
 pub enum Reply {
     Conflict(ConflictAction),
     Error(ErrorAction),
@@ -384,6 +386,7 @@ impl Job {
 
     /// The user answered the question: the operation goes on.
     pub fn answer(&mut self, r: Reply) {
+        crate::debuglog::did(format_args!("answer to operation {}: {r:?}", self.spec.id));
         self.prompt = None;
         if !self.is_paused() {
             self.rate.resume(Instant::now());
@@ -463,6 +466,9 @@ impl Jobs {
     pub fn add_with(&mut self, ctx: &egui::Context, kind: JobKind, sources: Vec<PathBuf>, target: PathBuf, place: Placement, plugin: Option<PluginRef>, options: JobOptions) {
         self.next_id += 1;
         let spec = Spec { id: self.next_id, kind, sources, target, plugin, options };
+        if crate::debuglog::full() {
+            crate::debuglog::job_started(spec.id, format_args!("{:?} {:?} to {} ({place:?})", spec.kind, spec.sources.iter().take(5).collect::<Vec<_>>(), spec.target.display()));
+        }
         match place {
             Placement::Now => self.running.push(Job::start(ctx, spec)),
             Placement::First => self.run_first(ctx, spec),

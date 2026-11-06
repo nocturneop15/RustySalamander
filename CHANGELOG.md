@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.9.3-beta (2026-11-06)
 
+- **Debug log:** `rustysalamander.exe -debug` writes everything the program does to a log next to it: the computer (Windows, Remote Desktop, graphics adapters, OpenGL), each user action numbered and marked with what the program did and what came of it, the messages of the graphics libraries, errors and panics. Passwords are left out. Meant for bug reports, such as a start that fails without a word.
 - **Quick search ignores diacritics:** `vladce` finds `vládce` and `vládče`, `grusse` finds `Grüße`, `o` finds `ø`, in Czech, German, Nordic, Polish, French and other names. *Exact letters* (Options → Quick search, or Settings → General → Quick search) brings back matching only the same letters.
 
 ## 0.9.2-beta (2026-11-05)

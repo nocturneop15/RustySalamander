@@ -138,6 +138,14 @@ impl DialogWin {
         let id = ViewportId::from_hash_of(("dialog", key));
         diag(key, &format!("frame: active={active} hidden={hidden} window visible={:?}", place.hwnd.map(is_visible)));
         ctx.show_viewport_immediate(id, builder, |vctx, class| {
+            if class != ViewportClass::Embedded && crate::debuglog::full() {
+                // what is typed into a dialog may be a password: only how much
+                let (events, closing) = vctx.input(|i| (i.events.clone(), i.viewport().close_requested()));
+                crate::debuglog::input(&events, title, true, &|_| String::new());
+                if closing {
+                    crate::debuglog::user(format_args!("close the window  [{title}]"));
+                }
+            }
             // keys typed into an open drop-down (font search) are not meant for the dialog
             let popup = vctx.memory(|m| m.any_popup_open());
             let (e, x, closed) = vctx.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape), i.viewport().close_requested()));

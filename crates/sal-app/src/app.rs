@@ -37,7 +37,7 @@ use sal_ui::scroll_bar_visibility;
 
 const SELECTED_COLOR: Color32 = Color32::from_rgb(230, 40, 40);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Cmd {
     Help,
     CheckUpdates,
@@ -466,6 +466,8 @@ pub struct App {
     header_rects: [Vec<egui::Rect>; 2],
     /// Free space of the panels' drives, read in the background.
     free: crate::freespace::FreeSpace,
+    /// What the debug log last saw of the program's state (`-debug`).
+    debug_watch: crate::debuglog::Watch,
 }
 
 /// An open Windows 11 style context menu.
@@ -713,7 +715,22 @@ impl App {
         let cfg = crate::debuglog::time("startup: configuration", Config::load);
         crate::debuglog::write(format!("startup: configuration file {}", sal_core::config::config_path().display()));
         crate::debuglog::time("startup: fonts", || crate::fonts::install(&cc.egui_ctx, &cfg.ui_font, &cfg.mono_font));
-        App::with_config(&cc.egui_ctx, cfg, args)
+        if let Some(gl) = &cc.gl {
+            use eframe::glow::HasContext;
+            let s = |p| unsafe { gl.get_parameter_string(p) };
+            crate::debuglog::write(format!(
+                "startup: OpenGL {} ({}, {}; GLSL {})",
+                s(eframe::glow::VERSION),
+                s(eframe::glow::RENDERER),
+                s(eframe::glow::VENDOR),
+                s(eframe::glow::SHADING_LANGUAGE_VERSION)
+            ));
+        }
+        let mut app = App::with_config(&cc.egui_ctx, cfg, args);
+        if let (true, Some(path)) = (crate::debuglog::full(), crate::debuglog::path()) {
+            app.status = trf("Debug log: {file}", &[("file", &path.display().to_string())]);
+        }
+        app
     }
 
     /// The application with `cfg` (the tests' entry point): panels on the
@@ -798,6 +815,7 @@ impl App {
             size_report: None,
             hwnd: None,
             panel_drag: None,
+            debug_watch: Default::default(),
             drop_shared: None,
             release_pointer: false,
             job_done: None,
@@ -865,6 +883,11 @@ impl App {
     /// it arrives ([`Self::poll_plugin_task`]). The plugin gets the active
     /// panel's path, and its connection shown there, with the values.
     fn run_plugin_command(&mut self, ctx: &egui::Context, plugin: Arc<dyn FolderPlugin>, command: String, mut values: plugins::Values) {
+        if crate::debuglog::full() {
+            // what was typed, but no passwords
+            let shown: Vec<String> = values.iter().map(|(k, v)| if is_secret(k) { format!("{k}=(hidden)") } else { format!("{k}={v:?}") }).collect();
+            crate::debuglog::did(format_args!("plugin {} command {command:?} {}", plugin.id(), shown.join(" ")));
+        }
         if self.plugin_task.is_some() {
             self.status = tr("A plugin command is still running.").into();
             return;
@@ -1989,6 +2012,7 @@ impl App {
     /// Run a command (a key, a menu item, a function-key button); errors are
     /// shown in a message.
     fn command(&mut self, ctx: &egui::Context, cmd: Cmd) {
+        crate::debuglog::did(format_args!("command {cmd:?}"));
         let hidden = self.vis();
         let other = 1 - self.active;
         let res: Result<(), String> = match cmd {
@@ -4540,6 +4564,7 @@ impl App {
 
     /// OK (Enter) in `dialog`: do what it asked for.
     fn dialog_ok(&mut self, ctx: &egui::Context, dialog: Dialog) {
+        crate::debuglog::did(format_args!("confirmed: {}", dialog.summary()));
         let hidden = self.vis();
         match dialog {
             Dialog::PluginForm { plugin, form, values } => match self.plugins.get(&plugin).cloned() {
@@ -4854,6 +4879,7 @@ const CONFLICT_DEFAULT: usize = 2;
     /// An operation ended: report how, open an extracted file, read the
     /// panels again.
     fn job_finished(&mut self, job: Job) {
+        crate::debuglog::job_finished(job.spec.id, format_args!("{:?}", job.result));
         if let (JobKind::Archive(FolderOp::Open(how)), Some(Ok(s))) = (job.spec.kind, &job.result) {
             if !s.cancelled {
                 if let Err(e) = self.open_extracted(&job.spec.sources[0], &job.spec.target, how) {
@@ -6274,9 +6300,129 @@ impl eframe::App for App {
             sal_ui::native::set_transitions(h, self.cfg.animations);
             self.transitions = Some(self.cfg.animations);
         }
+        if crate::debuglog::full() {
+            let (events, closing) = ctx.input(|i| (i.events.clone(), i.viewport().close_requested()));
+            crate::debuglog::input(&events, "", false, &|p| self.debug_target(p));
+            if closing {
+                crate::debuglog::user("close the main window");
+            }
+        }
         self.frame(ctx);
         self.diag_menu(ctx);
         self.diag_dialog(ctx);
+        if crate::debuglog::full() {
+            let state = self.debug_state();
+            self.debug_watch.look(state);
+            crate::debuglog::end_frame();
+        }
+    }
+}
+
+/// A form value not to be written to the debug log.
+fn is_secret(name: &str) -> bool {
+    let n = name.to_lowercase();
+    ["pass", "secret", "token", "pin"].iter().any(|s| n.contains(s))
+}
+
+impl Dialog {
+    /// What the dialog is and asks, for the debug log (no passwords).
+    fn summary(&self) -> String {
+        match self {
+            Dialog::None => "none".into(),
+            Dialog::PluginForm { plugin, form, .. } => format!("plugin form \"{}\" of {plugin}", form.title),
+            Dialog::Transfer { kind, sources, target, opts } => format!("{kind:?} {} items {:?} to {target:?} ({opts:?})", sources.len(), sources.iter().take(5).collect::<Vec<_>>()),
+            Dialog::MkDir { name } => format!("new folder {name:?}"),
+            Dialog::Rename { path, name } => format!("rename {} to {name:?}", path.display()),
+            Dialog::Delete { sources, recycle } => format!("delete {} items {:?} (to the Recycle Bin: {recycle})", sources.len(), sources.iter().take(5).collect::<Vec<_>>()),
+            Dialog::SelectMask { select, mask, error } => format!("{} by mask {mask:?}{}", if *select { "select" } else { "unselect" }, error.as_ref().map(|e| format!(", error: {e}")).unwrap_or_default()),
+            Dialog::Drive { panel, .. } => format!("drive selector of the {} panel", if *panel == 0 { "left" } else { "right" }),
+            Dialog::Message { title, text } => format!("message \"{title}\": {text}"),
+            Dialog::Help => "help".into(),
+            Dialog::Update { rows } => format!("updates ({} rows)", rows.len()),
+            Dialog::Settings { recording, .. } => format!("settings{}", if recording.is_some() { ", recording a shortcut" } else { "" }),
+        }
+    }
+}
+
+impl App {
+    /// What is under a click in the main window, for the debug log.
+    fn debug_target(&self, pos: egui::Pos2) -> String {
+        let side = |i: usize| if i == 0 { "left" } else { "right" };
+        for i in 0..2 {
+            if let Some((_, row)) = self.row_hits[i].iter().find(|(r, _)| r.contains(pos)) {
+                let name = self.panels[i].entries().get(*row).map(|e| e.name.as_str()).unwrap_or("?");
+                return format!("{} panel, item {name:?}", side(i));
+            }
+            if let Some(n) = self.header_rects[i].iter().position(|r| r.contains(pos)) {
+                let col = ["Name", "Ext", "Size", "Date", "Attr"].get(n).copied().unwrap_or("?");
+                return format!("{} panel, column header {col}", side(i));
+            }
+            if let Some((_, path)) = self.crumb_rects[i].iter().find(|(r, _)| r.contains(pos)) {
+                return format!("{} path bar, {}", side(i), display_path(path));
+            }
+            if self.body_rects[i].contains(pos) {
+                return format!("{} panel, empty space", side(i));
+            }
+        }
+        String::new()
+    }
+
+    /// The program's state as the user sees it, for the debug log: what
+    /// changes after an action is its result.
+    fn debug_state(&self) -> Vec<(String, String)> {
+        let mut s: Vec<(String, String)> = Vec::new();
+        let mut put = |k: &str, v: String| s.push((k.to_owned(), v));
+        put("active panel", if self.active == 0 { "left" } else { "right" }.into());
+        for (i, side) in [(0, "left"), (1, "right")] {
+            let p = &self.panels[i];
+            let entries = p.entries();
+            put(&format!("{side} folder"), display_path(p.path()));
+            put(&format!("{side} items"), entries.len().to_string());
+            let cursor = entries.get(p.cursor).map(|e| format!("{:?} ({} of {})", e.name, p.cursor + 1, entries.len())).unwrap_or_else(|| "none".into());
+            put(&format!("{side} cursor"), cursor);
+            let selected: Vec<&str> = entries.iter().filter(|e| e.selected).map(|e| e.name.as_str()).collect();
+            put(&format!("{side} selected"), if selected.len() > 10 { format!("{} items", selected.len()) } else { format!("{selected:?}") });
+            put(&format!("{side} quick search"), format!("{:?}", p.qs));
+            put(&format!("{side} path bar"), self.path_edit[i].as_ref().map(|e| format!("editing {:?}", e.text)).unwrap_or_else(|| "shown".into()));
+        }
+        put("dialog", self.dialog.summary());
+        put("status", self.status.clone());
+        put("last operation", self.job_done.as_ref().map(|(t, _)| t.clone()).unwrap_or_default());
+        let ops: Vec<String> = self
+            .jobs
+            .running
+            .iter()
+            .map(|j| {
+                let q = match &j.prompt {
+                    Some(crate::worker::Prompt::Conflict { src, dst }) => format!(", asks: {} exists ({})", dst.display(), src.display()),
+                    Some(crate::worker::Prompt::Error { path, message }) => format!(", asks: error at {}: {message}", path.display()),
+                    None => String::new(),
+                };
+                format!("{} {}{}{q}", j.spec.id, j.spec.describe(), if j.is_paused() { " (paused)" } else { "" })
+            })
+            .collect();
+        put("operations running", if ops.is_empty() { "none".into() } else { ops.join("; ") });
+        put("operations queued", self.jobs.queue.len().to_string());
+        put("operations window", if self.jobs.hidden { "hidden" } else { "shown when running" }.into());
+        put("result window", if self.reports.is_empty() { "closed".into() } else { report_protocol(&self.reports) });
+        put("plugin command", self.plugin_task.as_ref().map(|t| format!("{} running", t.plugin.id())).unwrap_or_else(|| "none".into()));
+        put("update check", if self.update_check.is_some() { "running" } else { "none" }.into());
+        put("context menu", if self.ctx_menu.is_some() { "open" } else { "closed" }.into());
+        put("dragging", self.panel_drag.as_ref().map(|_| "items from a panel").unwrap_or("no").into());
+        // every setting, by its path in config.toml
+        if let Ok(toml::Value::Table(t)) = toml::Value::try_from(&self.cfg) {
+            fn flat(prefix: &str, v: &toml::Value, out: &mut Vec<(String, String)>) {
+                match v {
+                    toml::Value::Table(t) => t.iter().for_each(|(k, v)| flat(&format!("{prefix}.{k}"), v, out)),
+                    toml::Value::Array(a) if a.iter().any(|v| v.is_table() || v.is_array()) => a.iter().enumerate().for_each(|(i, v)| flat(&format!("{prefix}[{i}]"), v, out)),
+                    v => out.push((prefix.to_owned(), v.to_string())),
+                }
+            }
+            for (k, v) in &t {
+                flat(&format!("setting {k}"), v, &mut s);
+            }
+        }
+        s
     }
 }
 

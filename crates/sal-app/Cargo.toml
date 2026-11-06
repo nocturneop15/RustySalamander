@@ -26,6 +26,7 @@ raw-window-handle = "0.6"
 serde_json = "1"
 flate2 = "1"
 semver = "1"
+log = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
