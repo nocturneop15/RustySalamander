@@ -202,6 +202,9 @@ pub struct Config {
     pub disabled_plugins: Vec<String>,
     /// Quick search matches anywhere in the name (otherwise from the first letter).
     pub quick_search_anywhere: bool,
+    /// Quick search ignores diacritics: `vladce` finds `vládče` (otherwise
+    /// the letters must be the same).
+    pub quick_search_loose: bool,
     /// While a quick search is active, Up/Down jump to the previous/next match.
     pub quick_search_arrows: bool,
     /// Solid scrollbars that are always shown (instead of thin ones on hover).
@@ -300,6 +303,7 @@ impl Default for Config {
             typed_paths: Vec::new(),
             theme: ThemeMode::System,
             quick_search_anywhere: false,
+            quick_search_loose: true,
             quick_search_arrows: true,
             language: String::new(),
             disabled_plugins: Vec::new(),

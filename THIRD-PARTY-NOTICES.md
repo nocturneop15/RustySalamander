@@ -18,6 +18,10 @@ The 7-Zip plugin (`plugins\7zip`) uses `7z.dll`, built unmodified from the 7-Zip
 
 The full terms are in `third_party/7zip-26.05/DOC/License.txt` and `DOC/unRarLicense.txt`, and the build copies both next to `7z.dll` (`plugins\7zip\License.txt`, `plugins\7zip\unRarLicense.txt`). The source of the library is the 7-Zip source in this repository, or <https://www.7-zip.org/>.
 
+## unicode-normalization
+
+Quick search reduces letters to their base letters with the [unicode-normalization](https://github.com/unicode-rs/unicode-normalization) crate (MIT or Apache-2.0), which contains Unicode's decomposition data (Unicode License v3). It is listed in `Cargo.lock` like the program's other crates.
+
 ## The SCP plugin
 
 The SCP plugin (`plugins\scp`) contains russh (Apache-2.0), its key handling (ssh-key, MIT or Apache-2.0), tokio (MIT), and ring for cryptography (ISC-style and Apache-2.0 licenses, with parts from BoringSSL). They are listed in `Cargo.lock` like the program's own crates.

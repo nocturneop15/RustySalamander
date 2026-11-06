@@ -517,10 +517,10 @@ impl Panel {
 
     /// Add a character to quick search; returns false if nothing matches
     /// (the character is then rejected, as in Salamander).
-    pub fn quick_search_push(&mut self, c: char, anywhere: bool) -> bool {
+    pub fn quick_search_push(&mut self, c: char, anywhere: bool, loose: bool) -> bool {
         let mut candidate = self.qs.clone();
         candidate.push(c);
-        let mask = quicksearch::prepare(&candidate);
+        let mask = quicksearch::prepare(&candidate, loose);
         let entries = &self.listing.entries;
         match quicksearch::find(|i| entries[i].name.as_str(), entries.len(), self.cursor, &mask, true, anywhere) {
             Some(i) => {
@@ -538,11 +538,11 @@ impl Panel {
     }
 
     /// Jump to the next/previous quick-search match.
-    pub fn quick_search_next(&mut self, forward: bool, anywhere: bool) {
+    pub fn quick_search_next(&mut self, forward: bool, anywhere: bool, loose: bool) {
         if self.qs.is_empty() {
             return;
         }
-        let mask = quicksearch::prepare(&self.qs);
+        let mask = quicksearch::prepare(&self.qs, loose);
         let entries = &self.listing.entries;
         let n = entries.len();
         if n == 0 {

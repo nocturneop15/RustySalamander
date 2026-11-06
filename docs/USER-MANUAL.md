@@ -148,6 +148,7 @@ Just start typing in a panel: the cursor jumps to the first name that starts wit
 - **Backspace** takes back the last letter typed.
 - **Esc** ends the search.
 - Options → Quick search → *Anywhere in name* finds the text anywhere in the name, not just at the start.
+- Letters with and without diacritics match (default): `vladce` finds `vládce` and `vládče`, `grusse` finds `Grüße`, `o` finds `ø`. Options → Quick search → *Exact letters* makes `á` match only `á` (upper or lower case still doesn't matter).
 
 ---
 
@@ -508,6 +509,7 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 | Setting | Choices | Default | What it does |
 |---|---|---|---|
 | Match | From first letter, Anywhere in name | From first letter | Whether typed text must start the name or may be anywhere in it. |
+| Letters | *Letters with or without diacritics*, *Exact letters* | with or without diacritics | With or without diacritics, accents and other marks don't matter: `vladce`, `vládce` and `vládče` find each other, and letters like `ø`, `ł`, `ß`, `æ` match `o`, `l`, `ss`, `ae`. Exact: only the same letters match. |
 | Arrow keys | *Arrows jump between matches* | on | While a quick search is active, ↑/↓ go to the previous/next match, and other cursor keys (Page Up/Down, Home, End) end the search. Off: all cursor keys move the cursor as usual and the search stays, matches still highlighted, until Esc; Ctrl+↑/↓ still jump between matches. |
 
 #### Drives
@@ -585,7 +587,7 @@ Menu items show their current keys.
 
 **Plugins:** the commands of each plugin that is on (Connect to server…, Find files…, Compare, Compare files…, Compare folders…) · open connections (*Disconnect from …*), searches and comparisons (*Close …*) · Plugin settings…
 
-**Options:** Delete to Recycle Bin · Confirm delete · Quick search: From first letter / Anywhere in name / Arrows jump between matches · Language · Settings…
+**Options:** Delete to Recycle Bin · Confirm delete · Quick search: From first letter / Anywhere in name / Letters with or without diacritics / Exact letters / Arrows jump between matches · Language · Settings…
 
 **Help:** Keyboard (the key overview, F1) · Check for updates… · About
 

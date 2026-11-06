@@ -358,6 +358,7 @@ Troubleshooting: run with the environment variable `SAL_DIAG_MENU=1` to open bot
 Typing in a panel starts a quick search (`/` or `\` match any characters; keys that match nothing are ignored). Every item the typed text matches has a faintly tinted row and the matched part marked, in the name and, where the match runs into it, in the extension. **Options → Quick search** (also in **Settings → General → Quick search**):
 
 - **From first letter** (default) or **Anywhere in name**. With *Anywhere*, `port` finds `alfa report.txt`, and the matched part is highlighted wherever it is. *Switch quick search mode* is in the keyboard shortcuts table; it has no default key, and `Ctrl+Shift+Q` is offered as a preset.
+- **Letters with or without diacritics** (default) or **Exact letters**. By default accents and other marks don't matter: `vladce`, `vládce` and `vládče` find each other, `grusse` finds `Grüße`, `blabaer` finds `Blåbær`, `lodz` finds `Łódź` (letters are reduced to their base letters by Unicode decomposition; `ø`, `ł`, `đ`, `ß`, `æ`, `œ`, `þ` and a few more by a table). *Exact letters* makes `á` match only `á`; case never matters.
 - **Arrows jump between matches** (on by default, in both modes): while a search is active, ↑/↓ skip straight to the previous/next matching item, wrapping around, instead of ending the search. Esc ends the search. Ctrl+↑/↓ always jump between matches.
 
 ## Folder sizes

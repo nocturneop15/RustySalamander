@@ -2401,17 +2401,17 @@ impl App {
         // fixed navigation keys
         match (key, m.ctrl, m.shift, m.alt) {
             (Key::ArrowUp, true, _, _) => {
-                let anywhere = self.cfg.quick_search_anywhere;
-                self.act().quick_search_next(false, anywhere);
+                let (anywhere, loose) = (self.cfg.quick_search_anywhere, self.cfg.quick_search_loose);
+                self.act().quick_search_next(false, anywhere, loose);
             }
             (Key::ArrowDown, true, _, _) => {
-                let anywhere = self.cfg.quick_search_anywhere;
-                self.act().quick_search_next(true, anywhere);
+                let (anywhere, loose) = (self.cfg.quick_search_anywhere, self.cfg.quick_search_loose);
+                self.act().quick_search_next(true, anywhere, loose);
             }
             // the search acts as a filter: arrows skip to the previous/next match
             (Key::ArrowUp | Key::ArrowDown, false, false, false) if self.cfg.quick_search_arrows && !self.act().qs.is_empty() => {
-                let anywhere = self.cfg.quick_search_anywhere;
-                self.act().quick_search_next(key == Key::ArrowDown, anywhere);
+                let (anywhere, loose) = (self.cfg.quick_search_anywhere, self.cfg.quick_search_loose);
+                self.act().quick_search_next(key == Key::ArrowDown, anywhere, loose);
             }
             (Key::ArrowUp | Key::ArrowDown, false, shift, false) => {
                 let p = self.act();
@@ -2454,8 +2454,8 @@ impl App {
                 _ => {}
             }
         }
-        let anywhere = self.cfg.quick_search_anywhere;
-        self.act().quick_search_push(c, anywhere);
+        let (anywhere, loose) = (self.cfg.quick_search_anywhere, self.cfg.quick_search_loose);
+        self.act().quick_search_push(c, anywhere, loose);
     }
 
     /// Commands that open dialogs don't need the egui context.
@@ -2696,7 +2696,7 @@ impl App {
         panel.scroll_to_cursor = false;
         let sort = panel.sort;
         let cursor = panel.cursor;
-        let qs_mask = (!panel.qs.is_empty()).then(|| sal_core::quicksearch::prepare(&panel.qs));
+        let qs_mask = (!panel.qs.is_empty()).then(|| sal_core::quicksearch::prepare(&panel.qs, self.cfg.quick_search_loose));
         let qs_anywhere = self.cfg.quick_search_anywhere;
         let entries = &panel.listing.entries;
         let width = ui.available_width();
@@ -4015,6 +4015,13 @@ impl App {
                                     });
                                     ui.end_row();
 
+                                    ui.label(tr("Letters"));
+                                    ui.horizontal(|ui| {
+                                        ui.radio_value(&mut cfg.quick_search_loose, true, tr(LBL_QS_LOOSE)).on_hover_text(tr(TIP_QS_LOOSE));
+                                        ui.radio_value(&mut cfg.quick_search_loose, false, tr(LBL_QS_EXACT)).on_hover_text(tr(TIP_QS_EXACT));
+                                    });
+                                    ui.end_row();
+
                                     ui.label(tr("Arrow keys"));
                                     ui.checkbox(&mut cfg.quick_search_arrows, tr(LBL_QS_ARROWS))
                                         .on_hover_text(tr("While a quick search is active, ↑/↓ skip to the previous/next matching item."));
@@ -5221,6 +5228,10 @@ const CONFLICT_DEFAULT: usize = 2;
                 ui.label(egui::RichText::new(tr("Quick search")).small().weak());
                 ui.radio_value(&mut self.cfg.quick_search_anywhere, false, tr(LBL_QS_PREFIX));
                 ui.radio_value(&mut self.cfg.quick_search_anywhere, true, tr(LBL_QS_ANYWHERE));
+                ui.separator();
+                ui.radio_value(&mut self.cfg.quick_search_loose, true, tr(LBL_QS_LOOSE)).on_hover_text(tr(TIP_QS_LOOSE));
+                ui.radio_value(&mut self.cfg.quick_search_loose, false, tr(LBL_QS_EXACT)).on_hover_text(tr(TIP_QS_EXACT));
+                ui.separator();
                 ui.checkbox(&mut self.cfg.quick_search_arrows, tr(LBL_QS_ARROWS));
                 ui.separator();
                 ui.menu_button(tr("Language"), |ui| {
@@ -5984,6 +5995,10 @@ const LBL_RECYCLE: &str = n_("Delete to Recycle Bin");
 const LBL_QS_PREFIX: &str = n_("From first letter");
 const LBL_QS_ANYWHERE: &str = n_("Anywhere in name");
 const LBL_QS_ARROWS: &str = n_("Arrows jump between matches");
+const LBL_QS_LOOSE: &str = n_("Letters with or without diacritics");
+const LBL_QS_EXACT: &str = n_("Exact letters");
+const TIP_QS_LOOSE: &str = n_("vladce finds vládce and vládče; o finds ø, ss finds ß");
+const TIP_QS_EXACT: &str = n_("vládce finds only vládce (upper or lower case)");
 const LBL_CONFIRM: &str = n_("Confirm delete");
 const LBL_CONFIRM_DROP: &str = n_("Confirm copying and moving by drag and drop");
 const THEMES: [(ThemeMode, &str); 3] = [(ThemeMode::System, n_("System default")), (ThemeMode::Light, n_("Light")), (ThemeMode::Dark, n_("Dark"))];
@@ -10226,6 +10241,28 @@ mod tests {
         assert_eq!(ui.cursor_name(), "alfa report.txt");
         chord(&mut ui, Key::ArrowDown, Modifiers::CTRL, None);
         assert_eq!(ui.cursor_name(), "Report 2026.xlsx");
+    }
+
+    #[test]
+    fn quick_search_without_diacritics() {
+        let t = tempfile::tempdir().unwrap();
+        for n in ["alfa.txt", "vládče.txt", "Grüße.txt"] {
+            fs::write(t.path().join(n), "").unwrap();
+        }
+        let mut ui = Ui::new(t.path(), t.path());
+        assert!(ui.app.cfg.quick_search_loose, "on by default");
+        ui.text("vladce");
+        assert_eq!(ui.app.panels[0].qs, "vladce");
+        assert_eq!(ui.cursor_name(), "vládče.txt");
+        ui.key(Key::Escape);
+        ui.text("grusse");
+        assert_eq!(ui.cursor_name(), "Grüße.txt");
+        ui.key(Key::Escape);
+        // exact letters: the plain "c" stops at "vládč"
+        ui.app.cfg.quick_search_loose = false;
+        ui.key(Key::Home);
+        ui.text("vládce");
+        assert_eq!(ui.app.panels[0].qs, "vlád");
     }
 
     #[test]

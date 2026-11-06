@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Quick search ignores diacritics:** `vladce` finds `vládce` and `vládče`, `grusse` finds `Grüße`, `o` finds `ø`, in Czech, German, Nordic, Polish, French and other names. *Exact letters* (Options → Quick search, or Settings → General → Quick search) brings back matching only the same letters.
+
 ## 0.9.2-beta (2026-11-05)
 
 - **FTP, FTPS and SFTP servers:** the new FTP / SFTP plugin (Plugins → Connect to FTP or SFTP server…) opens them in a panel, with everything that works on SCP servers. FTP finds its way to open data connections by itself (passive, or active when passive doesn't get through), or uses the one you choose.
