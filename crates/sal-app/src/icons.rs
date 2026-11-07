@@ -119,7 +119,12 @@ impl Icons {
             self.pending.remove(&key);
             let tex = icon.map(|i| {
                 let img = egui::ColorImage::from_rgba_unmultiplied([i.width, i.height], &i.pixels);
-                ctx.load_texture(format!("icon:{key:?}"), img, egui::TextureOptions::LINEAR)
+                let copy = crate::softbench::enabled().then(|| img.clone());
+                let tex = ctx.load_texture(format!("icon:{key:?}"), img, egui::TextureOptions::LINEAR);
+                if let Some(img) = copy {
+                    crate::softbench::texture(tex.id(), img);
+                }
+                tex
             });
             self.textures.insert(key, tex);
         }

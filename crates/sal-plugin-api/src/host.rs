@@ -438,7 +438,11 @@ mod tests {
         }
     }
     static MEM: &str = "mem";
-    static HOST: HostApi = HostApi { version: VERSION, ctx: &MEM as *const &str as *mut c_void, translate };
+    unsafe extern "C" fn open_window(_: *mut c_void, _: *mut c_void, _: *const WindowFns, _: Bytes) -> bool {
+        false
+    }
+    unsafe extern "C" fn repaint(_: *mut c_void, _: u64) {}
+    static HOST: HostApi = HostApi { version: VERSION, ctx: &MEM as *const &str as *mut c_void, translate, open_window, repaint };
 
     #[test]
     fn through_the_c_interface() {

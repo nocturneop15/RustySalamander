@@ -12,7 +12,10 @@ How to build, test and change the program. For writing plugins, see [PLUGINS.md]
 cargo build                  # debug build: target\debug\rustysalamander.exe (with a console for logs)
 cargo build --release        # release build: target\release\…, no console window
 cargo test --workspace       # all tests
+tools\stage.ps1              # the built program alone: target\RustySalamander
 ```
+
+`target\release` is Cargo's folder, full of its build cache. `tools\stage.ps1` copies just the program into `target\RustySalamander`, laid out like the release package (program, `lang`, plugins with their languages and changelogs, documents, licenses); run and test it from there. What the program saves there (`config.toml`, `known_hosts`, debug logs) stays from one build to the next.
 
 The first build of `sal-app` compiles `7z.dll` from `third_party/7zip-26.05` with `mingw32-make` (a few minutes), and every build after that reuses it. The build script (`crates/sal-app/build.rs`) then:
 
@@ -85,6 +88,9 @@ Examples are `snapshot_czech` (the main window and Settings in Czech), `snapshot
 ustysalamander.log`. It records each start-up step (configuration, fonts, plugins, each panel) and every frame that takes over 150 ms, split into its parts (menu, each panel, dialogs…), plus background reads. Use it when the program is slow somewhere. |
 | `SAL_DIAG_DIALOG` | `mkdir`, `settings`, `help`, `copy` or `delete`: open that dialog shortly after start-up. Any other value opens a message box. |
 | `SAL_DIAG_DIALOG_CLOSE` | `cancel` or `ok`: close that dialog again after about 3 s. |
+| `SAL_VSYNC` | `on` or `off`: whether frames wait for the screen's refresh. By default on, and off in a Remote Desktop session (frames then at most about 60 a second). The debug log says which, and for each frame with input how long since the last frame and how long that one took. |
+| `SAL_DIAG_VIEW` | Files separated by `;`: open them in the viewer shortly after start-up, as F3 does (the plugins' windows, which the program draws). |
+| `SAL_SOFT` | `bench`: draw every frame of the main window a second time on the processor (`crates/sal-soft`, no graphics card), as a measurement only. The debug log says per frame how long the whole window took, how much of it changed since the last frame and how long redrawing only that took; the fifth frame is saved as `<debug log>.soft.png`. `cargo run --release -p sal-soft --example bench` measures it without the program. |
 | `SAL_DIAG_ANSWER` | Answer the first conflict or error question with *Skip* after about 6 s. |
 | `SAL_DIAG_MENU`, `SAL_DIAG_MENU_MS` | Open both context-menu styles once after start-up, close them by timer after `SAL_DIAG_MENU_MS` ms (default 1000), and log each step to stderr. |
 | `SAL_DIAG_SEARCH` | A folder: search it for `*.dll` files containing a text that isn't there (a long search), keep the results window open for about 6 s, then quit. |
@@ -96,5 +102,5 @@ The `SAL_DIAG_*` variables exist to check dialogs, focus and menus in the real p
 ## Making a release
 
 1. Run `cargo clippy --workspace --all-targets`, `cargo test --workspace` and `cargo build --release`.
-2. Package `target\release` without build leftovers: `rustysalamander.exe`, `lang\`, `plugins\`, plus `README.md`, `CHANGELOG.md`, `LICENSE` (as `LICENSE.txt`), `THIRD-PARTY-NOTICES.md`, `MaterialDesignIcons-LICENSE.txt` (from `crates\sal-ui\fonts\materialdesignicons-LICENSE.txt`) and `USER-MANUAL.md` (from `docs`). Each plugin folder holds its own `CHANGELOG.md`. Leave out `config.toml`, `build\`, `deps\`, `incremental\`, `.fingerprint\`, `*.d` and `*.pdb`.
+2. Package the program with `tools\stage.ps1 -Out target\dist\RustySalamander-<version>-win64 -Fresh` and zip that folder (the folder itself in the zip). It holds `rustysalamander.exe`, `lang\`, `plugins\` (each plugin with its `lang\` and `CHANGELOG.md`, 7-Zip with `7z.dll` and its licenses), `README.md`, `CHANGELOG.md`, `LICENSE.txt`, `THIRD-PARTY-NOTICES.md`, `MaterialDesignIcons-LICENSE.txt` and `USER-MANUAL.md`; no settings and no build leftovers.
 3. Bump `version` in the root `Cargo.toml`. Bump `sal_plugin_api::abi::VERSION` whenever the plugin interface changed.

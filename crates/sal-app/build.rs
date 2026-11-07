@@ -163,7 +163,7 @@ fn build_plugin(manifest: &Path, profile_dir: &Path, package: &str) -> Result<Pa
     let root = manifest.join("../..");
     println!("cargo:rerun-if-changed={}", root.join("plugins").display());
     // the crates plugins share with the program: a change there changes them too
-    for shared in ["crates/sal-plugin-api", "crates/sal-ui", "crates/sal-core"] {
+    for shared in ["crates/sal-plugin-api", "crates/sal-ui", "crates/sal-core", "crates/sal-window", "Cargo.lock"] {
         println!("cargo:rerun-if-changed={}", root.join(shared).display());
     }
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());

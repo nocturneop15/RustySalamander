@@ -29,6 +29,14 @@ macro_rules! export_plugin {
 /// The program, once the plugin has been started.
 static HOST: AtomicPtr<HostApi> = AtomicPtr::new(ptr::null_mut());
 
+/// The program, once the plugin has been started (for `sal-window`).
+#[doc(hidden)]
+pub fn host() -> Option<&'static HostApi> {
+    let host = HOST.load(Ordering::Acquire);
+    // the program keeps it for the whole session
+    unsafe { host.as_ref() }
+}
+
 /// Marks a string for translation where it is defined; [`tr`] translates it
 /// where it is shown.
 pub const fn n_(s: &'static str) -> &'static str {

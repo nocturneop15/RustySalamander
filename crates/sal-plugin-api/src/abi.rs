@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
 /// changes (see the module's "Versions").
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 
 /// The oldest interface version the program still runs plugins of. Version
 /// 5 is the first that tells the plugin's own version.
@@ -187,6 +187,90 @@ impl PathOut {
     }
 }
 
+/// Borrowed bytes: a pointer and a length.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Bytes {
+    /// The first byte; may be dangling when `len` is 0.
+    pub ptr: *const u8,
+    /// Length in bytes.
+    pub len: usize,
+}
+
+impl Bytes {
+    /// Borrows `b`; the result is valid as long as `b` is.
+    pub fn of(b: &[u8]) -> Bytes {
+        Bytes { ptr: b.as_ptr(), len: b.len() }
+    }
+
+    /// The bytes.
+    ///
+    /// # Safety
+    /// `ptr` and `len` must describe valid memory for the lifetime used.
+    pub unsafe fn get<'a>(self) -> &'a [u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        std::slice::from_raw_parts(self.ptr, self.len)
+    }
+}
+
+/// Receives bytes from the other side, which `put` copies.
+#[repr(C)]
+pub struct BytesOut {
+    /// The receiver's data, passed back to `put`.
+    pub ctx: *mut c_void,
+    /// Takes the bytes; they are valid only during this call.
+    pub put: unsafe extern "C" fn(ctx: *mut c_void, b: Bytes),
+}
+
+/// The [`BytesOut`] receiver behind [`BytesOut::new`].
+unsafe extern "C" fn put_bytes(ctx: *mut c_void, b: Bytes) {
+    *(ctx as *mut Vec<u8>) = b.get().to_vec();
+}
+
+impl BytesOut {
+    /// A receiver that writes into `v`.
+    pub fn new(v: &mut Vec<u8>) -> BytesOut {
+        BytesOut { ctx: v as *mut Vec<u8> as *mut c_void, put: put_bytes }
+    }
+
+    /// Sends `b` to the receiver.
+    ///
+    /// # Safety
+    /// `self` must come from the other side and be valid for this call.
+    pub unsafe fn send(&self, b: &[u8]) {
+        (self.put)(self.ctx, Bytes::of(b));
+    }
+}
+
+/// Version 9: a window of a plugin's own, which the program shows and draws.
+///
+/// The plugin keeps what the window shows and its user interface (egui,
+/// without anything that draws); the program owns the window on screen and
+/// draws it with its own graphics. Each frame the program sends the
+/// window's input and gets back what to draw, both encoded by the plugin
+/// side's `sal-window` crate (egui's types, with the egui version checked
+/// when the window opens).
+///
+/// The functions are called on the program's user-interface thread.
+#[repr(C)]
+pub struct WindowFns {
+    /// One frame of the window `win`: `input` in, what to draw sent to
+    /// `out`. Returns [`WINDOW_OPEN`], [`WINDOW_CLOSED`] (the window is to
+    /// go away) or [`WINDOW_FAILED`].
+    pub frame: unsafe extern "C" fn(win: *mut c_void, input: Bytes, out: *const BytesOut) -> i32,
+    /// The window is gone: `win` is not used again.
+    pub free: unsafe extern "C" fn(win: *mut c_void),
+}
+
+/// [`WindowFns::frame`]: the window stays.
+pub const WINDOW_OPEN: i32 = 0;
+/// [`WindowFns::frame`]: the window closes.
+pub const WINDOW_CLOSED: i32 = 1;
+/// [`WindowFns::frame`]: the window failed (a panic) and closes.
+pub const WINDOW_FAILED: i32 = 2;
+
 /// Reports progress of an operation and asks whether to go on.
 #[repr(C)]
 pub struct ProgressFn {
@@ -266,6 +350,14 @@ pub struct HostApi {
     /// from the language files in the plugin's `lang` folder; sends the text
     /// unchanged when there is no translation.
     pub translate: unsafe extern "C" fn(ctx: *mut c_void, msg: Str, out: *const StrOut),
+    /// Version 9: show the plugin's window `win` (see [`WindowFns`]); `init`
+    /// says how it opens (title, icon, size), encoded by `sal-window`.
+    /// Callable from any thread. False when the program can't show it;
+    /// then `win` stays the plugin's to free.
+    pub open_window: unsafe extern "C" fn(ctx: *mut c_void, win: *mut c_void, fns: *const WindowFns, init: Bytes) -> bool,
+    /// Version 9: draw the plugin's windows again in `after_ms`
+    /// milliseconds (0: now). Callable from any thread.
+    pub repaint: unsafe extern "C" fn(ctx: *mut c_void, after_ms: u64),
 }
 
 /// Who a plugin is and how to start it. Static in the DLL: the program

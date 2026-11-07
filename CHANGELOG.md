@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased (experimental branch)
+
+- **Drawing through Direct3D 12 instead of OpenGL** (wgpu), in the main window and in the Viewer and Compare windows: the program starts also where Windows has no OpenGL 2.0 driver, such as a Hyper-V virtual machine or some Remote Desktop sessions; there it draws with Windows' software renderer (WARP). The environment variable `WGPU_BACKEND` (`vulkan`, `dx12`) chooses another way. The debug log names the graphics device in use. (#1)
+- **Faster over Remote Desktop:** in a Remote Desktop session the program no longer waits for the screen's refresh before showing a frame. There the refresh is only simulated, and waiting held every frame for about 94 ms, so a held arrow key moved the cursor about 10 times a second and in jumps. Frames are now shown as soon as they are drawn, at most about 60 a second. `SAL_VSYNC=on|off` chooses, and the debug log shows the pace of the frames.
+- **The program draws the plugins' windows (interface 9):** the Viewer and Compare windows are shown and drawn by the program, with its graphics, instead of each plugin carrying graphics of its own. The plugins only run their user interface and hand the program what to draw. So the graphics library is in the program once, not three times: `viewer.spl` is 7.1 MB instead of 15.9 MB and `compare.spl` 3.7 MB instead of 12.5 MB, and the plugins' windows draw wherever the program's window does.
+- **For plugin authors (interface 9):** `HostApi::open_window` and `HostApi::repaint`, with `abi::WindowFns`, let a plugin's window be shown by the program; the `sal-window` crate does it all behind the same `Windows` and `Content` as before (`Content` must now be `Send`). Plugins for interface 5 to 8 still load, and keep their own windows.
+
 ## 0.9.3-beta (2026-11-06)
 
 - **Debug log:** `rustysalamander.exe -debug` writes everything the program does to a log next to it: the computer (Windows, Remote Desktop, graphics adapters, OpenGL), each user action numbered and marked with what the program did and what came of it, the messages of the graphics libraries, errors and panics. Passwords are left out. Meant for bug reports, such as a start that fails without a word.

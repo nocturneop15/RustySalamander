@@ -468,6 +468,10 @@ pub struct App {
     free: crate::freespace::FreeSpace,
     /// What the debug log last saw of the program's state (`-debug`).
     debug_watch: crate::debuglog::Watch,
+    /// The plugins' windows, which the program draws.
+    plugin_windows: crate::pluginwin::Windows,
+    /// When the last frame began (pacing without vsync, and the debug log).
+    last_frame: Option<Instant>,
 }
 
 /// An open Windows 11 style context menu.
@@ -715,18 +719,16 @@ impl App {
         let cfg = crate::debuglog::time("startup: configuration", Config::load);
         crate::debuglog::write(format!("startup: configuration file {}", sal_core::config::config_path().display()));
         crate::debuglog::time("startup: fonts", || crate::fonts::install(&cc.egui_ctx, &cfg.ui_font, &cfg.mono_font));
-        if let Some(gl) = &cc.gl {
-            use eframe::glow::HasContext;
-            let s = |p| unsafe { gl.get_parameter_string(p) };
+        if let Some(rs) = &cc.wgpu_render_state {
+            let a = rs.adapter.get_info();
             crate::debuglog::write(format!(
-                "startup: OpenGL {} ({}, {}; GLSL {})",
-                s(eframe::glow::VERSION),
-                s(eframe::glow::RENDERER),
-                s(eframe::glow::VENDOR),
-                s(eframe::glow::SHADING_LANGUAGE_VERSION)
+                "startup: graphics {:?} on {} ({:?}, driver {} {}, format {:?})",
+                a.backend, a.name, a.device_type, a.driver, a.driver_info, rs.target_format
             ));
         }
+        crate::softbench::install(&cc.egui_ctx);
         let mut app = App::with_config(&cc.egui_ctx, cfg, args);
+        app.plugin_windows.set_render(cc.wgpu_render_state.clone());
         if let (true, Some(path)) = (crate::debuglog::full(), crate::debuglog::path()) {
             app.status = trf("Debug log: {file}", &[("file", &path.display().to_string())]);
         }
@@ -816,6 +818,8 @@ impl App {
             hwnd: None,
             panel_drag: None,
             debug_watch: Default::default(),
+            plugin_windows: Default::default(),
+            last_frame: None,
             drop_shared: None,
             release_pointer: false,
             job_done: None,
@@ -6300,6 +6304,7 @@ impl eframe::App for App {
             sal_ui::native::set_transitions(h, self.cfg.animations);
             self.transitions = Some(self.cfg.animations);
         }
+        self.pace(ctx, frame);
         if crate::debuglog::full() {
             let (events, closing) = ctx.input(|i| (i.events.clone(), i.viewport().close_requested()));
             crate::debuglog::input(&events, "", false, &|p| self.debug_target(p));
@@ -6308,13 +6313,40 @@ impl eframe::App for App {
             }
         }
         self.frame(ctx);
+        self.plugin_windows.show(ctx, self.hwnd, self.cfg.animations);
         self.diag_menu(ctx);
         self.diag_dialog(ctx);
+        self.diag_view(ctx);
         if crate::debuglog::full() {
             let state = self.debug_state();
             self.debug_watch.look(state);
             crate::debuglog::end_frame();
         }
+    }
+}
+
+/// The shortest time between frames without vsync: about 60 a second.
+const FRAME_MIN: Duration = Duration::from_millis(16);
+
+impl App {
+    /// Frames without vsync (`crate::vsync`) are kept to about 60 a second:
+    /// nothing else paces them, and an animation would draw as fast as the
+    /// processor can. The debug log tells, for a frame with input, how long
+    /// since the last one and how much of it was drawing (the rest is waiting
+    /// for the screen, or for the input).
+    fn pace(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let now = Instant::now();
+        if let Some(last) = self.last_frame {
+            let since = now - last;
+            if !crate::vsync() && since < FRAME_MIN {
+                std::thread::sleep(FRAME_MIN - since);
+            }
+            if crate::debuglog::full() && since < Duration::from_secs(1) && ctx.input(|i| !i.events.is_empty()) {
+                let drew = frame.info().cpu_usage.map(|s| crate::debuglog::ms(Duration::from_secs_f32(s))).unwrap_or_else(|| "?".into());
+                crate::debuglog::write(format!("··· pace     {} since the last frame, which took {drew} to make and draw", crate::debuglog::ms(since)));
+            }
+        }
+        self.last_frame = Some(Instant::now());
     }
 }
 
@@ -6427,6 +6459,24 @@ impl App {
 }
 
 impl App {
+    /// Diagnostics (see docs/DEVELOPMENT.md). SAL_DIAG_VIEW=<files> (separated
+    /// by `;`) opens them in the viewer after start-up, as F3 does, to look
+    /// at the plugins' windows without sending any input.
+    fn diag_view(&mut self, ctx: &egui::Context) {
+        let Some(files) = std::env::var_os("SAL_DIAG_VIEW") else { return };
+        match ctx.cumulative_pass_nr() {
+            0..20 => ctx.request_repaint(),
+            20 => {
+                for f in std::env::split_paths(&files) {
+                    if let Err(e) = self.view_file(&f, false) {
+                        self.status = e;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Diagnostics (see docs/DEVELOPMENT.md). SAL_DIAG_DIALOG=
     /// mkdir|settings|help|copy|delete opens that dialog after start-up (any
     /// other value shows a message box), to look at the dialog windows
@@ -6830,82 +6880,60 @@ mod tests {
         assert!(openers[0].kind == OpenKind::View && openers[0].matches("cokoli 🦎.bin"));
     }
 
-    /// The Viewer plugin's real windows: they open, a second file opens a
-    /// second window, closing the first window keeps the second one (the
-    /// loop's main window takes it over), and the loop starts again for a
-    /// file after all were closed. Opens windows on the desktop for a moment
-    /// and closes them itself (no keys are sent):
-    /// `cargo test -p sal-app viewer_windows_live -- --ignored`
-    #[cfg(windows)]
+    /// The Viewer plugin's real windows, which the program draws: a file
+    /// opens a window, its frames draw the file (triangles and the font
+    /// texture), Escape closes it, and turning the plugin off closes the
+    /// windows it has open.
     #[test]
-    #[ignore]
-    fn viewer_windows_live() {
-        use windows::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, InternalGetWindowText, IsWindowVisible, PostMessageW, WM_CLOSE};
-
-        /// The visible top-level windows of this process whose title holds `part`.
-        fn windows_with(part: &str) -> Vec<(HWND, String)> {
-            unsafe extern "system" fn each(hwnd: HWND, out: LPARAM) -> BOOL {
-                let out = &mut *(out.0 as *mut Vec<(HWND, String)>);
-                let mut pid = 0u32;
-                GetWindowThreadProcessId(hwnd, Some(&mut pid));
-                if pid == std::process::id() && IsWindowVisible(hwnd).as_bool() {
-                    let mut buf = [0u16; 512];
-                    // not GetWindowTextW: it waits for the window's thread
-                    let n = InternalGetWindowText(hwnd, &mut buf);
-                    out.push((hwnd, String::from_utf16_lossy(&buf[..n as usize])));
-                }
-                BOOL(1)
-            }
-            let mut all: Vec<(HWND, String)> = Vec::new();
-            unsafe {
-                let _ = EnumWindows(Some(each), LPARAM(&mut all as *mut _ as isize));
-            }
-            all.into_iter().filter(|(_, t)| t.contains(part)).collect()
-        }
-        fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
-            for _ in 0..300 {
-                if f() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            panic!("timed out: {what}; windows: {:?}", windows_with("").iter().map(|(_, t)| t.clone()).collect::<Vec<_>>());
-        }
-
+    fn viewer_windows() {
+        use egui::{Event, Key, RawInput, ViewportId, ViewportInfo};
         let Some(dir) = built_library() else { panic!("plugins not built") };
         let mut p = Plugins::scan(Some(&dir));
         p.start(&[]);
         let viewer = p.get("viewer").unwrap_or_else(|| panic!("{:?}", p.errors)).clone();
         let t = tempfile::tempdir().unwrap();
         let (a, b) = (t.path().join("první 🦎.json"), t.path().join("druhý.bin"));
-        // a JSON file is colored in the background while its window is open
-        fs::write(&a, "{\n  \"text\": \"Příliš žluťoučký kůň 日本語\",\n  \"count\": 42\n}\n").unwrap();
+        fs::write(&a, "{
+  \"text\": \"Příliš žluťoučký kůň 日本語\",
+  \"count\": 42
+}
+").unwrap();
         fs::write(&b, [0u8, 1, 2, 3, 255]).unwrap();
-        // with animations on, and off (the windows made hidden, then shown)
-        for animations in ["on", "off"] {
-            let options: plugins::Values = [("theme".to_owned(), "dark".to_owned()), ("animations".to_owned(), animations.to_owned())].into();
-            viewer.open_file("text", &a, &options).unwrap();
-            wait_for("the first window", || windows_with("první 🦎.json").len() == 1);
-            viewer.open_file("text", &b, &options).unwrap();
-            wait_for("the second window", || windows_with("druhý.bin").len() == 1);
-            // closing the first (the loop's main window) keeps the second
-            let (first, _) = windows_with("první 🦎.json")[0];
-            unsafe { PostMessageW(first, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
-            wait_for("the first file's window gone", || windows_with("první 🦎.json").is_empty());
-            wait_for("the second file stays open, in one window", || windows_with("druhý.bin").len() == 1);
-            let (second, _) = windows_with("druhý.bin")[0];
-            unsafe { PostMessageW(second, WM_CLOSE, WPARAM(0), LPARAM(0)).unwrap() };
-            wait_for("all closed", || windows_with(" - Viewer").is_empty());
-        }
+        let input = |events: Vec<Event>| {
+            let mut raw = RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))), events, ..Default::default() };
+            raw.viewports.insert(ViewportId::ROOT, ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() });
+            raw
+        };
+        // the window's content is made in the background, then handed to the program
+        let opened = |n: usize| {
+            let mut all = Vec::new();
+            for _ in 0..300 {
+                all.extend(crate::pluginwin::take_opened());
+                if all.len() >= n {
+                    return all;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            panic!("{} windows of {n} opened", all.len());
+        };
         let options: plugins::Values = [("theme".to_owned(), "dark".to_owned())].into();
-        // the loop starts again for the next file
         viewer.open_file("text", &a, &options).unwrap();
-        wait_for("a window again", || windows_with("první 🦎.json").len() == 1);
+        let mut wins = opened(1);
+        assert!(wins[0].0.contains("první 🦎.json"), "{}", wins[0].0);
+        let first = (wins[0].1)(input(vec![])).expect("the window stays");
+        assert!(first.title.contains("první 🦎.json"));
+        assert!(!first.meshes.is_empty() && !first.textures.set.is_empty(), "the file drawn, with the font");
+        assert!(first.commands.contains(&egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark)));
+        let escape = Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        assert!((wins[0].1)(input(vec![escape])).is_none(), "Escape closes it");
+        drop(wins);
         // turning the plugin off closes its windows
+        viewer.open_file("text", &b, &options).unwrap();
+        wins = opened(1);
+        assert!((wins[0].1)(input(vec![])).is_some());
         drop(viewer);
         p.start(&["viewer".to_owned()]);
-        wait_for("closed with the plugin", || windows_with(" - Viewer").is_empty());
+        assert!((wins[0].1)(input(vec![])).is_none(), "closed with the plugin");
     }
 
     fn arc_ui(left: &Path, right: &Path) -> Option<Ui> {

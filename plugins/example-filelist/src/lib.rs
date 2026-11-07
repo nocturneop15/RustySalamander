@@ -187,7 +187,7 @@ impl FolderPlugin for FileList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sal_plugin_api::abi::{HostApi, Str, StrOut, VERSION};
+    use sal_plugin_api::abi::{Bytes, HostApi, Str, StrOut, WindowFns, VERSION};
     use std::ffi::c_void;
 
     /// Tests can call the plugin directly, as above, or through the C
@@ -196,7 +196,12 @@ mod tests {
         unsafe extern "C" fn translate(_: *mut c_void, msg: Str, out: *const StrOut) {
             (*out).send(msg.get());
         }
-        static HOST: HostApi = HostApi { version: VERSION, ctx: std::ptr::null_mut(), translate };
+        // a plugin with folders only opens no windows
+        unsafe extern "C" fn open_window(_: *mut c_void, _: *mut c_void, _: *const WindowFns, _: Bytes) -> bool {
+            false
+        }
+        unsafe extern "C" fn repaint(_: *mut c_void, _: u64) {}
+        static HOST: HostApi = HostApi { version: VERSION, ctx: std::ptr::null_mut(), translate, open_window, repaint };
         let desc = unsafe { &*rustysalamander_plugin() };
         unsafe { sal_plugin_api::host::start(desc, &HOST, Path::new(".")) }.unwrap()
     }

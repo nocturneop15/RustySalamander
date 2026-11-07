@@ -1,28 +1,35 @@
 //! Windows of a plugin's own (a viewer, a comparison), for plugins that show
 //! files in windows instead of the program's panels.
 //!
-//! They run on a thread of the plugin's own, with an event loop of their own
-//! (egui and its window library are inside the plugin's DLL, apart from the
-//! program's), kept for the whole session: the loop runs while a window is
-//! open and waits for the next one when the last one closes.
+//! The program shows and draws them (interface 9, `abi::WindowFns`): the
+//! plugin keeps what a window shows and runs its egui, which only says what
+//! to draw; the program owns the window on screen, sends it its input and
+//! draws the triangles it gets back with its own graphics. So a plugin
+//! carries no graphics of its own, and its windows draw wherever the
+//! program's window does.
 //!
-//! The first window is the loop's main window; more open beside it. When the
-//! main window is closed while others are open, it takes over the newest of
-//! them (its content and its place), so every window closes on its own. The
-//! windows follow the program's look (`options` of
-//! `FolderPlugin::open_file`): theme, fonts, scroll bars, accent colors and animations.
+//! A window's content is made on a thread of its own (reading a file for it
+//! doesn't hold up the program); its frames run on the program's
+//! user-interface thread. The windows follow the program's look (`options`
+//! of `FolderPlugin::open_file`): theme, fonts, scroll bars, accent colors
+//! and animations.
 
+pub mod wire;
+
+use std::ffi::c_void;
 use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-pub use eframe::egui;
-use eframe::egui::{ViewportBuilder, ViewportCommand, ViewportId};
+pub use egui;
+use egui::{ViewportCommand, ViewportId};
+use sal_plugin_api::abi::{Bytes, BytesOut, HostApi, WindowFns, WINDOW_CLOSED, WINDOW_FAILED, WINDOW_OPEN};
 use sal_plugin_api::Values;
 
 /// What a window shows.
-pub trait Content {
+pub trait Content: Send {
     /// The window's title.
     fn title(&self) -> String;
     /// Draw the window's panels into `ctx`; false closes it. Escape and F10
@@ -35,190 +42,182 @@ pub trait Content {
     }
 }
 
-/// Makes a window's content, on the windows' thread (where reading a file
+/// Makes a window's content, on a thread of its own (where reading a file
 /// for it doesn't hold up the program).
 pub type Make = Box<dyn FnOnce() -> Box<dyn Content> + Send>;
 
-enum Msg {
-    Open(Make, Values),
-    Quit,
-}
-
-type Slot = Arc<Mutex<Option<egui::Context>>>;
-
-/// A plugin's windows: a thread started with the first one.
+/// A plugin's windows.
 pub struct Windows {
-    tx: Mutex<Option<Sender<Msg>>>,
-    /// The windows' context while the loop runs, to wake it for a new window.
-    ctx: Slot,
     /// The windows' icon and size.
     icon: fn() -> Arc<egui::IconData>,
     size: [f32; 2],
+    /// Set when the plugin stops: its windows close.
+    stopped: Arc<AtomicBool>,
 }
 
 impl Windows {
     /// Windows with this icon (one of `sal_ui::icon`), opening at `size`.
     pub fn new(icon: fn() -> Arc<egui::IconData>, size: [f32; 2]) -> Windows {
-        Windows { tx: Mutex::new(None), ctx: Arc::new(Mutex::new(None)), icon, size }
+        Windows { icon, size, stopped: Arc::new(AtomicBool::new(false)) }
     }
 
     /// Show what `make` makes in a new window, looking as `options` say.
     pub fn open(&self, make: Make, options: Values) -> io::Result<()> {
-        let mut tx = self.tx.lock().unwrap();
-        let mut msg = Msg::Open(make, options);
-        if let Some(t) = tx.as_ref() {
-            match t.send(msg) {
-                Ok(()) => {
-                    self.wake();
-                    return Ok(());
-                }
-                // the thread ended: start it again
-                Err(mpsc::SendError(m)) => msg = m,
+        let host = sal_plugin_api::export::host().filter(|h| h.version >= 9).ok_or_else(|| io::Error::other("this RustySalamander can't show the plugin's windows"))?;
+        let (icon, size, stopped) = (self.icon, self.size, self.stopped.clone());
+        std::thread::Builder::new().name("plugin window".into()).spawn(move || {
+            let Ok(content) = catch_unwind(AssertUnwindSafe(make)) else { return };
+            let win = Box::new(Window::new(content, &options, Some(host), stopped));
+            let init = wire::Init { egui: wire::EGUI.into(), title: win.content.title(), icon: (*icon()).clone(), size };
+            let init = wire::encode(&init);
+            let win = Box::into_raw(win);
+            // the program owns it now, or it couldn't take it
+            if !unsafe { (host.open_window)(host.ctx, win as *mut c_void, &FNS, Bytes::of(&init)) } {
+                drop(unsafe { Box::from_raw(win) });
             }
-        }
-        let t = spawn(self.ctx.clone(), Frame { icon: self.icon, size: self.size })?;
-        t.send(msg).map_err(|_| io::Error::other("the windows' thread ended"))?;
-        *tx = Some(t);
+        })?;
         Ok(())
-    }
-
-    /// Wake the windows' loop to handle a new window.
-    fn wake(&self) {
-        if let Some(ctx) = &*self.ctx.lock().unwrap() {
-            ctx.request_repaint();
-        }
     }
 }
 
 impl Drop for Windows {
     /// The plugin stops: its windows close.
     fn drop(&mut self) {
-        if let Some(t) = self.tx.lock().unwrap().take() {
-            let _ = t.send(Msg::Quit);
-            self.wake();
+        self.stopped.store(true, Ordering::Release);
+        if let Some(host) = sal_plugin_api::export::host().filter(|h| h.version >= 9) {
+            unsafe { (host.repaint)(host.ctx, 0) };
         }
     }
 }
 
-/// What every window of the thread has: its icon and first size.
-#[derive(Clone, Copy)]
-struct Frame {
-    icon: fn() -> Arc<egui::IconData>,
-    size: [f32; 2],
-}
+/// The functions the program calls for every window.
+static FNS: WindowFns = WindowFns { frame, free };
 
-impl Frame {
-    /// A window's title, icon and size.
-    fn builder(self, title: &str) -> ViewportBuilder {
-        ViewportBuilder::default().with_title(title).with_icon((self.icon)()).with_inner_size(self.size)
-    }
-}
-
-/// Start the windows' thread; the sender of its windows.
-fn spawn(slot: Slot, frame: Frame) -> io::Result<Sender<Msg>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new().name("plugin windows".into()).spawn(move || run(rx, slot, frame))?;
-    Ok(tx)
-}
-
-/// The thread: a loop of windows per run of them, until the plugin stops.
-fn run(rx: Receiver<Msg>, slot: Slot, frame: Frame) {
-    let mut quit = false;
-    while !quit {
-        let Ok(Msg::Open(make, options)) = rx.recv() else { return };
-        let r = catch_unwind(AssertUnwindSafe(|| {
-            let content = make();
-            let native = eframe::NativeOptions {
-                viewport: frame.builder(&content.title()),
-                // the program's thread has its own loop; this one is apart
-                event_loop_builder: Some(Box::new(|b| {
-                    use winit::platform::windows::EventLoopBuilderExtWindows;
-                    b.with_any_thread(true);
-                })),
-                // the loop is kept for the next window
-                run_and_return: true,
-                ..Default::default()
-            };
-            eframe::run_native(
-                "RustySalamander plugin",
-                native,
-                Box::new(|cc| {
-                    *slot.lock().unwrap() = Some(cc.egui_ctx.clone());
-                    let mut look = Look::default();
-                    look.apply(&cc.egui_ctx, &options);
-                    Ok(Box::new(App { wins: vec![Win::new(ViewportId::ROOT, content, owner_of(&options), 0)], rx: &rx, look, frame, serial: 0, quit: &mut quit }))
-                }),
-            )
-        }));
-        *slot.lock().unwrap() = None;
-        flush_messages();
-        if r.is_err() {
-            // a panic in a window: the next one starts afresh
-            continue;
-        }
-    }
-}
-
-/// Handle the messages left for this thread's windows. A window that is
-/// dropped when the loop ends is only asked to go away (a message); without
-/// this it would stay on screen, frozen, until the next window.
-fn flush_messages() {
-    use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE};
-    let _ = catch_unwind(|| {
-        let mut msg = MSG::default();
-        unsafe {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+/// [`WindowFns::frame`].
+unsafe extern "C" fn frame(win: *mut c_void, input: Bytes, out: *const BytesOut) -> i32 {
+    let w = &mut *(win as *mut Window);
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let raw = wire::decode::<egui::RawInput>(input.get())?;
+        Some(w.frame(raw))
+    }));
+    match r {
+        Ok(Some((open, output))) => {
+            (*out).send(&wire::encode(&output));
+            if open {
+                WINDOW_OPEN
+            } else {
+                WINDOW_CLOSED
             }
         }
-    });
+        _ => WINDOW_FAILED,
+    }
+}
+
+/// [`WindowFns::free`].
+unsafe extern "C" fn free(win: *mut c_void) {
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(win as *mut Window))));
+}
+
+/// One window: its content and its egui.
+struct Window {
+    ctx: egui::Context,
+    content: Box<dyn Content>,
+    look: Look,
+    /// Its title bar follows the theme.
+    themed: bool,
+    stopped: Arc<AtomicBool>,
+}
+
+impl Window {
+    /// A window showing `content`; `host` is woken when it is to be drawn
+    /// again (something in the background changed it).
+    fn new(content: Box<dyn Content>, options: &Values, host: Option<&'static HostApi>, stopped: Arc<AtomicBool>) -> Window {
+        let ctx = egui::Context::default();
+        if let Some(host) = host {
+            ctx.set_request_repaint_callback(move |info| {
+                let ms = info.delay.as_millis().min(u64::MAX as u128) as u64;
+                unsafe { (host.repaint)(host.ctx, ms) };
+            });
+        }
+        let mut look = Look::default();
+        look.apply(&ctx, options);
+        Window { ctx, content, look, themed: false, stopped }
+    }
+
+    /// One frame: whether the window stays, and what to draw.
+    fn frame(&mut self, raw: egui::RawInput) -> (bool, wire::Output) {
+        let mut open = !self.stopped.load(Ordering::Acquire);
+        let Window { ctx, content, look, themed, .. } = self;
+        let full = ctx.run(raw, |ctx| {
+            if !*themed {
+                ctx.send_viewport_cmd(ViewportCommand::SetTheme(look.system_theme()));
+                *themed = true;
+            }
+            let (closing, escape, f10) = ctx.input(|i| (i.viewport().close_requested(), i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::F10)));
+            if closing || f10 || escape && !content.takes_escape() {
+                open = false;
+            }
+            if !content.show(ctx) {
+                open = false;
+            }
+        });
+        let mut viewport = full.viewport_output.into_iter().find(|(id, _)| *id == ViewportId::ROOT).map(|(_, v)| v);
+        let mut commands = viewport.as_mut().map(|v| std::mem::take(&mut v.commands)).unwrap_or_default();
+        if commands.contains(&ViewportCommand::Close) {
+            open = false;
+            commands.retain(|c| *c != ViewportCommand::Close);
+        }
+        let delay = viewport.map_or(Duration::MAX, |v| v.repaint_delay);
+        let meshes = ctx
+            .tessellate(full.shapes, full.pixels_per_point)
+            .into_iter()
+            .filter_map(|p| match p.primitive {
+                egui::epaint::Primitive::Mesh(m) => Some((p.clip_rect, m)),
+                // a paint callback would need the plugin's own graphics
+                egui::epaint::Primitive::Callback(_) => None,
+            })
+            .collect();
+        let output = wire::Output {
+            title: content.title(),
+            textures: full.textures_delta,
+            meshes,
+            pixels_per_point: full.pixels_per_point,
+            platform: full.platform_output,
+            commands,
+            repaint_after: (delay != Duration::MAX).then_some(delay.as_secs_f64()),
+        };
+        (open, output)
+    }
 }
 
 /// How the program looks, which the windows follow.
 #[derive(Default, PartialEq, Clone)]
 struct Look {
     theme: String,
-    ui_font: String,
-    mono_font: String,
-    solid_bars: bool,
-    /// The accent colors of the light and the dark theme.
-    accent: (Option<[u8; 3]>, Option<[u8; 3]>),
-    /// Fading in, smooth scrolling and Windows' own animation of the windows.
-    animations: bool,
-    fonts_done: bool,
 }
 
 impl Look {
-    /// Follow the program's look in `options` (fonts only when they changed).
+    /// Follow the program's look in `options`.
     fn apply(&mut self, ctx: &egui::Context, options: &Values) {
         let get = |k: &str| options.get(k).cloned().unwrap_or_default();
-        let (ui_font, mono_font) = (get("ui_font"), get("mono_font"));
-        if !self.fonts_done || ui_font != self.ui_font || mono_font != self.mono_font {
-            sal_ui::fonts::install(ctx, &ui_font, &mono_font);
-            self.fonts_done = true;
-        }
-        (self.ui_font, self.mono_font) = (ui_font, mono_font);
+        sal_ui::fonts::install(ctx, &get("ui_font"), &get("mono_font"));
         self.theme = get("theme");
         ctx.set_theme(match self.theme.as_str() {
             "light" => egui::ThemePreference::Light,
             "dark" => egui::ThemePreference::Dark,
             _ => egui::ThemePreference::System,
         });
-        self.solid_bars = get("scrollbars") == "solid";
-        sal_ui::apply_scrollbars(ctx, self.solid_bars);
+        sal_ui::apply_scrollbars(ctx, get("scrollbars") == "solid");
         // programs before 0.7.1 don't say: animated, as they were
-        self.animations = get("animations") != "off";
-        sal_ui::apply_animations(ctx, self.animations);
+        sal_ui::apply_animations(ctx, get("animations") != "off");
         // the program's spacing
         sal_ui::layout::apply(ctx);
         // programs before 0.5.9 send one color for both themes
         let one = |k: &str| if options.contains_key(k) { sal_ui::parse_accent(&get(k)) } else { sal_ui::parse_accent(&get("accent")) };
-        self.accent = (one("accent_light"), one("accent_dark"));
-        sal_ui::apply_accent(ctx, self.accent.0, self.accent.1);
+        sal_ui::apply_accent(ctx, one("accent_light"), one("accent_dark"));
     }
 
-    /// The theme of the windows' title bars.
+    /// The theme of the window's title bar.
     fn system_theme(&self) -> egui::SystemTheme {
         match self.theme.as_str() {
             "light" => egui::SystemTheme::Light,
@@ -228,146 +227,62 @@ impl Look {
     }
 }
 
-struct App<'a> {
-    /// The windows; the first is the loop's main window.
-    wins: Vec<Win>,
-    rx: &'a Receiver<Msg>,
-    look: Look,
-    frame: Frame,
-    serial: u64,
-    quit: &'a mut bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl eframe::App for App<'_> {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                Msg::Open(make, options) => {
-                    let before = self.look.clone();
-                    self.look.apply(ctx, &options);
-                    if self.look != before {
-                        self.wins.iter_mut().for_each(|w| w.themed = false);
-                    }
-                    self.serial += 1;
-                    let step = self.wins.len();
-                    self.wins.push(Win::new(ViewportId::from_hash_of(("plugin window", self.serial)), make(), owner_of(&options), step));
-                }
-                Msg::Quit => {
-                    *self.quit = true;
-                    ctx.send_viewport_cmd(ViewportCommand::Close);
-                    return;
-                }
-            }
+    struct Hello(u32);
+    impl Content for Hello {
+        fn title(&self) -> String {
+            format!("Hello {}", self.0)
         }
-
-        // the main window
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.wins.len() == 1 {
-                return;
-            }
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.wins[0].open = false;
-        }
-        let look = &self.look;
-        self.wins[0].show(ctx, look);
-        // the others
-        let frame = self.frame;
-        for w in &mut self.wins[1..] {
-            // made hidden, shown once Windows is told about its animation
-            ctx.show_viewport_immediate(w.id, frame.builder(&w.content.title()).with_visible(false), |ctx, _| {
-                if ctx.input(|i| i.viewport().close_requested()) {
-                    w.open = false;
-                }
-                w.show(ctx, look);
-            });
-        }
-        let before = self.wins.len();
-        let others: Vec<Win> = self.wins.drain(1..).filter(|w| w.open).collect();
-        self.wins.extend(others);
-        // a window that is no longer shown goes away in the next frame
-        if self.wins.len() != before || !self.wins[0].open {
-            ctx.request_repaint();
-        }
-        if !self.wins[0].open {
-            match self.wins.pop() {
-                // the main window takes over the newest other one
-                Some(next) if !self.wins.is_empty() => {
-                    if let Some((pos, size)) = next.place {
-                        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
-                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-                    }
-                    ctx.send_viewport_cmd(ViewportCommand::Title(next.content.title()));
-                    ctx.send_viewport_cmd(ViewportCommand::Focus);
-                    self.wins[0] = Win { id: ViewportId::ROOT, ..next };
-                }
-                _ => ctx.send_viewport_cmd(ViewportCommand::Close),
-            }
+        fn show(&mut self, ctx: &egui::Context) -> bool {
+            self.0 += 1;
+            egui::CentralPanel::default().show(ctx, |ui| ui.label("Příliš žluťoučký kůň"));
+            true
         }
     }
-}
 
-/// One window.
-struct Win {
-    id: ViewportId,
-    content: Box<dyn Content>,
-    open: bool,
-    /// Its title bar follows the theme.
-    themed: bool,
-    /// Windows was told about its animation (animations off: the window,
-    /// made hidden, then shown).
-    settled: bool,
-    /// Where it is: the outer position and the inner size.
-    place: Option<(egui::Pos2, egui::Vec2)>,
-    /// The program's window, which it opens over (on the same monitor), and
-    /// how many windows were open before it (each one a bit further down).
-    owner: Option<isize>,
-    step: usize,
-}
-
-/// The program's window, from `options` (`owner`: its handle as a number;
-/// programs before 0.9.1 don't send it).
-fn owner_of(options: &Values) -> Option<isize> {
-    options.get("owner")?.parse().ok().filter(|&h: &isize| h != 0)
-}
-
-impl Win {
-    /// A window for `content`, opening over `owner`.
-    fn new(id: ViewportId, content: Box<dyn Content>, owner: Option<isize>, step: usize) -> Win {
-        Win { id, content, open: true, themed: false, settled: false, place: None, owner, step }
+    fn input(events: Vec<egui::Event>) -> egui::RawInput {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let mut raw = egui::RawInput { screen_rect: Some(rect), events, ..Default::default() };
+        raw.viewports.insert(ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(1.25), ..Default::default() });
+        raw
     }
 
-    /// Draw the window; Escape and F10 close it.
-    fn show(&mut self, ctx: &egui::Context, look: &Look) {
-        if !self.settled {
-            // the window is still hidden (eframe shows the first one after its
-            // first frame, the others are made hidden): no animation from Windows
-            // when animations are off, then shown
-            if let Some(h) = sal_ui::native::thread_window(&self.content.title()) {
-                sal_ui::native::set_transitions(h, look.animations);
-                // over the program's window, on its monitor
-                if let Some(owner) = self.owner {
-                    sal_ui::native::place_over(h, owner, self.step);
-                }
-            }
-            // the first window eframe shows itself, once its first frame is drawn
-            if self.id != ViewportId::ROOT {
-                ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-            }
-            self.settled = true;
+    fn key(k: egui::Key) -> egui::Event {
+        egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn a_window_draws_and_closes() {
+        let options: Values = [("theme".to_owned(), "dark".to_owned())].into();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut w = Window::new(Box::new(Hello(0)), &options, None, stopped.clone());
+        let (open, out) = w.frame(input(vec![]));
+        assert!(open);
+        assert_eq!((out.title.as_str(), out.pixels_per_point), ("Hello 1", 1.25));
+        assert!(!out.meshes.is_empty(), "something to draw");
+        assert!(!out.textures.set.is_empty(), "the font texture");
+        assert!(out.commands.contains(&ViewportCommand::SetTheme(egui::SystemTheme::Dark)));
+        // through the C functions, as the program calls them
+        let raw = wire::encode(&input(vec![key(egui::Key::A)]));
+        let mut bytes = Vec::new();
+        let p = Box::into_raw(Box::new(w));
+        assert_eq!(unsafe { frame(p as *mut c_void, Bytes::of(&raw), &BytesOut::new(&mut bytes)) }, WINDOW_OPEN);
+        let out: wire::Output = wire::decode(&bytes).unwrap();
+        assert_eq!(out.title, "Hello 2");
+        assert_eq!(unsafe { frame(p as *mut c_void, Bytes::of(&[9, 9]), &BytesOut::new(&mut bytes)) }, WINDOW_FAILED);
+        let mut w = unsafe { Box::from_raw(p) };
+        // Escape, F10 and the close button close it, as does the plugin stopping
+        for e in [vec![key(egui::Key::Escape)], vec![key(egui::Key::F10)]] {
+            assert!(!w.frame(input(e)).0);
         }
-        if !self.themed {
-            ctx.send_viewport_cmd(ViewportCommand::SetTheme(look.system_theme()));
-            self.themed = true;
-        }
-        if let Some((outer, inner)) = ctx.input(|i| Some((i.viewport().outer_rect?, i.viewport().inner_rect?))) {
-            self.place = Some((outer.min, inner.size()));
-        }
-        let escape = !self.content.takes_escape() && ctx.input(|i| i.key_pressed(egui::Key::Escape));
-        if escape || ctx.input(|i| i.key_pressed(egui::Key::F10)) {
-            self.open = false;
-        }
-        if !self.content.show(ctx) {
-            self.open = false;
-        }
+        let mut closing = input(vec![]);
+        closing.viewports.get_mut(&ViewportId::ROOT).unwrap().events.push(egui::ViewportEvent::Close);
+        assert!(!w.frame(closing).0);
+        assert!(w.frame(input(vec![])).0);
+        stopped.store(true, Ordering::Release);
+        assert!(!w.frame(input(vec![])).0);
     }
 }

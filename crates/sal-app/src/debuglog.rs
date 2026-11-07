@@ -4,8 +4,8 @@
 //!   what went wrong. It goes to `rustysalamander-debug-<date>-<time>.log`
 //!   next to the program (in the temporary folder when that can't be
 //!   written); `-debug=<file>` names the file. It has the computer (Windows,
-//!   graphics adapters, Remote Desktop, OpenGL), every user action and what
-//!   came of it, the messages of the libraries (window, OpenGL), panics, and
+//!   graphics adapters, Remote Desktop, the graphics device), every user action and what
+//!   came of it, the messages of the libraries (window, graphics), panics, and
 //!   the timing below.
 //! - **`RUSTYSALAMANDER_LOG`** set to a file path, or to `1` for
 //!   `rustysalamander.log` in the temporary folder: only the timing (startup
@@ -251,15 +251,23 @@ pub fn ms(d: Duration) -> String {
     format!("{:.1} ms", d.as_secs_f64() * 1000.0)
 }
 
-/// The messages of the libraries (eframe, winit, glutin, egui_glow) into the
+/// The messages of the libraries (eframe, winit, wgpu) into the
 /// debug log.
 struct Bridge;
 
 impl log::Log for Bridge {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        // the graphics libraries tell a lot at debug level
-        let quiet = ["wgpu", "naga"].iter().any(|t| m.target().starts_with(t));
-        m.level() <= if quiet { log::Level::Info } else { log::Level::Debug }
+        // wgpu tells something every frame: only its problems, and the
+        // adapters it found (and egui_wgpu which one it took)
+        let t = m.target();
+        let max = if t.starts_with("wgpu_core::instance") || t.starts_with("egui_wgpu") {
+            log::Level::Debug
+        } else if t.starts_with("wgpu") || t.starts_with("naga") {
+            log::Level::Warn
+        } else {
+            log::Level::Debug
+        };
+        m.level() <= max
     }
 
     fn log(&self, r: &log::Record) {

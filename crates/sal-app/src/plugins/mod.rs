@@ -176,7 +176,13 @@ impl Found {
     /// A plugin found in `file`, with its translations ready.
     fn new(info: Info, file: PathBuf, desc: &'static Descriptor) -> Found {
         let lang: &'static PathBuf = Box::leak(Box::new(file.parent().unwrap_or(Path::new(".")).join("lang")));
-        let host = Box::leak(Box::new(HostApi { version: abi::VERSION, ctx: lang as *const PathBuf as *mut c_void, translate }));
+        let host = Box::leak(Box::new(HostApi {
+            version: abi::VERSION,
+            ctx: lang as *const PathBuf as *mut c_void,
+            translate,
+            open_window: crate::pluginwin::open_window,
+            repaint: crate::pluginwin::repaint,
+        }));
         Found { info, file, desc, host }
     }
 
