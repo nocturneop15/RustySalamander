@@ -9,13 +9,18 @@
 //! Rectangles, most of what egui draws (panels, selections, glyphs, icons),
 //! take a fast path; everything else goes triangle by triangle. The frame is
 //! cut into bands of rows, drawn on several threads. A frame can be drawn
-//! only in part ([`Painter::paint`]'s `region`), where it changed.
+//! only in part ([`Painter::paint`]'s `region`), where it changed
+//! ([`Damage`]).
+
+mod damage;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use egui::epaint::{ClippedPrimitive, ImageData, ImageDelta, Mesh, Primitive, Vertex};
 use egui::{Color32, Rect, TextureFilter, TextureId, TexturesDelta};
+
+pub use damage::Damage;
 
 /// A bitmap: rows top-down, pixels `0x00RRGGBB` (a 32-bit DIB's layout).
 #[derive(Clone, Default)]
@@ -193,11 +198,6 @@ impl Painter {
                 self.textures.insert(id, Texture { w: w as i32, h: h as i32, px, linear });
             }
         }
-    }
-
-    /// Whether it has this texture.
-    pub fn has_texture(&self, id: TextureId) -> bool {
-        self.textures.contains_key(&id)
     }
 
     /// Draw `primitives` into `frame` (cleared to `clear` first). With a

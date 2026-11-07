@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.5-alpha (2026-11-07)
+
+- **Drawn by the program:** the comparison window is shown and drawn by RustySalamander (plugin interface 9), so the plugin no longer carries a graphics library of its own and is much smaller, and the window draws wherever the program's does: also on the processor over Remote Desktop and on Windows 8.1 / Server 2012 R2. Needs RustySalamander 0.9.4-beta or later.
+
 ## 0.1.4-alpha (2026-11-05)
 
 - **Opens on the program's monitor:** the comparison window appears over RustySalamander's window, on the same monitor (with RustySalamander 0.9.1-beta and later; before, it opened where Windows put it). Built for plugin interface 8.

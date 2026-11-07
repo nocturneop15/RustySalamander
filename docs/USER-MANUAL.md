@@ -1,6 +1,6 @@
 # RustySalamander user manual
 
-RustySalamander is a modern two-panel file manager for Windows 10 and 11, inspired by the long-proven efficiency and functionality of Altap Salamander. It handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
+RustySalamander is a modern two-panel file manager for Windows 10 and 11 (it also runs on Windows 8.1 and Windows Server 2012 R2), inspired by the long-proven efficiency and functionality of Altap Salamander. It handles file names in every language. This manual explains how to use it: first the everyday tasks, then every setting, menu and key.
 
 Version 0.8.4-beta.
 
@@ -710,6 +710,7 @@ Everything is in the program's folder:
 - **Dragging out of an archive says *Windows Projected File System* is needed:** turn that Windows feature on once (see [Dragging out of the window](#dragging-out-of-the-window)). Until then, F5 and dragging to the other panel work.
 - **A program refuses items dragged from an archive or server, or gets incomplete files:** RustySalamander must keep running until the copy has finished; the files are read from the archive or server while it copies.
 - **Things move too much:** View → *Animations* off.
+- **Over Remote Desktop:** the program draws its windows on the processor there and sends only what changed, which keeps it quick also in large windows; animations are off then. It does the same on Windows without Direct3D 12 (8.1, Server 2012 R2). The environment variable `SAL_RENDER` chooses: `gdi` always so, `wgpu` always with the graphics card.
 - **Going back to an older version:** after an update the previous version's folder is still there; just run it.
 - **The program doesn't start, or something else goes wrong:** run it with `-debug` and attach the log to the bug report (see below).
 

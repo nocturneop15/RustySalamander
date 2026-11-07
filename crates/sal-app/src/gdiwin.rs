@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use eframe::egui::{self, ImmediateViewport, ViewportBuilder, ViewportCommand, ViewportId, ViewportIdPair, ViewportInfo, ViewportOutput};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use sal_soft::{Area, Frame, Painter};
+use sal_soft::{Area, Damage, Frame, Painter};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -74,7 +74,7 @@ pub fn run(builder: ViewportBuilder, args: Vec<String>) -> Result<(), String> {
     });
     let painter = Painter::new();
     crate::debuglog::write(format!("startup: graphics GDI, drawn on the processor ({} threads)", painter.threads()));
-    let shared = Rc::new(RefCell::new(Shared { ctx: ctx.clone(), painter, viewports: HashMap::new(), by_window: HashMap::new(), start: Instant::now() }));
+    let shared = Rc::new(RefCell::new(Shared { ctx: ctx.clone(), painter, viewports: HashMap::new(), by_window: HashMap::new(), start: Instant::now(), textures_changed: 0 }));
     let weak = Rc::downgrade(&shared);
     egui::Context::set_immediate_viewport_renderer(move |_ctx, immediate| {
         if let Some(shared) = weak.upgrade() {
@@ -95,6 +95,9 @@ struct Shared {
     viewports: HashMap<ViewportId, Viewport>,
     by_window: HashMap<WindowId, ViewportId>,
     start: Instant,
+    /// Counts the frames that changed a texture: a window drawn since
+    /// fewer is drawn whole, as the texture may show in it.
+    textures_changed: u64,
 }
 
 /// A window: egui's viewport and what shows it.
@@ -414,6 +417,9 @@ fn take_actions(sh: &mut Shared, vid: ViewportId) {
 /// Draw a frame of the window `vid` and show what changed.
 fn draw(sh: &mut Shared, vid: ViewportId, shapes: Vec<egui::epaint::ClippedShape>, ppp: f32, textures: &egui::TexturesDelta) {
     sh.painter.set_textures(textures);
+    if !textures.set.is_empty() {
+        sh.textures_changed += 1;
+    }
     let clear = sh.ctx.style().visuals.panel_fill;
     if let Some(v) = sh.viewports.get_mut(&vid) {
         if let (Some(window), Some(screen)) = (&v.window, v.screen.as_mut()) {
@@ -421,13 +427,21 @@ fn draw(sh: &mut Shared, vid: ViewportId, shapes: Vec<egui::epaint::ClippedShape
             if size.width > 0 && size.height > 0 {
                 let started = Instant::now();
                 let prims = sh.ctx.tessellate(shapes, ppp);
-                screen.frame.resize(size.width as usize, size.height as usize);
-                sh.painter.paint(&mut screen.frame, &prims, ppp, clear, None);
+                let (w, h) = (size.width as usize, size.height as usize);
+                screen.frame.resize(w, h);
+                // only where the triangles differ from the last frame's
+                if (screen.clear, screen.textures_changed) != (Some(clear), sh.textures_changed) {
+                    (screen.clear, screen.textures_changed) = (Some(clear), sh.textures_changed);
+                    screen.damage.reset();
+                }
+                let area = screen.damage.of(&prims, ppp, w, h, textures);
+                sh.painter.paint(&mut screen.frame, &prims, ppp, clear, Some(area));
                 let drawn = started.elapsed();
-                let sent = screen.show_changes();
+                let sent = screen.show_changes(area);
                 if crate::debuglog::full() && sent.0 > 0 {
                     crate::debuglog::write(format!(
-                        "··· gdi      drawn in {}, shown in {}: {} parts, {:.1} % of {}×{}",
+                        "··· gdi      drawn {:.1} % in {}, shown in {}: {} parts, {:.1} % of {}×{}",
+                        area.pixels() as f64 * 100.0 / (w * h) as f64,
                         crate::debuglog::ms(drawn),
                         crate::debuglog::ms(started.elapsed() - drawn),
                         sent.0,
@@ -454,15 +468,22 @@ struct Screen {
     hwnd: isize,
     frame: Frame,
     bitmap: Option<Bitmap>,
+    /// What the last frame drew, to draw the next only where it differs.
+    damage: Damage,
+    /// The color under it all the last frame was drawn on, and
+    /// [`Shared::textures_changed`] then.
+    clear: Option<egui::Color32>,
+    textures_changed: u64,
 }
 
 impl Screen {
     fn new(hwnd: isize) -> Screen {
-        Screen { hwnd, frame: Frame::default(), bitmap: None }
+        Screen { hwnd, frame: Frame::default(), bitmap: None, damage: Damage::default(), clear: None, textures_changed: 0 }
     }
 
-    /// Put on screen what changed in the frame; the parts and pixels shown.
-    fn show_changes(&mut self) -> (usize, usize) {
+    /// Put on screen what changed in the frame, drawn again in `area`; the
+    /// parts and pixels shown.
+    fn show_changes(&mut self, area: Area) -> (usize, usize) {
         let (w, h) = (self.frame.width, self.frame.height);
         let fresh = self.bitmap.as_ref().is_none_or(|b| (b.width, b.height) != (w, h));
         if fresh {
@@ -474,7 +495,7 @@ impl Screen {
             bits.copy_from_slice(&self.frame.pixels);
             vec![Area { x0: 0, y0: 0, x1: w as i32, y1: h as i32 }]
         } else {
-            changes(&self.frame.pixels, bits, w)
+            changes(&self.frame.pixels, bits, w, area)
         };
         let shown = parts.iter().map(|a| a.pixels()).sum();
         b.blit(self.hwnd, &parts);
@@ -492,12 +513,17 @@ impl Screen {
 /// Rows compared together, a band.
 const BAND: usize = 8;
 
-/// Copy what differs from `new` into `old` (both `width` wide); the parts
-/// that differed, bands of rows merged where they line up.
-fn changes(new: &[u32], old: &mut [u32], width: usize) -> Vec<Area> {
+/// Copy what differs from `new` into `old` (both `width` wide) in the rows
+/// of `area` (where the frame was drawn again); the parts that differed,
+/// bands of rows merged where they line up.
+fn changes(new: &[u32], old: &mut [u32], width: usize, area: Area) -> Vec<Area> {
     let height = new.len() / width.max(1);
     let mut parts: Vec<Area> = Vec::new();
-    for y0 in (0..height).step_by(BAND) {
+    if area.is_empty() {
+        return parts;
+    }
+    let rows = (area.y0.max(0) as usize / BAND * BAND)..(area.y1.max(0) as usize).min(height);
+    for y0 in rows.step_by(BAND) {
         let y1 = (y0 + BAND).min(height);
         let (mut x0, mut x1) = (width, 0);
         for y in y0..y1 {
@@ -609,21 +635,28 @@ mod tests {
         let w = 64;
         let mut old = vec![0u32; w * 40];
         let mut new = old.clone();
+        let all = Area { x0: 0, y0: 0, x1: w as i32, y1: 40 };
         // a row moved: rows 9 and 20, columns 3..30
         for x in 3..30 {
             new[9 * w + x] = 1;
             new[20 * w + x] = 2;
         }
         // two bands one under the other, as wide: one part
-        let parts = changes(&new, &mut old, w);
+        let parts = changes(&new, &mut old, w, all);
         assert_eq!(parts, [Area { x0: 3, y0: 8, x1: 30, y1: 24 }]);
         assert_eq!(old, new);
         // nothing changed: nothing shown
-        assert!(changes(&new, &mut old, w).is_empty());
+        assert!(changes(&new, &mut old, w, all).is_empty());
         // far apart: two parts
         new[0] = 5;
         new[39 * w + 63] = 5;
-        let parts = changes(&new, &mut old, w);
+        let parts = changes(&new, &mut old, w, all);
         assert_eq!(parts, [Area { x0: 0, y0: 0, x1: 1, y1: 8 }, Area { x0: 63, y0: 32, x1: 64, y1: 40 }]);
+        // only the rows drawn again are looked at, in whole bands
+        new[0] = 6;
+        new[13 * w] = 6;
+        let parts = changes(&new, &mut old, w, Area { x0: 0, y0: 12, x1: 1, y1: 14 });
+        assert_eq!(parts, [Area { x0: 0, y0: 8, x1: 1, y1: 16 }]);
+        assert_ne!(old[0], 6, "not looked at");
     }
 }
