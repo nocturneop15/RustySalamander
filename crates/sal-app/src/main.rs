@@ -28,6 +28,7 @@ mod debuglog;
 mod dialogwin;
 mod dirsize;
 mod dnd;
+mod gdiwin;
 mod drive_icon;
 #[cfg(test)]
 mod exe_icon;
@@ -44,7 +45,6 @@ mod shellmenu;
 mod shortcut;
 #[cfg(test)]
 mod snapshot;
-mod softbench;
 mod update;
 mod worker;
 
@@ -103,17 +103,25 @@ fn main() -> eframe::Result<()> {
     if debuglog::full() {
         title.push_str(" [debug log]");
     }
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_icon(sal_ui::icon::program())
-            .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 400.0])
-            // the program takes drops itself (dnd.rs): where, and copy or move
-            .with_drag_and_drop(false),
-        wgpu_options: wgpu_options(),
-        ..Default::default()
-    };
+    let viewport = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_icon(sal_ui::icon::program())
+        .with_inner_size([1200.0, 760.0])
+        .with_min_inner_size([640.0, 400.0])
+        // the program takes drops itself (dnd.rs): where, and copy or move
+        .with_drag_and_drop(false);
+    if gdiwin::chosen() {
+        // frames are paced by the program (`App::pace`), no screen refresh to wait for
+        let _ = VSYNC.set(false);
+        debuglog::write("startup: creating the window (GDI)");
+        let r = gdiwin::run(viewport, args);
+        match &r {
+            Ok(()) => debuglog::write("---- RustySalamander closed"),
+            Err(e) => debuglog::error(format!("the program could not run: {e}")),
+        }
+        return r.map_err(|e| eframe::Error::AppCreation(e.into()));
+    }
+    let options = eframe::NativeOptions { viewport, wgpu_options: wgpu_options(), ..Default::default() };
     debuglog::write("startup: creating the window");
     let r = eframe::run_native("RustySalamander", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, args)))));
     match &r {

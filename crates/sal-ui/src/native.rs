@@ -59,7 +59,6 @@ pub fn set_transitions(_: isize, _: bool) {}
 pub fn place_over(hwnd: isize, owner: isize, step: usize) {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-    use windows::Win32::UI::HiDpi::GetDpiForWindow;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER};
     let (h, o) = (HWND(hwnd as *mut _), HWND(owner as *mut _));
     unsafe {
@@ -79,7 +78,7 @@ pub fn place_over(hwnd: isize, owner: isize, step: usize) {
                 return;
             }
             let (w, ht) = (win.right - win.left, win.bottom - win.top);
-            let shift = (step % 8) as i32 * 30 * GetDpiForWindow(o).max(96) as i32 / 96;
+            let shift = (step % 8) as i32 * 30 * dpi_of(o) as i32 / 96;
             let x = (own.left + own.right - w) / 2 + shift;
             let y = (own.top + own.bottom - ht) / 2 + shift;
             // inside the work area; a window larger than it starts at its corner
@@ -88,6 +87,35 @@ pub fn place_over(hwnd: isize, owner: isize, step: usize) {
             let _ = SetWindowPos(h, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
+}
+
+/// The DPI of the window `hwnd`: `GetDpiForWindow` where Windows has it
+/// (10 and later), looked up when needed, so the program still starts on
+/// Windows 8.1 / Server 2012 R2; there, the screen's.
+#[cfg(windows)]
+fn dpi_of(hwnd: windows::Win32::Foundation::HWND) -> u32 {
+    use std::sync::OnceLock;
+    use windows::core::s;
+    use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, LOGPIXELSX};
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    type Fn = unsafe extern "system" fn(windows::Win32::Foundation::HWND) -> u32;
+    static FOR_WINDOW: OnceLock<Option<Fn>> = OnceLock::new();
+    let f = FOR_WINDOW.get_or_init(|| unsafe {
+        let user32 = GetModuleHandleA(s!("user32.dll")).ok()?;
+        GetProcAddress(user32, s!("GetDpiForWindow")).map(|p| std::mem::transmute::<_, Fn>(p))
+    });
+    let dpi = unsafe {
+        match f {
+            Some(f) => f(hwnd),
+            None => {
+                let dc = GetDC(None);
+                let d = GetDeviceCaps(dc, LOGPIXELSX);
+                ReleaseDC(None, dc);
+                d.max(0) as u32
+            }
+        }
+    };
+    dpi.max(96)
 }
 
 /// Elsewhere the system places windows.

@@ -715,10 +715,6 @@ impl App {
     /// The application as it starts: the saved settings, fonts, plugins and
     /// the folders given on the command line.
     pub fn new(cc: &eframe::CreationContext<'_>, args: Vec<String>) -> App {
-        crate::debuglog::write("startup: window ready");
-        let cfg = crate::debuglog::time("startup: configuration", Config::load);
-        crate::debuglog::write(format!("startup: configuration file {}", sal_core::config::config_path().display()));
-        crate::debuglog::time("startup: fonts", || crate::fonts::install(&cc.egui_ctx, &cfg.ui_font, &cfg.mono_font));
         if let Some(rs) = &cc.wgpu_render_state {
             let a = rs.adapter.get_info();
             crate::debuglog::write(format!(
@@ -726,9 +722,17 @@ impl App {
                 a.backend, a.name, a.device_type, a.driver, a.driver_info, rs.target_format
             ));
         }
-        crate::softbench::install(&cc.egui_ctx);
-        let mut app = App::with_config(&cc.egui_ctx, cfg, args);
-        app.plugin_windows.set_render(cc.wgpu_render_state.clone());
+        App::started(&cc.egui_ctx, args)
+    }
+
+    /// The application in its window, whatever draws it (eframe's wgpu, or
+    /// the program's own windows drawn with GDI, `gdiwin`).
+    pub fn started(ctx: &egui::Context, args: Vec<String>) -> App {
+        crate::debuglog::write("startup: window ready");
+        let cfg = crate::debuglog::time("startup: configuration", Config::load);
+        crate::debuglog::write(format!("startup: configuration file {}", sal_core::config::config_path().display()));
+        crate::debuglog::time("startup: fonts", || crate::fonts::install(ctx, &cfg.ui_font, &cfg.mono_font));
+        let mut app = App::with_config(ctx, cfg, args);
         if let (true, Some(path)) = (crate::debuglog::full(), crate::debuglog::path()) {
             app.status = trf("Debug log: {file}", &[("file", &path.display().to_string())]);
         }
@@ -759,7 +763,7 @@ impl App {
             apply_font_size(ctx, cfg.font_size);
             apply_theme(ctx, cfg.theme);
             sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
-            sal_ui::apply_animations(ctx, cfg.animations);
+            apply_animations(ctx, cfg.animations);
             sal_ui::apply_accent(ctx, cfg.accent_light, cfg.accent_dark);
         });
         let plugins = time("startup: plugins", || Plugins::load(&cfg.disabled_plugins));
@@ -1109,7 +1113,7 @@ impl App {
             return;
         }
         win.poll(ctx);
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: animated(self.cfg.animations) };
         let (mut enter, mut escape) = (false, false);
         let height = (ctx.screen_rect().height() * 0.55).clamp(160.0, 520.0);
         let title = win.title.clone();
@@ -1262,7 +1266,7 @@ impl App {
             ("ui_font", &self.cfg.ui_font),
             ("mono_font", &self.cfg.mono_font),
             ("scrollbars", scrollbars),
-            ("animations", if self.cfg.animations { "on" } else { "off" }),
+            ("animations", if animated(self.cfg.animations) { "on" } else { "off" }),
             ("accent_light", &light),
             ("accent_dark", &dark),
             ("accent", &one),
@@ -2179,7 +2183,7 @@ impl App {
             }
             Cmd::ToggleAnimations => {
                 self.cfg.animations = !self.cfg.animations;
-                sal_ui::apply_animations(ctx, self.cfg.animations);
+                apply_animations(ctx, self.cfg.animations);
                 Ok(())
             }
             Cmd::ToggleQuickSearchMode => {
@@ -3338,7 +3342,7 @@ impl App {
         if matches!(dialog, Dialog::None) {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| !OWN_WINDOWS.contains(&k));
         }
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: animated(self.cfg.animations) };
         // dialog windows are sized from the main window, not from themselves
         let main_h = ctx.screen_rect().height();
         // 0 = keep open, 1 = ok, 2 = cancel
@@ -3995,8 +3999,10 @@ impl App {
                                         if ui.checkbox(&mut cfg.always_show_scrollbars, tr(LBL_SCROLLBARS)).changed() {
                                             sal_ui::apply_scrollbars(ctx, cfg.always_show_scrollbars);
                                         }
-                                        if ui.checkbox(&mut cfg.animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
-                                            sal_ui::apply_animations(ctx, cfg.animations);
+                                        if crate::gdiwin::chosen() {
+                                            animations_off(ui);
+                                        } else if ui.checkbox(&mut cfg.animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
+                                            apply_animations(ctx, cfg.animations);
                                         }
                                         ui.checkbox(&mut cfg.show_fkey_bar, tr(LBL_FKEYS));
                                     });
@@ -4706,7 +4712,7 @@ impl App {
             return;
         }
         let now = Instant::now();
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: self.cfg.animations };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: false, icon: None, animations: animated(self.cfg.animations) };
         let (mut enter, mut escape) = (false, false);
         let mut act: Option<JobAct> = None;
         let jobs = &self.jobs;
@@ -4799,7 +4805,7 @@ const CONFLICT_DEFAULT: usize = 2;
 
 /// The question of an operation that hit a conflict or an error, in its own window.
     fn prompt_ui(&mut self, ctx: &egui::Context) {
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None, animations: self.cfg.animations };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: false, exclusive: true, icon: None, animations: animated(self.cfg.animations) };
         let Some(job) = self.jobs.running.iter_mut().find(|j| j.prompt.is_some()) else {
             dialogwin::close(&mut self.dialog_places, self.hwnd, |k| k == "prompt");
             // answered: back to the background it was in
@@ -4937,7 +4943,7 @@ const CONFLICT_DEFAULT: usize = 2;
             return;
         }
         // modal: the main window waits until the result has been read
-        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: true, exclusive: false, icon: None, animations: self.cfg.animations };
+        let dw = DialogWin { owner: self.hwnd, theme: self.cfg.theme, modal: true, exclusive: false, icon: None, animations: animated(self.cfg.animations) };
         let (mut enter, mut escape) = (false, false);
         let mut close = false;
         let mut remove = false;
@@ -5202,7 +5208,9 @@ const CONFLICT_DEFAULT: usize = 2;
                     layout_cmd = Some(Cmd::ToggleScrollbars);
                     ui.close_menu();
                 }
-                if ui.checkbox(&mut animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
+                if crate::gdiwin::chosen() {
+                    animations_off(ui);
+                } else if ui.checkbox(&mut animations, tr(LBL_ANIMATIONS)).on_hover_text(tr(TIP_ANIMATIONS)).changed() {
                     layout_cmd = Some(Cmd::ToggleAnimations);
                     ui.close_menu();
                 }
@@ -6020,6 +6028,7 @@ const LBL_ANIMATIONS: &str = n_("Animations");
 /// How long the status bar shows what the last operation did.
 const JOB_DONE_SHOWN: Duration = Duration::from_secs(5);
 const TIP_ANIMATIONS: &str = n_("Windows and menus fading in, smooth scrolling to the cursor (quick search, cursor keys). Off: everything changes at once.");
+const TIP_ANIMATIONS_GDI: &str = n_("Off while the windows are drawn without a graphics card (SAL_RENDER=gdi): every animation frame would have to be drawn and sent to the screen.");
 const LBL_FKEYS: &str = n_("Show function key bar");
 const LBL_RECYCLE: &str = n_("Delete to Recycle Bin");
 const LBL_QS_PREFIX: &str = n_("From first letter");
@@ -6233,6 +6242,29 @@ fn paint_divider(ui: &egui::Ui, r: egui::Rect) {
 }
 
 /// Theme for the panels, the window title bar and the native menus.
+/// The Animations setting as it takes effect: always off when the windows
+/// are drawn on the processor (`SAL_RENDER=gdi`, `crate::gdiwin`), where
+/// every frame of an animation costs drawing and, over Remote Desktop,
+/// sending. The setting itself is kept as it is.
+fn animated(on: bool) -> bool {
+    on && !crate::gdiwin::chosen()
+}
+
+/// Animations on or off ([`animated`]); drawn on the processor, the text
+/// cursor doesn't blink either.
+fn apply_animations(ctx: &egui::Context, on: bool) {
+    sal_ui::apply_animations(ctx, animated(on));
+    if crate::gdiwin::chosen() {
+        ctx.all_styles_mut(|s| s.visuals.text_cursor.blink = false);
+    }
+}
+
+/// The Animations checkbox when they're off for drawing on the processor:
+/// unchecked, greyed, saying why.
+fn animations_off(ui: &mut egui::Ui) {
+    ui.add_enabled(false, egui::Checkbox::new(&mut false, tr(LBL_ANIMATIONS))).on_disabled_hover_text(tr(TIP_ANIMATIONS_GDI));
+}
+
 fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
     let (pref, menus) = match mode {
         ThemeMode::System => (egui::ThemePreference::System, None),
@@ -6279,32 +6311,47 @@ impl eframe::App for App {
     /// release the window never saw: egui gets it here, or it would hold the
     /// button down.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.input_hook(ctx, raw);
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let hwnd = match frame.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(w)) => Some(w.hwnd.get()),
+            _ => None,
+        };
+        self.update_frame(ctx, hwnd, frame.info().cpu_usage);
+    }
+}
+
+impl App {
+    /// Windows' drag (out of the window) ends with the button released, a
+    /// release the window never saw: egui gets it here, or it would hold the
+    /// button down. Before each frame of the main window.
+    pub fn input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
         if std::mem::take(&mut self.release_pointer) {
             let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or_default();
             raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: raw.modifiers });
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        if self.hwnd.is_none() {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if let Ok(h) = frame.window_handle() {
-                if let RawWindowHandle::Win32(w) = h.as_raw() {
-                    self.hwnd = Some(w.hwnd.get());
-                    crate::rawkeys::install(w.hwnd.get());
-                    self.drop_shared = dnd::register(w.hwnd.get(), ctx.clone());
-                    crate::debuglog::write(format!("startup: drop target {}", if self.drop_shared.is_some() { "registered" } else { "not registered" }));
-                    apply_theme(ctx, self.cfg.theme);
-                    // the shell extensions load in the background, not on the first right-click
-                    shellmenu::warm_up(self.panels.iter().filter(|p| p.archive.is_none()).map(|p| p.path().to_path_buf()).collect());
-                }
-            }
+    /// One frame of the main window `hwnd`; the last one took `drew`
+    /// seconds to make and draw.
+    pub fn update_frame(&mut self, ctx: &egui::Context, hwnd: Option<isize>, drew: Option<f32>) {
+        if let (None, Some(h)) = (self.hwnd, hwnd) {
+            self.hwnd = Some(h);
+            crate::rawkeys::install(h);
+            self.drop_shared = dnd::register(h, ctx.clone());
+            crate::debuglog::write(format!("startup: drop target {}", if self.drop_shared.is_some() { "registered" } else { "not registered" }));
+            apply_theme(ctx, self.cfg.theme);
+            // the shell extensions load in the background, not on the first right-click
+            shellmenu::warm_up(self.panels.iter().filter(|p| p.archive.is_none()).map(|p| p.path().to_path_buf()).collect());
         }
-        if let Some(h) = self.hwnd.filter(|_| self.transitions != Some(self.cfg.animations)) {
-            sal_ui::native::set_transitions(h, self.cfg.animations);
-            self.transitions = Some(self.cfg.animations);
+        if let Some(h) = self.hwnd.filter(|_| self.transitions != Some(animated(self.cfg.animations))) {
+            sal_ui::native::set_transitions(h, animated(self.cfg.animations));
+            self.transitions = Some(animated(self.cfg.animations));
         }
-        self.pace(ctx, frame);
+        self.pace(ctx, drew);
         if crate::debuglog::full() {
             let (events, closing) = ctx.input(|i| (i.events.clone(), i.viewport().close_requested()));
             crate::debuglog::input(&events, "", false, &|p| self.debug_target(p));
@@ -6313,7 +6360,7 @@ impl eframe::App for App {
             }
         }
         self.frame(ctx);
-        self.plugin_windows.show(ctx, self.hwnd, self.cfg.animations);
+        self.plugin_windows.show(ctx, self.hwnd, animated(self.cfg.animations));
         self.diag_menu(ctx);
         self.diag_dialog(ctx);
         self.diag_view(ctx);
@@ -6334,7 +6381,7 @@ impl App {
     /// processor can. The debug log tells, for a frame with input, how long
     /// since the last one and how much of it was drawing (the rest is waiting
     /// for the screen, or for the input).
-    fn pace(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    fn pace(&mut self, ctx: &egui::Context, drew: Option<f32>) {
         let now = Instant::now();
         if let Some(last) = self.last_frame {
             let since = now - last;
@@ -6342,7 +6389,7 @@ impl App {
                 std::thread::sleep(FRAME_MIN - since);
             }
             if crate::debuglog::full() && since < Duration::from_secs(1) && ctx.input(|i| !i.events.is_empty()) {
-                let drew = frame.info().cpu_usage.map(|s| crate::debuglog::ms(Duration::from_secs_f32(s))).unwrap_or_else(|| "?".into());
+                let drew = drew.map(|s| crate::debuglog::ms(Duration::from_secs_f32(s))).unwrap_or_else(|| "?".into());
                 crate::debuglog::write(format!("··· pace     {} since the last frame, which took {drew} to make and draw", crate::debuglog::ms(since)));
             }
         }

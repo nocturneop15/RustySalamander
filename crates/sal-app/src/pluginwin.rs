@@ -3,19 +3,17 @@
 //!
 //! A plugin keeps what its window shows and runs its egui, which only says
 //! what to draw. The program owns the window on screen: each frame it sends
-//! the plugin the window's input and draws the triangles and textures it
-//! gets back, with a renderer of the window's own on the program's wgpu.
-//! So the plugins carry no graphics, and their windows draw wherever the
-//! program's own window does.
+//! the plugin the window's input and gets back the triangles and textures,
+//! which go into the window's egui frame as they are (the textures among
+//! the program's own). So the plugins carry no graphics, and their windows
+//! draw however the program's own window does.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use eframe::egui::{self, ViewportBuilder, ViewportClass, ViewportId};
-use eframe::egui_wgpu::{self, wgpu};
 use sal_plugin_api::abi::{Bytes, BytesOut, WindowFns, WINDOW_OPEN};
 use sal_window::wire;
 
@@ -65,16 +63,9 @@ fn wake(delay: Duration) {
 pub struct Windows {
     wins: Vec<Win>,
     serial: u64,
-    /// The program's graphics; none in the tests.
-    render: Option<egui_wgpu::RenderState>,
 }
 
 impl Windows {
-    /// Draw with the program's graphics.
-    pub fn set_render(&mut self, render: Option<egui_wgpu::RenderState>) {
-        self.render = render;
-    }
-
     /// Show the windows, and those opened since the last frame: over the
     /// program's window `owner`, with Windows' own animation if `animations`.
     pub fn show(&mut self, ctx: &egui::Context, owner: Option<isize>, animations: bool) {
@@ -84,14 +75,14 @@ impl Windows {
             let step = self.wins.len();
             let id = ViewportId::from_hash_of(("plugin window", self.serial));
             let wire::Init { title, icon, size, .. } = o.init;
-            self.wins.push(Win { id, key: self.serial, win: o.win, fns: o.fns, title, icon: Arc::new(icon), size, step, settled: 0, textures: Vec::new(), out: Vec::new() });
+            self.wins.push(Win { id, key: self.serial, win: o.win, fns: o.fns, title, icon: Arc::new(icon), size, step, settled: 0, textures: Textures::default(), out: Vec::new() });
         }
         let mut gone = Vec::new();
         for w in &mut self.wins {
             // made hidden, shown once Windows is told about its animation and place
             let builder = ViewportBuilder::default().with_title(&w.title).with_icon(w.icon.clone()).with_inner_size(w.size).with_visible(w.settled == SHOWN);
             ctx.show_viewport_immediate(w.id, builder, |vctx, class| {
-                if !w.frame(vctx, class, owner, animations, self.render.as_ref()) {
+                if !w.frame(vctx, class, owner, animations) {
                     gone.push(w.key);
                 }
             });
@@ -103,11 +94,6 @@ impl Windows {
             crate::debuglog::write(format!("plugin window closes: {}", w.title));
         }
         self.wins.retain(|w| !gone.contains(&w.key));
-        if let Some(render) = &self.render {
-            if let Some(painters) = render.renderer.write().callback_resources.get_mut::<Painters>() {
-                painters.retain(|k, _| !gone.contains(k));
-            }
-        }
         // the closed windows go away in the next frame
         ctx.request_repaint();
     }
@@ -116,7 +102,6 @@ impl Windows {
 /// One window of a plugin.
 struct Win {
     id: ViewportId,
-    /// Its renderer's key.
     key: u64,
     win: *mut c_void,
     fns: &'static WindowFns,
@@ -127,9 +112,8 @@ struct Win {
     step: usize,
     /// Frames it waited for its window to show it (`SHOWN` once shown).
     settled: u32,
-    /// Texture changes not drawn yet (a frame that wasn't drawn, the window
-    /// minimized): sent again with the next frame, as their order needs.
-    textures: Vec<(Arc<AtomicBool>, egui::TexturesDelta)>,
+    /// Its textures among the program's.
+    textures: Textures,
     /// The last frame's output, reused.
     out: Vec<u8>,
 }
@@ -146,7 +130,7 @@ impl Drop for Win {
 
 impl Win {
     /// One frame of the window in `vctx`; false when it closes.
-    fn frame(&mut self, vctx: &egui::Context, class: ViewportClass, owner: Option<isize>, animations: bool, render: Option<&egui_wgpu::RenderState>) -> bool {
+    fn frame(&mut self, vctx: &egui::Context, class: ViewportClass, owner: Option<isize>, animations: bool) -> bool {
         if class == ViewportClass::Embedded {
             // only one window here (no graphics): the plugin's windows can't show
             return false;
@@ -185,8 +169,7 @@ impl Win {
             return false;
         }
         let Some(out) = wire::decode::<wire::Output>(&self.out) else { return false };
-        let primitives = out.primitives();
-        let wire::Output { title, textures, pixels_per_point, platform, commands, repaint_after, .. } = out;
+        let wire::Output { title, textures, meshes, platform, commands, repaint_after, .. } = out;
         self.title = title;
         for c in commands {
             vctx.send_viewport_cmd(c);
@@ -205,65 +188,70 @@ impl Win {
         if let Some(s) = repaint_after {
             vctx.request_repaint_after(Duration::from_secs_f64(s.min(3600.0)));
         }
-        let Some(render) = render else { return true };
-        // the changes drawn already are done with
-        self.textures.retain(|(drawn, _)| !drawn.load(Ordering::Acquire));
-        if !textures.is_empty() {
-            self.textures.push((Arc::new(AtomicBool::new(false)), textures));
+        // the triangles as they are, on the plugin's textures
+        self.textures.set(vctx, &textures.set);
+        let painter = vctx.layer_painter(egui::LayerId::background());
+        for (clip, mut mesh) in meshes {
+            mesh.texture_id = self.textures.ours(mesh.texture_id);
+            painter.with_clip_rect(clip).add(egui::Shape::mesh(mesh));
         }
-        let paint = Paint { key: self.key, format: render.target_format, pixels_per_point, textures: self.textures.clone(), primitives };
-        vctx.layer_painter(egui::LayerId::background()).add(egui_wgpu::Callback::new_paint_callback(vctx.screen_rect(), paint));
+        self.textures.free(&textures.free);
         true
     }
 }
 
-/// The renderers of the plugins' windows, by key (kept in the program's
-/// renderer, with the paint callbacks' resources).
-type Painters = HashMap<u64, Painter>;
-
-/// A window's renderer and the textures to free after it drew.
-struct Painter {
-    renderer: egui_wgpu::Renderer,
-    free: Vec<egui::TextureId>,
+/// A window's textures among the program's: the plugin's texture ids and
+/// the program's for them.
+#[derive(Default)]
+struct Textures {
+    ctx: Option<egui::Context>,
+    ids: HashMap<egui::TextureId, egui::TextureId>,
 }
 
-/// What a frame of a plugin's window draws, with the window's renderer.
-struct Paint {
-    key: u64,
-    format: wgpu::TextureFormat,
-    pixels_per_point: f32,
-    /// The texture changes not drawn yet, in order; each marked once done.
-    textures: Vec<(Arc<AtomicBool>, egui::TexturesDelta)>,
-    primitives: Vec<egui::ClippedPrimitive>,
-}
-
-impl egui_wgpu::CallbackTrait for Paint {
-    fn prepare(&self, device: &wgpu::Device, queue: &wgpu::Queue, screen: &egui_wgpu::ScreenDescriptor, encoder: &mut wgpu::CommandEncoder, resources: &mut egui_wgpu::CallbackResources) -> Vec<wgpu::CommandBuffer> {
-        if resources.get::<Painters>().is_none() {
-            resources.insert(Painters::new());
+impl Textures {
+    /// Make or change the textures.
+    fn set(&mut self, ctx: &egui::Context, set: &[(egui::TextureId, egui::epaint::ImageDelta)]) {
+        if set.is_empty() {
+            return;
         }
-        let painters = resources.get_mut::<Painters>().expect("just inserted");
-        // the program's renderer: no depth, no multisampling, dithered (eframe's defaults)
-        let p = painters.entry(self.key).or_insert_with(|| Painter { renderer: egui_wgpu::Renderer::new(device, self.format, None, 1, true), free: Vec::new() });
-        for id in p.free.drain(..) {
-            p.renderer.free_texture(&id);
-        }
-        for (drawn, delta) in &self.textures {
-            for (id, image) in &delta.set {
-                p.renderer.update_texture(device, queue, *id, image);
+        let tm = ctx.tex_manager();
+        let mut tm = tm.write();
+        self.ctx.get_or_insert_with(|| ctx.clone());
+        for (id, delta) in set {
+            match (self.ids.get(id), delta.pos) {
+                (Some(ours), _) => tm.set(*ours, delta.clone()),
+                (None, None) => {
+                    let ours = tm.alloc(format!("plugin window {id:?}"), delta.image.clone(), delta.options);
+                    self.ids.insert(*id, ours);
+                }
+                // a part of a texture it never made
+                (None, Some(_)) => {}
             }
-            p.free.extend(delta.free.iter().copied());
-            drawn.store(true, Ordering::Release);
         }
-        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: screen.size_in_pixels, pixels_per_point: self.pixels_per_point };
-        p.renderer.update_buffers(device, queue, encoder, &self.primitives, &screen)
     }
 
-    fn paint(&self, info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
-        if let Some(p) = resources.get::<Painters>().and_then(|m| m.get(&self.key)) {
-            let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: info.screen_size_px, pixels_per_point: self.pixels_per_point };
-            p.renderer.render(pass, &self.primitives, &screen);
+    /// The program's id of the plugin's texture `id`.
+    fn ours(&self, id: egui::TextureId) -> egui::TextureId {
+        self.ids.get(&id).copied().unwrap_or(id)
+    }
+
+    /// Drop textures the plugin is done with (after this frame is drawn).
+    fn free(&mut self, ids: &[egui::TextureId]) {
+        let Some(ctx) = &self.ctx else { return };
+        let tm = ctx.tex_manager();
+        let mut tm = tm.write();
+        for id in ids {
+            if let Some(ours) = self.ids.remove(id) {
+                tm.free(ours);
+            }
         }
+    }
+}
+
+impl Drop for Textures {
+    fn drop(&mut self) {
+        let ids: Vec<_> = self.ids.keys().copied().collect();
+        self.free(&ids);
     }
 }
 
@@ -278,7 +266,7 @@ pub fn take_opened() -> Vec<(String, TestWindow)> {
     std::mem::take(&mut *OPENED.lock().unwrap())
         .into_iter()
         .map(|o| {
-            let mut w = Win { id: ViewportId::ROOT, key: 0, win: o.win, fns: o.fns, title: o.init.title.clone(), icon: Arc::new(o.init.icon), size: o.init.size, step: 0, settled: SHOWN, textures: Vec::new(), out: Vec::new() };
+            let mut w = Win { id: ViewportId::ROOT, key: 0, win: o.win, fns: o.fns, title: o.init.title.clone(), icon: Arc::new(o.init.icon), size: o.init.size, step: 0, settled: SHOWN, textures: Textures::default(), out: Vec::new() };
             let f = move |raw: egui::RawInput| {
                 let input = wire::encode(&raw);
                 let state = unsafe { (w.fns.frame)(w.win, Bytes::of(&input), &BytesOut::new(&mut w.out)) };

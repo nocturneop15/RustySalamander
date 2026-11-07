@@ -3383,10 +3383,10 @@ version = "0.9.3-beta"
 dependencies = [
  "chrono",
  "eframe",
+ "egui-winit",
  "egui_extras",
  "flate2",
  "log",
- "png",
  "raw-window-handle",
  "sal-core",
  "sal-plugin-api",
@@ -3401,6 +3401,7 @@ dependencies = [
  "wgpu",
  "windows 0.58.0",
  "windows-core 0.58.0",
+ "winit",
 ]
 
 [[package]]
