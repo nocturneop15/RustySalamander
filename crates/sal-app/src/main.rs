@@ -67,7 +67,7 @@ pub fn vsync() -> bool {
 }
 
 /// Whether the program runs in a Remote Desktop session.
-fn remote_session() -> bool {
+pub fn remote_session() -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
     unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
 }
@@ -113,7 +113,7 @@ fn main() -> eframe::Result<()> {
     if gdiwin::chosen() {
         // frames are paced by the program (`App::pace`), no screen refresh to wait for
         let _ = VSYNC.set(false);
-        debuglog::write("startup: creating the window (GDI)");
+        debuglog::write(format!("startup: creating the window (GDI: {})", gdiwin::choice().1));
         let r = gdiwin::run(viewport, args);
         match &r {
             Ok(()) => debuglog::write("---- RustySalamander closed"),

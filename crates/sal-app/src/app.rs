@@ -6028,7 +6028,7 @@ const LBL_ANIMATIONS: &str = n_("Animations");
 /// How long the status bar shows what the last operation did.
 const JOB_DONE_SHOWN: Duration = Duration::from_secs(5);
 const TIP_ANIMATIONS: &str = n_("Windows and menus fading in, smooth scrolling to the cursor (quick search, cursor keys). Off: everything changes at once.");
-const TIP_ANIMATIONS_GDI: &str = n_("Off while the windows are drawn without a graphics card (SAL_RENDER=gdi): every animation frame would have to be drawn and sent to the screen.");
+const TIP_ANIMATIONS_GDI: &str = n_("Off while the windows are drawn without a graphics card (in Remote Desktop, or set by SAL_RENDER): every animation frame would have to be drawn and sent to the screen.");
 const LBL_FKEYS: &str = n_("Show function key bar");
 const LBL_RECYCLE: &str = n_("Delete to Recycle Bin");
 const LBL_QS_PREFIX: &str = n_("From first letter");

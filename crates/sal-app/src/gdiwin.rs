@@ -26,9 +26,31 @@ use winit::window::{Window, WindowId};
 
 use crate::app::App;
 
-/// Whether the windows are drawn this way: `SAL_RENDER=gdi`.
+/// Whether the windows are drawn this way rather than with Direct3D 12
+/// (wgpu), decided once at start ([`choice`]).
 pub fn chosen() -> bool {
-    std::env::var("SAL_RENDER").is_ok_and(|v| v.eq_ignore_ascii_case("gdi"))
+    choice().0
+}
+
+/// GDI or not, and why: `SAL_RENDER=gdi` or `wgpu` chooses; otherwise GDI
+/// in a Remote Desktop session (where only what changed is sent, much
+/// quicker than Direct3D's whole frames) and where Windows has no
+/// Direct3D 12 (Windows 8.1, Server 2012 R2).
+pub fn choice() -> (bool, &'static str) {
+    static CHOICE: std::sync::OnceLock<(bool, &'static str)> = std::sync::OnceLock::new();
+    *CHOICE.get_or_init(|| match std::env::var("SAL_RENDER").map(|v| v.to_ascii_lowercase()).as_deref() {
+        Ok("gdi") => (true, "SAL_RENDER=gdi"),
+        Ok("wgpu") => (false, "SAL_RENDER=wgpu"),
+        _ if crate::remote_session() => (true, "Remote Desktop"),
+        _ if !has_d3d12() => (true, "no Direct3D 12 in this Windows"),
+        _ => (false, ""),
+    })
+}
+
+/// Whether Windows has Direct3D 12 (10 and later).
+fn has_d3d12() -> bool {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    std::path::Path::new(&root).join("System32").join("d3d12.dll").exists()
 }
 
 /// A frame of a window to draw, asked for by egui (from any thread).
