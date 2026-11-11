@@ -83,6 +83,7 @@ Examples are `snapshot_czech` (the main window and Settings in Czech), `snapshot
 | Variable | Effect |
 |---|---|
 | `RUSTYSALAMANDER_CONFIG` | Use this configuration file instead of `config.toml` next to the program. |
+| `RUSTYSALAMANDER_PLUGIN_DATA` | Set by the program in multi-user mode (`multiuser.toml` next to it): the folder below which plugins save, read by `sal_plugin_api::data_dir`. |
 | `RUSTYSALAMANDER_PLUGINS` | Look for plugins in this folder instead of `plugins` next to the program. |
 | `RUSTYSALAMANDER_LOG` | A timing log: a file path, or `1` for `%TEMP%
 ustysalamander.log`. It records each start-up step (configuration, fonts, plugins, each panel) and every frame that takes over 150 ms, split into its parts (menu, each panel, dialogs…), plus background reads. Use it when the program is slow somewhere. |

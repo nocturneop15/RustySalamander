@@ -55,7 +55,7 @@ foreach ($dir in Get-ChildItem "$built\plugins" -Directory) {
 if ($new -and -not $Fresh) {
     if (Test-Path "$built\config.toml") { Put "$built\config.toml" "$Out\config.toml" }
     foreach ($dir in Get-ChildItem "$built\plugins" -Directory) {
-        foreach ($f in "known_hosts", "last-connection") {
+        foreach ($f in "known_hosts", "known_certificates", "last-connection") {
             if (Test-Path "$($dir.FullName)\$f") { Put "$($dir.FullName)\$f" "$Out\plugins\$($dir.Name)\$f" }
         }
     }

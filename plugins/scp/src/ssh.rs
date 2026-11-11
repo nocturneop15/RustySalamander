@@ -95,6 +95,9 @@ impl client::Handler for Client {
             }
         }
         if self.keys.accept.as_deref() == Some(fingerprint.as_str()) {
+            if let Some(dir) = self.keys.learn.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
             let _ = known_hosts::learn_known_hosts_path(&self.host, self.port, key, &self.keys.learn);
             return Ok(true);
         }

@@ -39,7 +39,7 @@ RustySalamander is portable: nothing is installed.
 2. Unzip it into any folder, for example `D:\Applications\RustySalamander\0.8.0-beta`, or onto a USB stick.
 3. Run `rustysalamander.exe`.
 
-Settings are saved in `config.toml` next to the program when you exit. To move your settings to another copy, copy that file.
+Settings are saved in `config.toml` next to the program when you exit. To move your settings to another copy, copy that file. Nothing is written outside the program's folder, unless you switch to multi-user mode (see [Where things are kept](#19-where-things-are-kept)).
 
 You can also give the folders the two panels should open with on the command line:
 
@@ -691,7 +691,8 @@ Everything is in the program's folder:
 | `plugins\ftp\known_hosts`, `known_certificates` | The SFTP server keys and FTPS certificates you trusted |
 | `plugins\.updates\` | Plugin updates waiting for the next start |
 
-- If the program's folder can't be written to (for example under `Program Files`), settings go to `%APPDATA%\RustySalamander\config.toml`.
+- If the program's folder can't be written to (for example under `Program Files`), the program tells you at start that settings won't be saved. Move it to a folder you can write to, or switch to multi-user mode.
+- **Multi-user mode:** Settings → General → Settings location → **Move to %APPDATA% (multi-user mode)…** moves `config.toml` and the plugins' files above to `%APPDATA%\RustySalamander` (the plugins' in `plugins\<name>\` there) and restarts. Each Windows user then has their own settings. The choice is kept in `multiuser.toml` next to the program and is permanent. If the program's folder is protected, Windows asks for administrator rights once.
 - The environment variable `RUSTYSALAMANDER_CONFIG` can name another settings file.
 
 **Adding a language:** copy `lang\en.toml` to a new file named by the language code (`de.toml`), translate the texts on the right of each `=`, and restart. It then appears in Options → Language. Untranslated texts stay in English.

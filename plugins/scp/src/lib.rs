@@ -51,15 +51,10 @@ impl Drop for Scp {
     }
 }
 
-/// A folder the plugin may write to: its own, or `%APPDATA%\RustySalamander\scp`
-/// when that isn't writable (e.g. under Program Files).
+/// The folder the plugin saves in: its own (portable), or the per-user one
+/// in multi-user mode ([`sal_plugin_api::data_dir`]).
 fn data_dir(plugin_dir: &Path) -> PathBuf {
-    let probe = plugin_dir.join(".write-test");
-    if std::fs::write(&probe, b"").is_ok() {
-        let _ = std::fs::remove_file(&probe);
-        return plugin_dir.to_path_buf();
-    }
-    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("RustySalamander").join("scp")
+    sal_plugin_api::data_dir(plugin_dir)
 }
 
 /// The user's home folder, where `~/.ssh` keys are looked for.

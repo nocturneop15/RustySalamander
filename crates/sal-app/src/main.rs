@@ -28,6 +28,7 @@ mod debuglog;
 mod dialogwin;
 mod dirsize;
 mod dnd;
+mod elevate;
 mod gdiwin;
 mod drive_icon;
 #[cfg(test)]
@@ -96,6 +97,14 @@ fn main() -> eframe::Result<()> {
     // optional start directories: rustysalamander [left] [right]; -debug
     // writes the debug log (debuglog.rs)
     let (debug, args) = debuglog::parse_args(std::env::args().skip(1).collect());
+    // started as administrator only to mark the folder for multi-user mode
+    if let Some(code) = elevate::run_helper(&args) {
+        std::process::exit(code);
+    }
+    // multi-user mode: plugins save in %APPDATA% too (sal_plugin_api::data_dir)
+    if sal_core::config::multi_user() {
+        std::env::set_var(sal_core::config::PLUGIN_DATA_ENV, sal_core::config::user_plugin_data());
+    }
     debuglog::init(debug, &args);
     // the version in the title bar ("RustySalamander 0.7.1-alpha"), and
     // that the debug log is being written

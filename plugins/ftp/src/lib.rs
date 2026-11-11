@@ -113,16 +113,10 @@ impl Drop for FtpPlugin {
     }
 }
 
-/// A folder the plugin may write to: its own, or
-/// `%APPDATA%\RustySalamander\<name>` when that isn't writable (e.g. under
-/// Program Files).
-fn data_dir(plugin_dir: &Path, name: &str) -> PathBuf {
-    let probe = plugin_dir.join(".write-test");
-    if std::fs::write(&probe, b"").is_ok() {
-        let _ = std::fs::remove_file(&probe);
-        return plugin_dir.to_path_buf();
-    }
-    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("RustySalamander").join(name)
+/// The folder the plugin saves in: its own (portable), or the per-user one
+/// in multi-user mode ([`sal_plugin_api::data_dir`]).
+fn data_dir(plugin_dir: &Path) -> PathBuf {
+    sal_plugin_api::data_dir(plugin_dir)
 }
 
 /// The user's home folder, where `~/.ssh` keys are looked for.
@@ -141,7 +135,7 @@ impl Plugin for FtpPlugin {
 
     fn start(dir: &Path) -> Result<Self, String> {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("ftp").enable_all().build().map_err(|e| e.to_string())?;
-        Ok(FtpPlugin { rt: Some(rt), data: data_dir(dir, "ftp"), conns: Mutex::new(HashMap::new()) })
+        Ok(FtpPlugin { rt: Some(rt), data: data_dir(dir), conns: Mutex::new(HashMap::new()) })
     }
 }
 
@@ -415,8 +409,8 @@ impl FtpPlugin {
                     )
                 } else {
                     trf(
-                        "WARNING: the certificate of {server} has changed (it is now {fingerprint}). Someone may be listening in on the connection, or the server got a new certificate. The connection was refused. If the change is expected, remove the server's line from known_certificates in the plugin's folder.",
-                        &[("server", &shown_host), ("fingerprint", &fingerprint)],
+                        "WARNING: the certificate of {server} has changed (it is now {fingerprint}). Someone may be listening in on the connection, or the server got a new certificate. The connection was refused. If the change is expected, remove the server's line from {file}.",
+                        &[("server", &shown_host), ("fingerprint", &fingerprint), ("file", &self.known_certificates().display().to_string())],
                     )
                 };
                 Err(io::Error::new(io::ErrorKind::PermissionDenied, msg))

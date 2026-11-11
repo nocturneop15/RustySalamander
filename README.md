@@ -258,8 +258,9 @@ plugins\viewer\    the Viewer plugin (F3)
 plugins\.updates\  plugin updates downloaded and waiting for the next start
 ```
 
-- **First start:** when the folder has no `config.toml` yet, the settings are read from `%APPDATA%\RustySalamander\config.toml` (the location used before) and saved next to the program on exit. The old file is left untouched.
-- **Read-only folder:** if the program folder isn't writable (e.g. under Program Files), settings are saved to `%APPDATA%\RustySalamander\config.toml` instead.
+- **Nothing outside the folder:** a portable program never reads or writes `%APPDATA%` or the registry. A copy without `config.toml` starts with the default settings.
+- **Read-only folder:** if the program folder isn't writable (e.g. under Program Files), the program says so at start: settings can't be saved there. Move it to a writable folder, or switch to multi-user mode.
+- **Multi-user mode:** Settings → General → Settings location → *Move to %APPDATA% (multi-user mode)* moves `config.toml` and what the plugins saved (`known_hosts`, `known_certificates`, `last-connection`) to `%APPDATA%\RustySalamander` (plugins in `plugins\<name>\` below it), and writes `multiuser.toml` next to the program, so each Windows user has their own settings from then on. It is permanent; if the program folder is protected, Windows asks for administrator rights once. A program update carries `multiuser.toml` to the new version.
 - **Other location:** the `RUSTYSALAMANDER_CONFIG` environment variable can name a different configuration file.
 - **Development builds:** the program folder is `target\release` (or `target\debug`), so `cargo clean` deletes the settings saved there. Copy `config.toml` elsewhere first if you want to keep it.
 

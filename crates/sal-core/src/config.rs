@@ -1,5 +1,7 @@
-//! Configuration stored as UTF-8 TOML in `%APPDATA%\RustySalamander\config.toml`
-//! (the original kept everything in the registry, see `regwork.cpp`).
+//! Configuration stored as UTF-8 TOML in `config.toml` next to the program
+//! (portable), or in `%APPDATA%\RustySalamander\config.toml` once the
+//! program was switched to multi-user mode (see [`multi_user`]). The original
+//! kept everything in the registry, see `regwork.cpp`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -335,46 +337,145 @@ pub fn app_dir() -> Option<PathBuf> {
     std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
 
-/// Where the configuration is saved: `config.toml` next to the program.
-/// `RUSTYSALAMANDER_CONFIG` names another file instead.
-pub fn config_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("RUSTYSALAMANDER_CONFIG") {
-        return PathBuf::from(p);
-    }
-    app_dir().map_or_else(user_config_path, |d| d.join("config.toml"))
+/// The file next to the program that switches it to multi-user mode for
+/// good: settings then live in each user's `%APPDATA%\RustySalamander`
+/// instead of the program folder.
+pub const MULTI_USER_FILE: &str = "multiuser.toml";
+
+/// Whether the program keeps its settings per user (in `%APPDATA%`) rather
+/// than next to itself (portable, the default).
+pub fn multi_user() -> bool {
+    app_dir().is_some_and(|d| d.join(MULTI_USER_FILE).is_file())
 }
 
-/// The per-user location used before portable mode (`%APPDATA%`): read when
-/// the program folder has no configuration yet, and written when the program
-/// folder isn't writable.
-pub fn user_config_path() -> PathBuf {
+/// Switch the program folder `dir` to multi-user mode for good.
+pub fn write_multi_user_marker(dir: &Path) -> io::Result<()> {
+    fs::write(
+        dir.join(MULTI_USER_FILE),
+        "# RustySalamander keeps each user's settings in %APPDATA%\\RustySalamander\n\
+         # instead of next to the program (multi-user mode, chosen in Settings).\n\
+         mode = \"multi-user\"\n",
+    )
+}
+
+/// Where everything is saved in multi-user mode: `%APPDATA%\RustySalamander`.
+pub fn user_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA")
         .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("RustySalamander").join("config.toml")
+    base.join("RustySalamander")
 }
 
-/// The configuration file to read: the portable one when it exists,
-/// otherwise the per-user one (taken over on the next save).
-pub fn config_source() -> PathBuf {
-    let portable = config_path();
-    if portable.exists() || std::env::var_os("RUSTYSALAMANDER_CONFIG").is_some() {
-        return portable;
-    }
-    let user = user_config_path();
-    if user.exists() {
-        user
+/// The folder settings are saved in: the program's own (portable), or
+/// [`user_dir`] in multi-user mode.
+pub fn settings_dir() -> Option<PathBuf> {
+    if multi_user() {
+        Some(user_dir())
     } else {
-        portable
+        app_dir()
+    }
+}
+
+/// Where the configuration is saved: `config.toml` in [`settings_dir`].
+/// `RUSTYSALAMANDER_CONFIG` names another file instead.
+pub fn config_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("RUSTYSALAMANDER_CONFIG") {
+        return PathBuf::from(p);
+    }
+    settings_dir().unwrap_or_else(user_dir).join("config.toml")
+}
+
+/// The per-user configuration file of multi-user mode.
+pub fn user_config_path() -> PathBuf {
+    user_dir().join("config.toml")
+}
+
+/// Set by the program in multi-user mode for the plugins: the folder below
+/// which each plugin keeps its files (`sal_plugin_api::data_dir`).
+pub const PLUGIN_DATA_ENV: &str = "RUSTYSALAMANDER_PLUGIN_DATA";
+
+/// Where plugins keep their files in multi-user mode:
+/// `%APPDATA%\RustySalamander\plugins`.
+pub fn user_plugin_data() -> PathBuf {
+    user_dir().join("plugins")
+}
+
+/// Whether the file `rel` (relative to its plugin's folder) is something
+/// the plugin saved there, rather than part of the plugin as installed
+/// (programs, libraries, translations, licences, change logs).
+pub fn is_plugin_data(rel: &Path) -> bool {
+    let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase()).collect::<Vec<_>>();
+    let Some(name) = parts.pop() else { return false };
+    if parts.iter().any(|d| d == "lang" || d.starts_with('.')) || name.starts_with('.') {
+        return false;
+    }
+    let ext = Path::new(&name).extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    !matches!(ext.as_str(), "spl" | "dll" | "exe" | "pdb" | "md")
+        && !["license", "licence", "notice", "readme", "changelog"].iter().any(|w| name.contains(w))
+}
+
+/// Copy what the plugins saved in their folders below `plugins` into
+/// `to\<plugin folder>`. Returns the files copied (their originals).
+pub fn copy_plugin_data(plugins: &Path, to: &Path) -> io::Result<Vec<PathBuf>> {
+    fn walk(base: &Path, rel: &Path, to: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+        let Ok(dir) = fs::read_dir(base.join(rel)) else { return Ok(()) };
+        for de in dir.flatten() {
+            let rel = rel.join(de.file_name());
+            if de.file_type()?.is_dir() {
+                walk(base, &rel, to, out)?;
+                continue;
+            }
+            if !is_plugin_data(&rel) {
+                continue;
+            }
+            let dest = to.join(&rel);
+            if let Some(d) = dest.parent() {
+                fs::create_dir_all(d)?;
+            }
+            fs::copy(base.join(&rel), &dest)?;
+            out.push(base.join(&rel));
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    let Ok(dir) = fs::read_dir(plugins) else { return Ok(out) };
+    // one folder per plugin; .updates and the like belong to the program
+    for de in dir.flatten() {
+        let name = de.file_name();
+        if de.file_type()?.is_dir() && !name.to_string_lossy().starts_with('.') {
+            let base = plugins.join(&name);
+            let mut found = Vec::new();
+            walk(&base, Path::new(""), &to.join(&name), &mut found)?;
+            out.extend(found);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether settings can be saved where they belong: false for a portable
+/// program in a folder the user can't write to (e.g. under Program Files).
+pub fn settings_writable() -> bool {
+    if std::env::var_os("RUSTYSALAMANDER_CONFIG").is_some() || multi_user() {
+        return true;
+    }
+    let Some(dir) = app_dir() else { return false };
+    let probe = dir.join(".write-test");
+    match fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
     }
 }
 
 impl Config {
-    /// The saved settings (see [`config_source`]), or the defaults.
+    /// The saved settings (see [`config_path`]), or the defaults. A
+    /// portable program never reads settings from `%APPDATA%`.
     pub fn load() -> Config {
-        let text = fs::read_to_string(config_source()).unwrap_or_default();
+        let text = fs::read_to_string(config_path()).unwrap_or_default();
         let mut c = Config::parse(&text);
         c.hot_paths.resize(10, String::new());
         c
@@ -403,21 +504,19 @@ impl Config {
         c
     }
 
-    /// Save next to the program; where that is not allowed (e.g. under
-    /// Program Files), to the per-user location instead.
+    /// Save to [`config_path`]. A portable program in a folder it can't
+    /// write to doesn't save (there is no quiet fallback to `%APPDATA%`).
     pub fn save(&self) -> io::Result<()> {
+        self.save_to(&config_path())
+    }
+
+    /// Save to the file `p`.
+    pub fn save_to(&self, p: &Path) -> io::Result<()> {
         let s = toml::to_string_pretty(self).map_err(io::Error::other)?;
-        let write = |p: &Path| -> io::Result<()> {
-            if let Some(dir) = p.parent() {
-                fs::create_dir_all(dir)?;
-            }
-            fs::write(p, &s)
-        };
-        let portable = config_path();
-        match write(&portable) {
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && std::env::var_os("RUSTYSALAMANDER_CONFIG").is_none() => write(&user_config_path()),
-            r => r,
+        if let Some(dir) = p.parent() {
+            fs::create_dir_all(dir)?;
         }
+        fs::write(p, s)
     }
 }
 
@@ -439,12 +538,34 @@ mod tests {
         let file = t.path().join("sub").join("my config.toml");
         std::env::set_var("RUSTYSALAMANDER_CONFIG", &file);
         assert_eq!(config_path(), file);
-        assert_eq!(config_source(), file);
         let c = Config { language: "cs".into(), font_size: 17.0, ..Config::default() };
         c.save().unwrap();
         let back = Config::load();
         std::env::remove_var("RUSTYSALAMANDER_CONFIG");
         assert_eq!((back.language.as_str(), back.font_size), ("cs", 17.0));
+    }
+
+    #[test]
+    fn plugin_data_is_moved_programs_stay() {
+        for data in ["known_hosts", "last-connection", "known_certificates", "sub/state.toml"] {
+            assert!(is_plugin_data(Path::new(data)), "{data}");
+        }
+        for program in ["scp.spl", "7z.dll", "License.txt", "unRarLicense.txt", "CHANGELOG.md", "lang/cs.toml", ".write-test", ".updates/x"] {
+            assert!(!is_plugin_data(Path::new(program)), "{program}");
+        }
+        let t = tempfile::tempdir().unwrap();
+        let plugins = t.path().join("plugins");
+        fs::create_dir_all(plugins.join("scp").join("lang")).unwrap();
+        fs::create_dir_all(plugins.join(".updates").join("scp")).unwrap();
+        fs::write(plugins.join("scp").join("scp.spl"), "x").unwrap();
+        fs::write(plugins.join("scp").join("known_hosts"), "host key").unwrap();
+        fs::write(plugins.join("scp").join("lang").join("cs.toml"), "x").unwrap();
+        fs::write(plugins.join(".updates").join("scp").join("known_hosts"), "x").unwrap();
+        let to = t.path().join("Uživatel 🦎").join("plugins");
+        let moved = copy_plugin_data(&plugins, &to).unwrap();
+        assert_eq!(moved, vec![plugins.join("scp").join("known_hosts")]);
+        assert_eq!(fs::read_to_string(to.join("scp").join("known_hosts")).unwrap(), "host key");
+        assert!(!to.join("scp").join("scp.spl").exists() && !to.join(".updates").exists());
     }
 
     #[test]

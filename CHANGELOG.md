@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (experimental branch)
+
+- **Strictly portable:** nothing is read from or written to `%APPDATA%` any more. Before, a copy without `config.toml` took the settings from `%APPDATA%`, and when the program's folder was read-only the settings, and the SCP and FTP plugins' known servers and last connections, went to `%APPDATA%` without a word. Now a read-only folder is reported at start.
+- **Multi-user mode:** Settings → General → Settings location moves the settings and what the plugins saved to `%APPDATA%\RustySalamander` for good, so each Windows user has their own; the choice is kept in `multiuser.toml` next to the program (Windows asks for administrator rights when that folder is protected). For plugin authors: `sal_plugin_api::data_dir(dir)` is where a plugin saves.
+- **FTPS:** the warning about a changed certificate names the full path of `known_certificates`.
+
 ## 0.9.5-beta (2026-11-11)
 
 - **Plugin windows opened from a command look like the program:** the Compare window took the system's theme, fonts and accent color instead of the ones chosen in the program. For plugin authors: a plugin command's values now carry the program's look (`theme`, fonts, accent colors, animations), as viewers' options do.

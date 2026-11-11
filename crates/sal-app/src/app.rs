@@ -147,6 +147,8 @@ enum Dialog {
     Update {
         rows: Vec<UpdateRow>,
     },
+    /// Move the settings to %APPDATA% and switch to multi-user mode for good.
+    MultiUser,
     /// `recording`: the next key combination is added to that action.
     Settings {
         tab: SettingsTab,
@@ -733,6 +735,14 @@ impl App {
         crate::debuglog::write(format!("startup: configuration file {}", sal_core::config::config_path().display()));
         crate::debuglog::time("startup: fonts", || crate::fonts::install(ctx, &cfg.ui_font, &cfg.mono_font));
         let mut app = App::with_config(ctx, cfg, args);
+        if !sal_core::config::settings_writable() {
+            let folder = sal_core::config::app_dir().map(|d| display_path(&d)).unwrap_or_default();
+            crate::debuglog::error(format!("startup: the program's folder {folder} is read-only, settings will not be saved"));
+            app.error(trf(
+                "The program's folder {folder} cannot be written to, so settings will not be saved. Move RustySalamander to a folder you can write to, or switch to multi-user mode in Settings → General → Settings location.",
+                &[("folder", &folder)],
+            ));
+        }
         if let (true, Some(path)) = (crate::debuglog::full(), crate::debuglog::path()) {
             app.status = trf("Debug log: {file}", &[("file", &path.display().to_string())]);
         }
@@ -1416,6 +1426,15 @@ impl App {
     /// Save the settings, with the panels' folders, sort orders and the
     /// active panel as they are now.
     fn save_config(&mut self) {
+        self.sync_config();
+        if let Err(e) = self.cfg.save() {
+            crate::debuglog::error(format!("cannot save the configuration to {}: {e}", sal_core::config::config_path().display()));
+        }
+    }
+
+    /// Put the panels' folders, sort orders and the active panel into the
+    /// settings.
+    fn sync_config(&mut self) {
         // a connection is gone at the next start: keep the folder saved before it
         for (i, saved) in [(0, &mut self.cfg.left), (1, &mut self.cfg.right)] {
             let p = &self.panels[i];
@@ -1423,9 +1442,48 @@ impl App {
             *saved = PanelConfig { path, sort: p.sort };
         }
         self.cfg.right_active = self.active == 1;
-        if let Err(e) = self.cfg.save() {
-            eprintln!("cannot save configuration: {e}");
+    }
+
+    /// Start the program again and close this one (saving the settings).
+    fn restart(&mut self, ctx: &egui::Context) {
+        self.save_config();
+        match std::env::current_exe().and_then(|exe| std::process::Command::new(&exe).current_dir(exe.parent().unwrap_or(Path::new("."))).spawn()) {
+            Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.error(format!("RustySalamander: {e}")),
         }
+    }
+
+    /// Multi-user mode: copy the settings and what the plugins saved to
+    /// `%APPDATA%\RustySalamander`, mark the program's folder (as
+    /// administrator when it is protected), then remove what was next to the
+    /// program.
+    fn move_to_multi_user(&mut self) -> Result<(), String> {
+        use sal_core::config;
+        let app = config::app_dir().ok_or_else(|| tr("the program's folder is unknown").to_owned())?;
+        let shown = |p: &Path, e: std::io::Error| format!("{}: {e}", display_path(p));
+        self.sync_config();
+        let user_cfg = config::user_config_path();
+        self.cfg.save_to(&user_cfg).map_err(|e| shown(&user_cfg, e))?;
+        let mut moved = Vec::new();
+        if let Some(dir) = plugins::plugins_dir() {
+            moved = config::copy_plugin_data(&dir, &config::user_plugin_data()).map_err(|e| shown(&dir, e))?;
+        }
+        let marker = app.join(config::MULTI_USER_FILE);
+        match config::write_multi_user_marker(&app) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => crate::elevate::write_multi_user_marker().map_err(|e| shown(&marker, e))?,
+            Err(e) => return Err(shown(&marker, e)),
+        }
+        if !config::multi_user() {
+            return Err(tr("the program's folder could not be marked").to_owned());
+        }
+        crate::debuglog::did(format_args!("switched to multi-user mode; moved {} plugin files", moved.len()));
+        // what was next to the program now lives in %APPDATA%
+        moved.push(app.join("config.toml"));
+        for f in moved {
+            let _ = std::fs::remove_file(f);
+        }
+        Ok(())
     }
 
     /// Show the answer of a look for a new release. One made at start-up
@@ -3354,6 +3412,8 @@ impl App {
         let main_h = ctx.screen_rect().height();
         // 0 = keep open, 1 = ok, 2 = cancel
         let mut outcome = 0u8;
+        // Settings asked for the multi-user question (opened once it closes)
+        let mut ask_multi_user = false;
         let text_field = |ui: &mut egui::Ui, s: &mut String| {
             let r = ui.add(layout::text_field(s).desired_width(f32::INFINITY));
             // a new window's first frame is an invisible sizing pass that drops
@@ -3640,6 +3700,27 @@ impl App {
                     outcome = 2;
                 }
             }
+            Dialog::MultiUser => {
+                let from = sal_core::config::app_dir().map(|d| display_path(&d)).unwrap_or_default();
+                let to = display_path(&sal_core::config::user_dir());
+                dw.modal().show(ctx, &mut self.dialog_places, "multi-user", tr("Multi-user mode"), 520.0, &mut enter, &mut escape, &mut |ui| {
+                    ui.label(trf("The settings and what plugins saved (known servers, last connections) move from {from} to {to}. Each Windows user then has their own settings.", &[("from", &from), ("to", &to)]));
+                    ui.add_space(layout::GAP);
+                    ui.colored_label(ui.visuals().warn_fg_color, tr("This is permanent: the program stops being portable. If its folder is protected, Windows asks for administrator rights once."));
+                    ui.add_space(layout::GAP);
+                    ui.label(tr("RustySalamander restarts afterwards."));
+                    // permanent: Enter keeps things as they are
+                    layout::before_buttons(ui);
+                    outcome = match layout::buttons(ui, &[(tr("Move and restart"), ""), (tr("Cancel"), "")], Some(1)) {
+                        Some(0) => 1,
+                        Some(_) => 2,
+                        None => 0,
+                    };
+                });
+                if enter && outcome == 0 {
+                    outcome = 2;
+                }
+            }
             Dialog::Update { rows } => {
                 use crate::update::{Progress, Target};
                 let states: Vec<Option<Progress>> = rows.iter().map(|r| r.install.as_ref().map(|i| i.lock().unwrap().clone())).collect();
@@ -3845,11 +3926,7 @@ impl App {
                     }
                 }
                 if restart {
-                    self.save_config();
-                    match std::env::current_exe().and_then(|exe| std::process::Command::new(&exe).current_dir(exe.parent().unwrap_or(Path::new("."))).spawn()) {
-                        Ok(_) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-                        Err(e) => self.error(format!("RustySalamander: {e}")),
-                    }
+                    self.restart(ctx);
                 }
             }
             Dialog::Settings { tab, recording } => {
@@ -3871,6 +3948,9 @@ impl App {
                 let edit_choices = opener_choices(&self.plugins, OpenKind::Edit);
                 let suffix_edit = &mut self.suffix_edit;
                 let mut check_now = false;
+                let mut go_multi_user = false;
+                let multi_user = sal_core::config::multi_user();
+                let settings_dir = sal_core::config::config_path().parent().map(display_path).unwrap_or_default();
                 // each plugin found: id, name, description, its file and its
                 // state: running (its status) or why it couldn't start
                 let plugin_rows: Vec<PluginRow> = self
@@ -4156,6 +4236,20 @@ impl App {
                                     ui.horizontal(|ui| {
                                         ui.checkbox(&mut cfg.check_updates, tr("Look for a new version on GitHub at start-up"));
                                         check_now |= ui.button(tr("Check now")).clicked();
+                                    });
+                                    ui.end_row();
+                                });
+
+                                section(ui, n_("Settings location"), false, &mut |ui| {
+                                    ui.label(tr("Saved in"));
+                                    ui.vertical(|ui| {
+                                        ui.label(settings_dir.as_str());
+                                        if multi_user {
+                                            ui.label(RichText::new(tr("Multi-user mode: each Windows user has their own settings.")).weak());
+                                        } else {
+                                            ui.label(RichText::new(tr("Portable: settings and plugin data stay next to the program.")).weak());
+                                            go_multi_user |= ui.button(tr("Move to %APPDATA% (multi-user mode)…")).clicked();
+                                        }
                                     });
                                     ui.end_row();
                                 });
@@ -4466,6 +4560,10 @@ impl App {
                 if plugins_changed {
                     self.apply_plugins();
                 }
+                if go_multi_user {
+                    outcome = 2;
+                    ask_multi_user = true;
+                }
                 if check_now {
                     self.update_check = Some(crate::update::Check::start(ctx, true, update_sources(&self.plugins), update_offer(&self.cfg, true)));
                 }
@@ -4569,6 +4667,7 @@ impl App {
         }
         match outcome {
             0 => self.dialog = dialog,
+            2 if ask_multi_user => self.open_dialog(Dialog::MultiUser),
             2 => {}
             3 | 4 => {
                 self.queue_place = if outcome == 3 { Placement::First } else { Placement::Last };
@@ -4655,6 +4754,10 @@ impl App {
                     Err(e) => self.error(trf("Cannot rename: {error}", &[("error", &e)])),
                 }
             }
+            Dialog::MultiUser => match self.move_to_multi_user() {
+                Ok(()) => self.restart(ctx),
+                Err(e) => self.error(trf("Cannot switch to multi-user mode: {error}", &[("error", &e)])),
+            },
             Dialog::Delete { sources, recycle } => {
                 let kind = if recycle { JobKind::Recycle } else { JobKind::Delete };
                 self.start_job(ctx, kind, sources, PathBuf::new());
@@ -6424,6 +6527,7 @@ impl Dialog {
             Dialog::Drive { panel, .. } => format!("drive selector of the {} panel", if *panel == 0 { "left" } else { "right" }),
             Dialog::Message { title, text } => format!("message \"{title}\": {text}"),
             Dialog::Help => "help".into(),
+            Dialog::MultiUser => "switch to multi-user mode".into(),
             Dialog::Update { rows } => format!("updates ({} rows)", rows.len()),
             Dialog::Settings { recording, .. } => format!("settings{}", if recording.is_some() { ", recording a shortcut" } else { "" }),
         }
@@ -9633,6 +9737,21 @@ mod tests {
         assert!(ui.app.font_slider_rect.is_some(), "General tab drawn");
         ui.app.command(&ui.ctx.clone(), Cmd::ToggleIcons);
         assert!(!ui.app.cfg.system_icons);
+    }
+
+    /// The question before switching to multi-user mode is permanent, so
+    /// Enter answers Cancel: nothing moves and no marker is written.
+    #[test]
+    fn multi_user_question_defaults_to_cancel() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        ui.app.open_dialog(Dialog::MultiUser);
+        ui.frames(3);
+        assert!(matches!(ui.app.dialog, Dialog::MultiUser));
+        ui.key(Key::Enter);
+        ui.frames(2);
+        assert!(matches!(ui.app.dialog, Dialog::None), "Enter closed the question");
+        assert!(!sal_core::config::multi_user(), "and switched nothing");
     }
 
     /// The update window in each state, with the program and a plugin; a

@@ -256,6 +256,24 @@ pub trait Plugin: FolderPlugin + Sized + 'static {
     fn start(dir: &Path) -> Result<Self, String>;
 }
 
+/// Set by the program in multi-user mode: the folder below which each
+/// plugin keeps what it saves, in a folder named like its own.
+pub const PLUGIN_DATA_ENV: &str = "RUSTYSALAMANDER_PLUGIN_DATA";
+
+/// The folder a plugin saves its files in (known hosts, last connection…):
+/// its own folder `plugin_dir` when the program is portable (the default), or
+/// `%APPDATA%\RustySalamander\plugins\<folder name>` when the program was
+/// switched to multi-user mode. Never save anywhere else.
+pub fn data_dir(plugin_dir: &Path) -> PathBuf {
+    match std::env::var_os(PLUGIN_DATA_ENV).filter(|v| !v.is_empty()) {
+        Some(root) => match plugin_dir.file_name() {
+            Some(name) => PathBuf::from(root).join(name),
+            None => PathBuf::from(root),
+        },
+        None => plugin_dir.to_path_buf(),
+    }
+}
+
 /// `name` inside the folder `base`.
 pub fn join_inner(base: &str, name: &str) -> String {
     if base.is_empty() {

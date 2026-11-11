@@ -633,14 +633,18 @@ fn unpack(zip: &[u8], target: &Path, complete: &dyn Fn(&Path) -> bool, incomplet
 }
 
 /// Copy the settings from the program folder `old` into `new`: `config.toml`
-/// and, in each plugin's folder, the files the new version doesn't bring
+/// and `multiuser.toml`, and, in each plugin's folder, the files the new version doesn't bring
 /// (what the plugin saved there, such as `known_hosts`), never programs.
 /// Returns the copied files, relative to the folder.
 pub fn migrate(old: &Path, new: &Path) -> io::Result<Vec<String>> {
     let mut copied = Vec::new();
-    if old.join("config.toml").is_file() {
-        fs::copy(old.join("config.toml"), new.join("config.toml"))?;
-        copied.push("config.toml".to_owned());
+    // the settings, and the switch to multi-user mode (whose settings are in
+    // %APPDATA% and stay there)
+    for name in ["config.toml", sal_core::config::MULTI_USER_FILE] {
+        if old.join(name).is_file() {
+            fs::copy(old.join(name), new.join(name))?;
+            copied.push(name.to_owned());
+        }
     }
     /// Copy the settings files below `rel`.
     fn walk(old: &Path, new: &Path, rel: &Path, copied: &mut Vec<String>) -> io::Result<()> {
