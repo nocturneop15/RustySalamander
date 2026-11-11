@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.7-beta (2026-11-11)
+
+- **Update in place or into a new folder:** a new version of the program can now replace this one in its folder, keeping settings and every plugin, your own too (files in use are set aside and deleted at the next start; if anything fails, all is put back), or go into a new folder as before. Into a new folder, your own plugins and languages can go along: before, only the files they had saved were copied, without the plugin itself.
+
 ## 0.9.6-beta (2026-11-11)
 
 - **Typed input is checked everywhere** (every field was tried with names of devices, paths that leave the folder, forbidden and control characters, command injection, odd Unicode and very long text):

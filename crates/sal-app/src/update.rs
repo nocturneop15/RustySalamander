@@ -450,10 +450,12 @@ pub enum Progress {
     },
     Unpacking,
     /// The program installed in `folder`; `copied` are the settings files
-    /// taken over.
+    /// (and the user's own plugins and languages) taken over. `in_place`:
+    /// this program's folder was updated, a restart starts the new version.
     Done {
         folder: PathBuf,
         copied: Vec<String>,
+        in_place: bool,
     },
     /// A plugin's update waits for the next start.
     Staged,
@@ -462,10 +464,21 @@ pub enum Progress {
 
 pub type Install = Arc<Mutex<Progress>>;
 
-/// Download and install `update` on a background thread: the program next
-/// to this version (with the settings copied over), a plugin staged for
-/// the next start.
-pub fn install(ctx: &egui::Context, update: Update) -> Install {
+/// How a new version of the program is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum How {
+    /// Over this version, in its folder: settings and every plugin
+    /// (including the user's own) stay where they are.
+    InPlace,
+    /// Into a new folder next to this one, which stays as it is; the
+    /// settings are copied, and with `own` also the plugins and languages
+    /// the new version doesn't bring (the user's own).
+    NewFolder { own: bool },
+}
+
+/// Download and install `update` on a background thread: the program as
+/// `how` says, a plugin staged for the next start.
+pub fn install(ctx: &egui::Context, update: Update, how: How) -> Install {
     let release = update.release.clone();
     let state = Arc::new(Mutex::new(Progress::Downloading { done: 0, total: release.asset_size }));
     let (out, ctx) = (state.clone(), ctx.clone());
@@ -476,6 +489,16 @@ pub fn install(ctx: &egui::Context, update: Update) -> Install {
         };
         let r = (|| -> Result<Progress, String> {
             let target = match &update.target {
+                Target::Program if how == How::InPlace => {
+                    let app = sal_core::config::app_dir().ok_or("the program's folder is unknown")?;
+                    if !writable(&app) {
+                        return Err(format!(
+                            "the program's folder {} can't be written to. Install the new version in a new folder, or start RustySalamander as administrator.",
+                            app.display()
+                        ));
+                    }
+                    app
+                }
                 Target::Program => {
                     let target = target_dir(&release).ok_or("the program's folder has no parent folder")?;
                     if target.exists() {
@@ -500,14 +523,18 @@ pub fn install(ctx: &egui::Context, update: Update) -> Install {
                 return Err(format!("the download is incomplete ({} of {} bytes)", zip.len(), release.asset_size));
             }
             set(Progress::Unpacking);
-            match &update.target {
-                Target::Program => {
+            match (&update.target, how) {
+                (Target::Program, How::InPlace) => {
+                    install_in_place(&zip, &target)?;
+                    Ok(Progress::Done { folder: target, copied: Vec::new(), in_place: true })
+                }
+                (Target::Program, How::NewFolder { own }) => {
                     unpack_release(&zip, &target)?;
                     let app = sal_core::config::app_dir().ok_or("the program's folder is unknown")?;
-                    let copied = migrate(&app, &target).map_err(|e| format!("copying the settings: {e}"))?;
-                    Ok(Progress::Done { folder: target, copied })
+                    let copied = migrate(&app, &target, own).map_err(|e| format!("copying the settings: {e}"))?;
+                    Ok(Progress::Done { folder: target, copied, in_place: false })
                 }
-                Target::Plugin { .. } => {
+                (Target::Plugin { .. }, _) => {
                     let _ = fs::remove_dir_all(&target);
                     if let Some(dir) = target.parent() {
                         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -521,6 +548,111 @@ pub fn install(ctx: &egui::Context, update: Update) -> Install {
         set(r.unwrap_or_else(Progress::Failed));
     });
     state
+}
+
+/// Whether files can be made in `dir`.
+fn writable(dir: &Path) -> bool {
+    let probe = dir.join(".update-write-test");
+    let ok = fs::write(&probe, b"").is_ok();
+    let _ = fs::remove_file(&probe);
+    ok
+}
+
+/// What a file replaced by an update in place is renamed to: a running
+/// program, or a plugin it has loaded, can be renamed but not overwritten.
+/// The next start deletes it ([`remove_replaced`]).
+const REPLACED: &str = ".replaced-by-update";
+
+/// The folder an update in place is unpacked into first.
+const IN_PLACE_STAGE: &str = ".update";
+
+/// Update the program in its folder `app` from a release zip: unpacked next
+/// to it first (a damaged download changes nothing), then each file of the
+/// release put in place, the file it replaces renamed aside. Everything
+/// else stays: settings, what plugins saved, plugins and languages the
+/// release doesn't bring. If a file can't be replaced, every file already
+/// replaced is put back. Returns how many files were replaced or added.
+pub fn install_in_place(zip: &[u8], app: &Path) -> Result<usize, String> {
+    let stage = app.join(IN_PLACE_STAGE);
+    let _ = fs::remove_dir_all(&stage);
+    unpack_release(zip, &stage)?;
+    let mut files = Vec::new();
+    list_files(&stage, Path::new(""), &mut files);
+    // (new file, the old one renamed aside, if there was one)
+    let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let r = files.iter().try_for_each(|rel| -> Result<(), String> {
+        let to = app.join(rel);
+        if let Some(dir) = to.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let aside = if to.exists() {
+            let aside = free_aside(&to);
+            fs::rename(&to, &aside).map_err(|e| format!("{}: {e}", to.display()))?;
+            Some(aside)
+        } else {
+            None
+        };
+        if let Err(e) = fs::rename(stage.join(rel), &to) {
+            if let Some(a) = &aside {
+                let _ = fs::rename(a, &to);
+            }
+            return Err(format!("{}: {e}", to.display()));
+        }
+        done.push((to, aside));
+        Ok(())
+    });
+    if let Err(e) = r {
+        // back as it was
+        for (new, aside) in done.into_iter().rev() {
+            let _ = fs::remove_file(&new);
+            if let Some(a) = aside {
+                let _ = fs::rename(&a, &new);
+            }
+        }
+        let _ = fs::remove_dir_all(&stage);
+        return Err(e);
+    }
+    let _ = fs::remove_dir_all(&stage);
+    Ok(files.len())
+}
+
+/// A free name to rename `file` aside to.
+fn free_aside(file: &Path) -> PathBuf {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut n = 0;
+    loop {
+        let aside = file.with_file_name(if n == 0 { format!("{name}{REPLACED}") } else { format!("{name}{REPLACED}{n}") });
+        // one left from an update before (its program still ran) goes first
+        if !aside.exists() || fs::remove_file(&aside).is_ok() {
+            return aside;
+        }
+        n += 1;
+    }
+}
+
+/// Delete what an update in place renamed aside, and a staging folder an
+/// interrupted one left (call at start, before the plugins are loaded).
+/// Files still in use (another copy of the old version runs) stay for the
+/// next time.
+pub fn remove_replaced(app: &Path) {
+    let _ = fs::remove_dir_all(app.join(IN_PLACE_STAGE));
+    let _ = fs::remove_dir_all(app.join(format!(".{IN_PLACE_STAGE}.partial")));
+    let mut todo = vec![app.to_path_buf()];
+    while let Some(dir) = todo.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() {
+                // the program's own folders only: lang, plugins and theirs
+                if dir == app && !matches!(e.file_name().to_str(), Some("lang" | "plugins")) {
+                    continue;
+                }
+                todo.push(e.path());
+            } else if e.file_name().to_string_lossy().contains(REPLACED) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 /// Where the update of the plugin in `dir` waits: `plugins\.updates\<folder>`.
@@ -633,10 +765,13 @@ fn unpack(zip: &[u8], target: &Path, complete: &dyn Fn(&Path) -> bool, incomplet
 }
 
 /// Copy the settings from the program folder `old` into `new`: `config.toml`
-/// and `multiuser.toml`, and, in each plugin's folder, the files the new version doesn't bring
-/// (what the plugin saved there, such as `known_hosts`), never programs.
-/// Returns the copied files, relative to the folder.
-pub fn migrate(old: &Path, new: &Path) -> io::Result<Vec<String>> {
+/// and `multiuser.toml`, and, in the folder of each plugin the new version
+/// brings, the files it doesn't (what the plugin saved there, such as
+/// `known_hosts`), never programs. With `own`, also the user's own: plugins
+/// (folders, or plugin files) and languages the new version doesn't bring,
+/// whole. Returns what was copied, relative to the folder (a plugin's
+/// folder ends with `\`).
+pub fn migrate(old: &Path, new: &Path, own: bool) -> io::Result<Vec<String>> {
     let mut copied = Vec::new();
     // the settings, and the switch to multi-user mode (whose settings are in
     // %APPDATA% and stay there)
@@ -653,8 +788,9 @@ pub fn migrate(old: &Path, new: &Path) -> io::Result<Vec<String>> {
             let rel = rel.join(de.file_name());
             if de.file_type()?.is_dir() {
                 // translations come with the program; updates waiting for
-                // the next start (plugins\.updates) belong to this version
-                if de.file_name() != "lang" && !de.file_name().to_string_lossy().starts_with('.') {
+                // the next start (plugins\.updates) belong to this version;
+                // a plugin the new version doesn't bring is copied whole, or not
+                if de.file_name() != "lang" && !de.file_name().to_string_lossy().starts_with('.') && new.join(&rel).is_dir() {
                     walk(old, new, &rel, copied)?;
                 }
                 continue;
@@ -673,7 +809,55 @@ pub fn migrate(old: &Path, new: &Path) -> io::Result<Vec<String>> {
         Ok(())
     }
     walk(old, new, Path::new("plugins"), &mut copied)?;
+    if own {
+        copy_own(old, new, &mut copied)?;
+    }
     Ok(copied)
+}
+
+/// Copy what the user added to the program folder `old` and the new
+/// version `new` doesn't bring: plugins (a folder below `plugins`, or a
+/// plugin file there) and languages (`lang\*.toml`).
+fn copy_own(old: &Path, new: &Path, copied: &mut Vec<String>) -> io::Result<()> {
+    fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+        fs::create_dir_all(to)?;
+        for e in fs::read_dir(from)?.flatten() {
+            if e.file_type()?.is_dir() {
+                copy_tree(&e.path(), &to.join(e.file_name()))?;
+            } else {
+                fs::copy(e.path(), to.join(e.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+    if let Ok(dir) = fs::read_dir(old.join("plugins")) {
+        for e in dir.flatten() {
+            let name = e.file_name();
+            let rel = Path::new("plugins").join(&name);
+            if name.to_string_lossy().starts_with('.') || new.join(&rel).exists() {
+                continue;
+            }
+            if e.file_type()?.is_dir() {
+                copy_tree(&e.path(), &new.join(&rel))?;
+                copied.push(format!("{}\\", rel.to_string_lossy()));
+            } else if e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case(abi::EXTENSION)) {
+                fs::create_dir_all(new.join("plugins"))?;
+                fs::copy(e.path(), new.join(&rel))?;
+                copied.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if let Ok(dir) = fs::read_dir(old.join("lang")) {
+        for e in dir.flatten() {
+            let rel = Path::new("lang").join(e.file_name());
+            if e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")) && !new.join(&rel).exists() {
+                fs::create_dir_all(new.join("lang"))?;
+                fs::copy(e.path(), new.join(&rel))?;
+                copied.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A relative path from a zip entry name, or `None` for names that would
@@ -1138,13 +1322,128 @@ mod tests {
         fs::write(old.join("plugins").join("scp").join("lang").join("cs.toml"), "old").unwrap();
         fs::create_dir_all(old.join("plugins").join(".updates").join("scp")).unwrap();
         fs::write(old.join("plugins").join(".updates").join("scp").join("CHANGELOG.md"), "staged").unwrap();
-        let mut copied = migrate(&old, &target).unwrap();
+        let mut copied = migrate(&old, &target, false).unwrap();
         copied.sort();
         assert_eq!(copied, ["config.toml", r"plugins\scp\known_hosts", r"plugins\scp\last-connection"]);
         assert_eq!(fs::read_to_string(target.join("config.toml")).unwrap(), "theme = \"Dark\"");
         assert_eq!(fs::read_to_string(target.join("plugins/scp/scp.spl")).unwrap(), "new plugin", "programs are never copied back");
         assert_eq!(fs::read_to_string(target.join("plugins/scp/lang/cs.toml")).unwrap(), "x = 1", "the new version's files win");
         assert_eq!(fs::read(target.join("rustysalamander.exe")).unwrap(), vec![7u8; 100_000]);
+    }
+
+    /// A program folder of an older version: settings, what a plugin saved,
+    /// the user's own plugin (a folder and a loose file) and language.
+    #[cfg(windows)]
+    fn old_version(app: &Path) {
+        fs::create_dir_all(app.join("plugins").join("scp").join("lang")).unwrap();
+        fs::create_dir_all(app.join("plugins").join("ltocatalog").join("lang")).unwrap();
+        fs::create_dir_all(app.join("lang")).unwrap();
+        fs::write(app.join("rustysalamander.exe"), "old program").unwrap();
+        fs::write(app.join("README.md"), "old readme").unwrap();
+        fs::write(app.join("config.toml"), "theme = \"Dark\"").unwrap();
+        fs::write(app.join("lang").join("de.toml"), "[language]\ncode = \"de\"").unwrap();
+        fs::write(app.join("plugins").join("scp").join("scp.spl"), "old plugin").unwrap();
+        fs::write(app.join("plugins").join("scp").join("known_hosts"), "host key").unwrap();
+        fs::write(app.join("plugins").join("ltocatalog").join("ltocatalog.spl"), "own plugin").unwrap();
+        fs::write(app.join("plugins").join("ltocatalog").join("catalog.sqlite"), "tapes").unwrap();
+        fs::write(app.join("plugins").join("ltocatalog").join("lang").join("cs.toml"), "own").unwrap();
+        fs::write(app.join("plugins").join("loose.spl"), "loose plugin").unwrap();
+    }
+
+    /// Update in place: the release's files replace the old ones (the old
+    /// ones renamed aside, gone at the next start); settings, what plugins
+    /// saved, own plugins and languages stay untouched.
+    #[cfg(windows)]
+    #[test]
+    fn update_in_place_keeps_everything_else() {
+        let t = tempfile::tempdir().unwrap();
+        let zip = release_zip(t.path(), "0.9.9");
+        let app = t.path().join("Rusty Salamander 🦎");
+        old_version(&app);
+        // the running program can be renamed, not overwritten: so it is here too
+        let running = fs::File::open(app.join("rustysalamander.exe")).unwrap();
+        assert_eq!(install_in_place(&zip, &app).unwrap(), 4);
+        drop(running);
+        assert_eq!(fs::read(app.join("rustysalamander.exe")).unwrap(), vec![7u8; 100_000]);
+        assert_eq!(fs::read_to_string(app.join("plugins/scp/scp.spl")).unwrap(), "new plugin");
+        assert_eq!(fs::read_to_string(app.join("README.md")).unwrap(), "čtení ".repeat(500));
+        for (file, kept) in [
+            ("config.toml", "theme = \"Dark\""),
+            ("lang/de.toml", "[language]\ncode = \"de\""),
+            ("plugins/scp/known_hosts", "host key"),
+            ("plugins/ltocatalog/ltocatalog.spl", "own plugin"),
+            ("plugins/ltocatalog/catalog.sqlite", "tapes"),
+            ("plugins/loose.spl", "loose plugin"),
+        ] {
+            assert_eq!(fs::read_to_string(app.join(file)).unwrap(), kept, "{file}");
+        }
+        assert!(app.join(format!("rustysalamander.exe{REPLACED}")).is_file(), "the old program aside");
+        assert!(!app.join(IN_PLACE_STAGE).exists());
+        // the next start clears what was put aside, nothing else
+        remove_replaced(&app);
+        let mut files = Vec::new();
+        list_files(&app, Path::new(""), &mut files);
+        assert!(files.iter().all(|f| !f.to_string_lossy().contains(REPLACED)), "{files:?}");
+        assert_eq!(files.len(), 11, "{files:?}");
+
+        // a second update in place over the first
+        assert_eq!(install_in_place(&release_zip(&t.path().join("again"), "1.0.0"), &app).unwrap(), 4);
+
+        // a damaged download changes nothing
+        let mut broken = zip.clone();
+        let mid = broken.len() / 3;
+        broken[mid] ^= 0xFF;
+        fs::write(app.join("rustysalamander.exe"), "current").unwrap();
+        assert!(install_in_place(&broken, &app).is_err());
+        assert_eq!(fs::read_to_string(app.join("rustysalamander.exe")).unwrap(), "current");
+        assert!(!app.join(IN_PLACE_STAGE).exists());
+    }
+
+    /// A file that can't be replaced: every file already replaced is put back.
+    #[cfg(windows)]
+    #[test]
+    fn update_in_place_rolls_back() {
+        let t = tempfile::tempdir().unwrap();
+        let zip = release_zip(t.path(), "0.9.9");
+        let app = t.path().join("app");
+        old_version(&app);
+        // a file another program holds without sharing: it can't be renamed aside
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = fs::OpenOptions::new().read(true).share_mode(0).open(app.join("README.md")).unwrap();
+        assert!(install_in_place(&zip, &app).is_err());
+        drop(held);
+        assert_eq!(fs::read_to_string(app.join("README.md")).unwrap(), "old readme");
+        assert_eq!(fs::read_to_string(app.join("rustysalamander.exe")).unwrap(), "old program", "put back");
+        assert_eq!(fs::read_to_string(app.join("plugins/scp/scp.spl")).unwrap(), "old plugin");
+        let mut files = Vec::new();
+        list_files(&app, Path::new(""), &mut files);
+        assert!(files.iter().all(|f| !f.to_string_lossy().contains(REPLACED)), "{files:?}");
+    }
+
+    /// Into a new folder: with `own`, the user's plugins and languages go
+    /// along whole; without, only settings and what bundled plugins saved.
+    #[cfg(windows)]
+    #[test]
+    fn new_folder_takes_own_plugins_when_asked() {
+        let t = tempfile::tempdir().unwrap();
+        let zip = release_zip(t.path(), "0.9.9");
+        let old = t.path().join("apps").join("0.9.8");
+        old_version(&old);
+        let without = t.path().join("apps").join("0.9.9");
+        unpack_release(&zip, &without).unwrap();
+        let mut copied = migrate(&old, &without, false).unwrap();
+        copied.sort();
+        assert_eq!(copied, ["config.toml", r"plugins\scp\known_hosts"]);
+        assert!(!without.join("plugins").join("ltocatalog").exists(), "no half plugin without its program");
+        let with = t.path().join("apps").join("0.9.9b");
+        unpack_release(&zip, &with).unwrap();
+        let mut copied = migrate(&old, &with, true).unwrap();
+        copied.sort();
+        assert_eq!(copied, ["config.toml", r"lang\de.toml", r"plugins\loose.spl", r"plugins\ltocatalog\", r"plugins\scp\known_hosts"]);
+        assert_eq!(fs::read_to_string(with.join("plugins/ltocatalog/ltocatalog.spl")).unwrap(), "own plugin");
+        assert_eq!(fs::read_to_string(with.join("plugins/ltocatalog/lang/cs.toml")).unwrap(), "own");
+        assert_eq!(fs::read_to_string(with.join("plugins/ltocatalog/catalog.sqlite")).unwrap(), "tapes");
+        assert_eq!(fs::read_to_string(with.join("plugins/scp/scp.spl")).unwrap(), "new plugin", "a bundled plugin is the new one");
     }
 
     #[test]

@@ -223,6 +223,10 @@ impl Plugins {
     /// ones; plugin updates downloaded last time are put in place first.
     pub fn load(disabled: &[String]) -> Plugins {
         let dir = plugins_dir();
+        // what an update in place renamed aside, before anything is loaded
+        if let Some(app) = sal_core::config::app_dir() {
+            crate::update::remove_replaced(&app);
+        }
         let (updated, failed) = dir.as_deref().map(crate::update::apply_staged).unwrap_or_default();
         if !updated.is_empty() || !failed.is_empty() {
             crate::debuglog::write(format!("startup: plugins updated {updated:?}, not updated {failed:?}"));

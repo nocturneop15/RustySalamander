@@ -171,12 +171,27 @@ struct UpdateRow {
     install: Option<crate::update::Install>,
     changelog: Option<crate::update::Changelog>,
     show_log: bool,
+    /// The program: updated in its folder, else installed in a new one.
+    in_place: bool,
+    /// Into a new folder: the user's own plugins and languages go along.
+    own: bool,
 }
 
 impl UpdateRow {
-    /// An update not yet installed, its changelog not yet read.
+    /// An update not yet installed, its changelog not yet read. The
+    /// program is installed next to this version unless the person
+    /// chooses to update in place.
     fn new(update: crate::update::Update) -> UpdateRow {
-        UpdateRow { update, install: None, changelog: None, show_log: false }
+        UpdateRow { update, install: None, changelog: None, show_log: false, in_place: false, own: true }
+    }
+
+    /// How the program is installed (plugins don't care).
+    fn how(&self) -> crate::update::How {
+        if self.in_place {
+            crate::update::How::InPlace
+        } else {
+            crate::update::How::NewFolder { own: self.own }
+        }
     }
 }
 
@@ -3729,6 +3744,9 @@ impl App {
                 let ready = startable(rows, &states);
                 let (mut open_page, mut start, mut toggle_log, mut run_new, mut restart) = (None, None, None, None, false);
                 let (mut update_all, mut decline) = (false, None);
+                // the program's choice: (row, in place, own plugins)
+                let mut how: Option<(usize, bool, bool)> = None;
+                let app_folder = sal_core::config::app_dir().map(|d| display_path(&d)).unwrap_or_default();
                 let title = match (rows.iter().all(|r| r.update.new), rows.len() == 1) {
                     (true, true) => tr("New plugin available"),
                     (true, false) => tr("New plugins available"),
@@ -3782,11 +3800,7 @@ impl App {
                                     } else if plugin {
                                         ui.label(tr("Update now downloads it; it is installed when RustySalamander starts again. What the plugin saved stays."));
                                     } else {
-                                        let folder = crate::update::target_dir(&u.release).map(|p| display_path(&p)).unwrap_or_default();
-                                        ui.label(trf(
-                                            "Update now downloads the new version, unpacks it to {folder} and copies your settings there. This version stays as it is.",
-                                            &[("folder", &folder)],
-                                        ));
+                                        program_choice(ui, i, row, &app_folder, &mut how);
                                     }
                                     offer(ui, Some(if u.new { tr("Install") } else { tr("Update now") }));
                                 }
@@ -3800,7 +3814,15 @@ impl App {
                                         ui.label(tr("Unpacking…"));
                                     });
                                 }
-                                Some(Progress::Done { folder, copied }) => {
+                                Some(Progress::Done { folder, in_place: true, .. }) => {
+                                    ui.label(trf("RustySalamander {new} replaced this version in {folder}. Settings and plugins stay as they were.", &[("new", &u.release.version), ("folder", &display_path(folder))]));
+                                    ui.horizontal(|ui| {
+                                        if ui.button(tr("Restart now")).on_hover_text(tr("Closes and starts RustySalamander again")).clicked() {
+                                            restart = true;
+                                        }
+                                    });
+                                }
+                                Some(Progress::Done { folder, copied, .. }) => {
                                     ui.label(trf("RustySalamander {new} is installed in {folder}.", &[("new", &u.release.version), ("folder", &display_path(folder))]));
                                     ui.label(if copied.is_empty() {
                                         tr("There were no settings to copy.").to_owned()
@@ -3819,6 +3841,9 @@ impl App {
                                 }
                                 Some(Progress::Failed(e)) => {
                                     ui.colored_label(ui.visuals().error_fg_color, trf("The update failed: {error}", &[("error", e)]));
+                                    if !plugin {
+                                        program_choice(ui, i, row, &app_folder, &mut how);
+                                    }
                                     offer(ui, Some(tr("Try again")));
                                 }
                             }
@@ -3897,6 +3922,9 @@ impl App {
                         outcome = 2;
                     }
                 }
+                if let Some((i, in_place, own)) = how.filter(|(i, ..)| *i < rows.len()) {
+                    (rows[i].in_place, rows[i].own) = (in_place, own);
+                }
                 if let Some(i) = toggle_log.filter(|&i| i < rows.len()) {
                     let row = &mut rows[i];
                     row.show_log = !row.show_log;
@@ -3916,7 +3944,7 @@ impl App {
                         // the settings as they are now go to the new version
                         self.save_config();
                     }
-                    rows[i].install = Some(crate::update::install(ctx, rows[i].update.clone()));
+                    rows[i].install = Some(crate::update::install(ctx, rows[i].update.clone(), rows[i].how()));
                 }
                 if let Some(folder) = run_new {
                     let exe = folder.join("rustysalamander.exe");
@@ -5697,6 +5725,26 @@ fn startable(rows: &[UpdateRow], states: &[Option<crate::update::Progress>]) -> 
         .filter(|(_, (row, state))| !row.update.new && row.update.fits().is_ok() && matches!(state, None | Some(Progress::Failed(_))))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// How a new version of the program is installed: in this folder, or in a
+/// new one (with the user's own plugins or not). The choice made goes to
+/// `how` as (row, in place, own plugins).
+fn program_choice(ui: &mut egui::Ui, i: usize, row: &UpdateRow, app_folder: &str, how: &mut Option<(usize, bool, bool)>) {
+    let folder = crate::update::target_dir(&row.update.release).map(|p| display_path(&p)).unwrap_or_default();
+    let (mut in_place, mut own) = (row.in_place, row.own);
+    ui.radio_value(&mut in_place, true, tr("Update this version in its folder"));
+    ui.indent(("in place", i), |ui| {
+        ui.label(RichText::new(trf("The program in {folder} is replaced; settings, what plugins saved and every plugin, your own too, stay.", &[("folder", &app_folder)])).weak());
+    });
+    ui.radio_value(&mut in_place, false, tr("Install the new version in a new folder"));
+    ui.indent(("new folder", i), |ui| {
+        ui.label(RichText::new(trf("Unpacked to {folder}, with your settings copied there. This version stays as it is.", &[("folder", &folder)])).weak());
+        ui.add_enabled(!in_place, egui::Checkbox::new(&mut own, tr("Copy my own plugins and languages (those the new version doesn't bring)")));
+    });
+    if (in_place, own) != (row.in_place, row.own) {
+        *how = Some((i, in_place, own));
+    }
 }
 
 /// What the update check looks at for the plugins found: those that say
@@ -9957,6 +10005,7 @@ mod tests {
                 Some(Progress::Done {
                     folder: PathBuf::from(r"D:\Applications\RustySalamander\0.5.0-alpha"),
                     copied: vec!["config.toml".into(), r"plugins\scp\known_hosts".into()],
+                    in_place: false,
                 }),
                 Some(Progress::Staged),
             ),
@@ -9969,6 +10018,7 @@ mod tests {
             rows[1].install = plugin_state.map(|p| Arc::new(Mutex::new(p)));
             rows[1].show_log = true;
             rows[1].changelog = Some(Arc::new(Mutex::new(Some(Ok(log.to_owned())))));
+            assert_eq!(rows[0].how(), crate::update::How::NewFolder { own: true }, "a new folder, own plugins along, unless chosen otherwise");
             ui.app.dialog = Dialog::Update { rows };
             ui.frames(4);
             assert!(matches!(ui.app.dialog, Dialog::Update { .. }), "{name}: open");

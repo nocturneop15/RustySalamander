@@ -464,7 +464,9 @@ Archives, servers, search, the viewer and comparison are plugins. They are files
 
 When the program starts, it checks GitHub for newer versions of itself and of its plugins. If there are any, a window lists them, each with **Show changelog** to see what changed first.
 
-- **Update now** for the program downloads the new version into a new folder next to the current one (for example `…\RustySalamander\0.8.0-beta`) and copies your settings there. **Start the new version** opens it. The old version stays, so you can go back.
+- **Update now** for the program installs the new version in one of two ways, chosen in the window:
+  - **Update this version in its folder:** the program's files are replaced where they are. Settings, what plugins saved, and every plugin, your own too, stay as they are. **Restart now** starts the new version. The replaced files are set aside while the program runs and deleted at the next start. If a file can't be replaced, everything is put back as it was. The folder must be writable (not, say, under Program Files without administrator rights).
+  - **Install the new version in a new folder** (chosen at first): it goes into a folder next to the current one (for example `…\RustySalamander\0.8.0-beta`), and your settings are copied there. **Copy my own plugins and languages** (on at first) also copies plugins and languages the new version doesn't bring, whole. **Start the new version** opens it. The old version stays, so you can go back.
 - **Update now** for a plugin downloads it; it is installed at the next start (**Restart now** does it at once).
 - **Update all** installs every available update.
 - An update made for a different program version is shown greyed, with the reason.
