@@ -2,6 +2,12 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `ftp-v<version>` in the RustySalamander repository.
 
+## 0.1.2-alpha (2026-11-11)
+
+- **No command smuggled to the server:** a line break in a path or in the password is refused (it would have ended the FTP command and started another one); the server and user names may not contain control characters, and a server name is at most 253 characters.
+- **Portable or per user:** the plugin keeps `known_hosts`, `known_certificates` and the last connection in its own folder, or in `%APPDATA%\RustySalamander\plugins\ftp` once RustySalamander is in multi-user mode (0.9.6-beta). It no longer falls back to `%APPDATA%` by itself when its folder is read-only.
+- **The changed-certificate warning** names the full path of `known_certificates`.
+
 ## 0.1.1-alpha (2026-11-05)
 
 - **Data connection right below the port:** in the connect form, the FTP data connection mode (Automatic, Passive, Active) follows the server and port it belongs with.

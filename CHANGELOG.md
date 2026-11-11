@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.6-beta (2026-11-11)
 
 - **Typed input is checked everywhere** (every field was tried with names of devices, paths that leave the folder, forbidden and control characters, command injection, odd Unicode and very long text):
   - **Copy and move (F5, F6)** refuse a target that is a device (`NUL`, `CON`, `\\.\PhysicalDrive0`, `\\?\GLOBALROOT\…`), an alternate data stream (`file:stream`), a name Windows forbids, control characters, or a drive without a folder (`a:b`). Before, a copy to `NUL` was thrown away without a word, and as administrator a target like `\\.\PhysicalDrive0` would have written onto a disk.

@@ -2,6 +2,11 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `scp-v<version>` in the RustySalamander repository.
 
+## 0.6.1-alpha (2026-11-11)
+
+- **Connect form checked:** the server and user names may not contain control characters, and a server name is at most 253 characters.
+- **Portable or per user:** the plugin keeps `known_hosts` and the last connection in its own folder, or in `%APPDATA%\RustySalamander\plugins\scp` once RustySalamander is in multi-user mode (0.9.6-beta). It no longer falls back to `%APPDATA%` by itself when its folder is read-only; the folder is made when a server's key is first remembered.
+
 ## 0.6.0-alpha (2026-11-04)
 
 - **Dragged out of the window, files are read only as they are copied:** the plugin streams them from the server, a whole folder through one `scp -r -f`, with no temporary copy. Built for plugin interface 8 (`stream`): needs RustySalamander 0.9.0-beta or later.
