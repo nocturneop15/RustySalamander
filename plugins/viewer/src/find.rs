@@ -87,6 +87,21 @@ pub fn first_from(hits: &[Hit], line: usize) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// Hostile text in Find: found literally (or by its wildcards), never a
+    /// panic, never a pattern of the person's making (it is escaped).
+    #[test]
+    fn hostile_find_text() {
+        let text: Vec<String> = sal_core::hostile::inputs().into_iter().filter(|s| s.len() < 2_000).collect();
+        for s in sal_core::hostile::inputs() {
+            for (case, wild) in [(false, false), (true, false), (false, true)] {
+                let _ = find_all(&text, &q(&s, case, wild));
+            }
+        }
+        let (hits, _) = find_all(&lines("a(b)[c]{d}.*+?^$|\\"), &q("(b)[c]{d}.*+?^$|\\", true, false));
+        assert_eq!(hits.len(), 1, "regular expression characters are found as typed");
+        assert!(find_all(&lines("x & calc"), &q("& calc", false, false)).0.len() == 1);
+    }
+
     fn lines(text: &str) -> Vec<String> {
         text.lines().map(str::to_owned).collect()
     }

@@ -4694,6 +4694,11 @@ impl App {
                 if target.as_os_str().is_empty() {
                     target = base;
                 }
+                // never a device (NUL, \\.\PhysicalDrive0…), a forbidden name or a stream
+                if let Err(e) = fileops::validate_target(&target, self.archive_folder(&target).is_some()) {
+                    self.error(trf("Cannot copy or move there: {error}", &[("error", &e)]));
+                    return;
+                }
                 // a file as a folder ("a.zip\" or "a.zip\dir") without a plugin
                 // that opens it: no folder can be made there
                 if self.archive_folder(&target).is_none() {
@@ -9737,6 +9742,157 @@ mod tests {
         assert!(ui.app.font_slider_rect.is_some(), "General tab drawn");
         ui.app.command(&ui.ctx.clone(), Cmd::ToggleIcons);
         assert!(!ui.app.cfg.system_icons);
+    }
+
+    /// Hostile text in every window the user types into: new folder,
+    /// rename, copy target, selection mask, the path bar, quick search and
+    /// the settings' fields. No panic; what can't be a name or a target is
+    /// refused with a message; nothing is made outside the panel's folder,
+    /// and nothing made has a name Windows would change or treat as a device.
+    /// (None of these windows starts a program: they only name files.)
+    #[test]
+    fn hostile_input_in_every_window() {
+        use sal_core::hostile;
+        let t = tempfile::tempdir().unwrap();
+        let (left, right) = (t.path().join("left"), t.path().join("right"));
+        fs::create_dir_all(&left).unwrap();
+        fs::create_dir_all(&right).unwrap();
+        let victim = left.join("victim.txt");
+        fs::write(&victim, "x").unwrap();
+        let mut ui = Ui::new(&left, &right);
+        let never: Vec<String> = hostile::never_a_name();
+        let refused = |ui: &Ui| matches!(ui.app.dialog, Dialog::Message { .. });
+        let reset = |ui: &mut Ui| {
+            ui.app.dialog = Dialog::None;
+            ui.app.active = 0;
+            let v = ui.app.vis();
+            let _ = ui.app.panels[0].load(&left, v, Some("victim.txt"));
+            ui.frames(1);
+        };
+        let mut all = hostile::inputs();
+        all.retain(|s| s.len() <= 20_000); // the 100 000-character one is typed below, once
+
+        for s in &all {
+            // F7: a new folder
+            ui.app.open_dialog(Dialog::MkDir { name: s.clone() });
+            ui.frames(1);
+            ui.key(Key::Enter);
+            ui.frames(1);
+            if never.iter().any(|n| n == s.trim().trim_matches(['\\', '/'])) {
+                assert!(refused(&ui), "new folder {s:?} wasn't refused");
+            }
+            reset(&mut ui);
+
+            // F2: rename the victim
+            ui.app.open_dialog(Dialog::Rename { path: victim.clone(), name: s.clone() });
+            ui.frames(1);
+            ui.key(Key::Enter);
+            ui.frames(1);
+            if never.iter().any(|n| n == s.trim()) {
+                assert!(refused(&ui), "rename to {s:?} wasn't refused");
+                assert!(victim.exists());
+            }
+            if !victim.exists() {
+                let renamed = left.join(s.trim());
+                assert!(renamed.is_file(), "renamed away from its folder: {s:?}");
+                fs::rename(&renamed, &victim).unwrap();
+            }
+            reset(&mut ui);
+
+            // Ctrl+M / Ctrl+Shift+M: select by a mask
+            for select in [true, false] {
+                ui.app.open_dialog(Dialog::SelectMask { select, mask: s.clone(), error: None });
+                ui.frames(1);
+                ui.key(Key::Enter);
+                ui.frames(1);
+                reset(&mut ui);
+            }
+
+            // the path bar
+            let _ = ui.app.go_to_input(0, s);
+            ui.frames(1);
+            reset(&mut ui);
+
+            // quick search: typed into the panel
+            ui.text(s);
+            ui.frames(1);
+            ui.key(Key::Escape);
+            reset(&mut ui);
+        }
+
+        // F5: copy the victim to a hostile target (relative to the panel;
+        // targets that mean another drive or a parent are the person's to type)
+        let targets: Vec<&String> = all.iter().filter(|s| !s.contains("..") && !s.starts_with(['\\', '/']) && !s.contains(":\\") && !s.starts_with("C:") && !s.starts_with('~')).collect();
+        let must_refuse = [r"\\.\PhysicalDrive0", r"\\.\C:", r"\\?\GLOBALROOT\Device\HarddiskVolume1", r"\??\C:\x", "NUL", "nul.tar.gz", "CON", "con.txt", "COM1", "lpt9.log", "AUX", "PRN", "CONIN$", "a:b", "file.txt:stream", "x::$DATA", "a<b", "a|b", "a\"b", "a\0b", "line\r\nbreak", "tab\there", "bell\u{7}", "file:///C:/Windows"];
+        for s in targets.iter().map(|s| s.as_str()).chain(must_refuse) {
+            ui.app.open_dialog(Dialog::Transfer { kind: OpKind::Copy, sources: vec![victim.clone()], target: s.to_owned(), opts: TransferDefaults::default() });
+            ui.frames(1);
+            ui.key(Key::Enter);
+            ui.frames(1);
+            if must_refuse.contains(&s) {
+                assert!(refused(&ui), "copy to {s:?} wasn't refused");
+            }
+            // a question the copy asks (the file is there already, or the
+            // system refused a name) is answered Cancel
+            for _ in 0..500 {
+                if ui.app.jobs.is_idle() {
+                    break;
+                }
+                for j in &mut ui.app.jobs.running {
+                    if j.prompt.is_some() {
+                        j.cancel();
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+                ui.frames(1);
+            }
+            assert!(ui.app.jobs.is_idle(), "copy to {s:?} didn't end");
+            reset(&mut ui);
+        }
+        assert!(victim.is_file());
+
+        // the longest text, typed once into a field and into the path bar
+        let huge = "a".repeat(100_000);
+        ui.app.open_dialog(Dialog::MkDir { name: huge.clone() });
+        ui.frames(2);
+        ui.key(Key::Enter);
+        ui.frames(1);
+        assert!(refused(&ui), "a 100 000-character name");
+        reset(&mut ui);
+        assert!(ui.app.go_to_input(0, &huge).is_err() || ui.app.panels[0].path() != left);
+        reset(&mut ui);
+
+        // the settings' fields: whatever is typed is only stored
+        ui.app.open_dialog(Dialog::Settings { tab: SettingsTab::General, recording: None });
+        for s in &all {
+            ui.app.cfg.terminal_custom = s.clone();
+            ui.app.font_filter = s.clone();
+            ui.frames(1);
+        }
+        for tab in [SettingsTab::Programs, SettingsTab::Keyboard, SettingsTab::Plugins] {
+            ui.app.dialog = Dialog::Settings { tab, recording: None };
+            ui.frames(1);
+        }
+        reset(&mut ui);
+
+        // nothing outside the panels' folders; nothing a device or a changed name
+        let mut top: Vec<String> = fs::read_dir(t.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        top.sort();
+        assert_eq!(top, vec!["left".to_string(), "right".to_string()]);
+        // without recursion: "a\a\…" made a chain of folders 2 000 deep
+        let (mut made, mut todo) = (0, vec![left.clone()]);
+        while let Some(d) = todo.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let e = e.unwrap();
+                let name = e.file_name().to_string_lossy().into_owned();
+                assert!(fileops::validate_name(&name, false).is_ok(), "made {name:?}");
+                made += 1;
+                if e.file_type().unwrap().is_dir() {
+                    todo.push(d.join(&name));
+                }
+            }
+        }
+        assert!(made > 10, "the valid odd names were made ({made})");
     }
 
     /// The question before switching to multi-user mode is permanent, so

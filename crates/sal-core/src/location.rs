@@ -182,6 +182,11 @@ pub fn resolve_input(input: &str, cwd: &Path) -> io::Result<Target> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "no path entered"));
     }
     s = expand_env(&s);
+    // a line break or NUL (pasted) would end a name early, or start another
+    // command on a server (FTP)
+    if s.chars().any(|c| (c as u32) < 32 || c == '\u{7f}') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "a path must not contain control characters (line breaks, tabs…)"));
+    }
     // a plugin's connection: typed as a URL, or relative inside one
     if let Some(p) = parse_url(&s) {
         return Ok(Target::Dir(p));
@@ -305,6 +310,25 @@ pub fn share_entries(server: &str, show_hidden: bool) -> io::Result<Vec<FileEntr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whatever is typed into the path bar: never a panic, never anything
+    /// run (it only names a place); control characters are refused.
+    #[test]
+    fn hostile_path_bar_input() {
+        let cwd = std::env::temp_dir();
+        for s in crate::hostile::inputs() {
+            let r = resolve_input(&s, &cwd);
+            if s.trim().trim_matches('"').trim().chars().any(|c| (c as u32) < 32 || c == '\u{7f}') {
+                assert!(r.is_err(), "{s:?}");
+            }
+            if let Ok(Target::File { dir, name }) = &r {
+                assert!(dir.join(name).is_file(), "{s:?}");
+            }
+        }
+        assert!(resolve_input("a\r\nb", &cwd).unwrap_err().to_string().contains("control characters"));
+        assert!(resolve_input("ftp://host/a\r\nDELE x", &cwd).is_err(), "no FTP command smuggled in");
+        assert!(resolve_input("   ", &cwd).is_err());
+    }
 
     #[test]
     fn connection_locations() {

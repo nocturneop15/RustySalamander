@@ -267,10 +267,26 @@ pub fn tr_from(dir: &Path, msg: &str) -> String {
 
 /// Translate a string with `{name}` placeholders and fill them in.
 pub fn trf(msg: &'static str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
-    let mut s = tr(msg).to_owned();
-    for (name, value) in args {
-        s = s.replace(&format!("{{{name}}}"), &value.to_string());
+    let template = tr(msg);
+    // one pass over the template: a value that itself contains "{name}"
+    // (a file called "{error}") is never filled in again
+    let mut s = String::with_capacity(template.len());
+    let mut rest: &str = &template;
+    while let Some(open) = rest.find('{') {
+        s.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}').and_then(|close| args.iter().find(|(n, _)| *n == &after[..close]).map(|(_, v)| (close, v))) {
+            Some((close, v)) => {
+                s.push_str(&v.to_string());
+                rest = &after[close + 1..];
+            }
+            None => {
+                s.push('{');
+                rest = after;
+            }
+        }
     }
+    s.push_str(rest);
     s
 }
 
@@ -285,6 +301,20 @@ pub fn trn(one: &'static str, other: &'static str, n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A value that contains a placeholder ("{error}" as a file name) is
+    /// put in as it is, never filled in again.
+    #[test]
+    fn placeholders_in_values_stay() {
+        let s = trf("Cannot create \"{name}\": {error}", &[("name", &"{error} {name}"), ("error", &"denied")]);
+        assert_eq!(s, "Cannot create \"{error} {name}\": denied");
+        assert_eq!(trf("{x}{", &[("x", &"{")]), "{{");
+        assert_eq!(trf("{unknown} {name}", &[("name", &"n")]), "{unknown} n");
+        for v in sal_core::hostile::inputs() {
+            let s = trf("{path} is a file, not a folder.", &[("path", &v)]);
+            assert!(s.starts_with(v.as_str()));
+        }
+    }
 
     #[test]
     fn plural_rules() {

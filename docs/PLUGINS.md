@@ -168,7 +168,7 @@ Plugins only ever see the file and inner paths. `sal_plugin_api::join_inner(base
 | `const VERSION` | The plugin's own version, a semantic version: `env!("CARGO_PKG_VERSION")`. It is independent of the program's; Settings shows it and the update check compares it. |
 | `const PROGRAM_MIN`, `const PROGRAM_MAX` | The oldest and newest RustySalamander versions the plugin works with (both included); empty, the default, for no limit. See [Versions and updates](#versions-and-updates). |
 | `const UPDATES` | Where newer versions are published (`Updates { repo, tag, changelog }`); the default `Updates::NONE` means nowhere. See [Versions and updates](#versions-and-updates). |
-| `fn start(dir) -> Result<Self, String>` | Called when the plugin is turned on. `dir` is the plugin's folder. Load libraries from there. Save files only in `sal_plugin_api::data_dir(dir)`: that is `dir` itself (the program is portable), or `%APPDATA%\RustySalamander\plugins\<folder name>` once the user switched the program to multi-user mode (create it before writing). Never write to `%APPDATA%`, the registry or anywhere else on your own. On failure, return a message telling the user what is wrong and how to fix it (e.g. "7z.dll is missing in …"). It is shown in Settings, so translate it. |
+| `fn start(dir) -> Result<Self, String>` | Called when the plugin is turned on. `dir` is the plugin's folder. Load libraries from there. Save files only in `sal_plugin_api::data_dir(dir)`: that is `dir` itself (the program is portable), or `%APPDATA%\RustySalamander\plugins\<folder name>` once the user switched the program to multi-user mode (create it before writing). Never write to `%APPDATA%`, the registry or anywhere else on your own. Check what the user types into your forms before using it: refuse control characters where a protocol has lines (an FTP command ends at a line break), and quote what goes into a shell command (the SCP plugin's `quote`). On failure, return a message telling the user what is wrong and how to fix it (e.g. "7z.dll is missing in …"). It is shown in Settings, so translate it. |
 
 The program reads `ID`, `NAME`, `DESCRIPTION`, `VERSION` and `UPDATES` without calling `start`, even for plugins that are turned off. Keep them `const`.
 
@@ -401,7 +401,7 @@ In code, from `sal_plugin_api`:
 
 - **`n_("…")`** marks a constant text for translation without translating it: the `NAME` and `DESCRIPTION` constants, or texts kept in tables. The program translates `NAME` and `DESCRIPTION` itself.
 - **`tr("…")`** translates a text now, into the language the user has chosen.
-- **`trf("Cannot open {file}.", &[("file", &name)])`** translates, then fills in `{placeholders}`. Translators may move placeholders within the sentence.
+- **`trf("Cannot open {file}.", &[("file", &name)])`** translates, then fills in `{placeholders}`, in one pass: a value that contains `{…}` itself (a file named `{error}`) is put in as it is. Translators may move placeholders within the sentence.
 
 Guidelines:
 

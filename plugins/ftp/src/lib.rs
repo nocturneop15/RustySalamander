@@ -337,11 +337,15 @@ impl FtpPlugin {
             }
         }
         let host = host.trim_start_matches('[').trim_end_matches(']').to_owned();
-        if host.is_empty() || host.contains(['/', '\\', ' ', '@']) {
+        if host.is_empty() || host.contains(['/', '\\', ' ', '@']) || host.chars().any(char::is_control) || host.len() > 253 {
             return Err(invalid(n_("Enter the server's name or address.")));
         }
-        if user.contains(['/', '\\', '@', ':', '\r', '\n']) || (protocol == Protocol::Sftp && (user.is_empty() || user.contains(' '))) {
+        if user.contains(['/', '\\', '@', ':']) || user.chars().any(char::is_control) || (protocol == Protocol::Sftp && (user.is_empty() || user.contains(' '))) {
             return Err(invalid(n_("Enter a user name.")));
+        }
+        // a line break in the password would end the PASS command and start another
+        if v.get("password").is_some_and(|p| p.contains(['\r', '\n', '\0'])) {
+            return Err(invalid(n_("The password can't contain line breaks.")));
         }
         let port: u16 = match port_text.as_str() {
             "" => protocol.default_port(),

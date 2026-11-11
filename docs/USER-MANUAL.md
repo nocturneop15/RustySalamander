@@ -194,6 +194,8 @@ The dialog shows what is copied and the target, which is the other panel's folde
 - **a new name:** a single item is copied or moved under that name;
 - **a mask** such as `*.bak`: each item gets a name made by the mask (`report.txt` → `report.bak`).
 
+A target that can't be one is refused with the reason, and nothing is copied: a device (`NUL`, `CON`, `COM1`, `\\.\PhysicalDrive0`…), an alternate data stream (`file.txt:stream`), a character Windows forbids in names (`< > " | :`, `*` and `?` outside the mask), control characters, or a drive letter without a folder (`D:folder`; type `D:\folder`).
+
 The buttons decide when it runs:
 
 - **Copy** (or **Move**) starts at once, alongside anything already running.
@@ -247,6 +249,8 @@ While the feature is off, dragging items of an archive or server out of the wind
 ### Create directory (F7)
 
 Type a name. You can create several levels at once: `photos/2026/summer` creates all three. Folders that already exist are reused.
+
+A name is refused, with the reason, when Windows can't keep it as typed: a character it forbids (`< > : " | ? *`), control characters, a name it keeps for a device (`CON`, `PRN`, `AUX`, `NUL`, `COM1`…`COM9`, `LPT1`…`LPT9`, also with an extension such as `nul.txt`), a dot or a space at the end, `.` or `..` as a folder, or more than 255 characters. The same applies to Rename (F2). Any other character is fine, including `&`, `%`, `{}`, emoji and every script.
 
 ### Delete (F8)
 
@@ -531,7 +535,7 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 
 | Setting | Choices | Default | What it does |
 |---|---|---|---|
-| Command prompt | *Default terminal*, *Command Prompt (cmd)*, *PowerShell*, *Custom:* with a command and **Browse…** | Default terminal | What *Open command prompt here* (Shift+F1) starts. *Default terminal* is the one Windows uses (usually Windows Terminal). *PowerShell* is PowerShell 7 if installed. In a custom command, `{dir}` is replaced by the panel's folder, e.g. `alacritty.exe --working-directory "{dir}"`. |
+| Command prompt | *Default terminal*, *Command Prompt (cmd)*, *PowerShell*, *Custom:* with a command and **Browse…** | Default terminal | What *Open command prompt here* (Shift+F1) starts. *Default terminal* is the one Windows uses (usually Windows Terminal). *PowerShell* is PowerShell 7 if installed. In a custom command, `{dir}` is replaced by the panel's folder in quotes, e.g. `alacritty.exe --working-directory {dir}`, so a folder name with `&` or spaces stays one argument. |
 
 #### Updates
 

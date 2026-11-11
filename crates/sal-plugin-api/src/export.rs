@@ -57,10 +57,26 @@ pub fn tr(msg: &str) -> String {
 
 /// Translate a text with `{name}` placeholders and fill them in.
 pub fn trf(msg: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
-    let mut s = tr(msg);
-    for (name, value) in args {
-        s = s.replace(&format!("{{{name}}}"), &value.to_string());
+    let template = tr(msg);
+    // one pass over the template: a value that itself contains "{name}"
+    // (a file called "{error}") is never filled in again
+    let mut s = String::with_capacity(template.len());
+    let mut rest: &str = &template;
+    while let Some(open) = rest.find('{') {
+        s.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}').and_then(|close| args.iter().find(|(n, _)| *n == &after[..close]).map(|(_, v)| (close, v))) {
+            Some((close, v)) => {
+                s.push_str(&v.to_string());
+                rest = &after[close + 1..];
+            }
+            None => {
+                s.push('{');
+                rest = after;
+            }
+        }
     }
+    s.push_str(rest);
     s
 }
 

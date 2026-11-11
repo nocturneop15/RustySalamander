@@ -1,6 +1,15 @@
 # Changelog
 
-## Unreleased (experimental branch)
+## Unreleased
+
+- **Typed input is checked everywhere** (every field was tried with names of devices, paths that leave the folder, forbidden and control characters, command injection, odd Unicode and very long text):
+  - **Copy and move (F5, F6)** refuse a target that is a device (`NUL`, `CON`, `\\.\PhysicalDrive0`, `\\?\GLOBALROOT\…`), an alternate data stream (`file:stream`), a name Windows forbids, control characters, or a drive without a folder (`a:b`). Before, a copy to `NUL` was thrown away without a word, and as administrator a target like `\\.\PhysicalDrive0` would have written onto a disk.
+  - **New folder (F7) and Rename (F2)** refuse names Windows keeps for devices (`CON`, `nul.txt`, `COM1`…), names ending in a dot or a space (Windows would drop it and the item would get another name), `.` and `..` in a path, empty folder names, and names longer than 255 characters. The message says why.
+  - **The path bar** refuses line breaks and other control characters (a pasted path could have carried a second command to an FTP server).
+  - **A custom terminal command** puts the folder in quotes: a folder named `x & calc` could have started `calc` through `cmd.exe`.
+  - **FTP:** a line break in a path or the password is refused, so no second command can be smuggled to the server; the server and user names of FTP and SCP may not contain control characters.
+  - **Messages** show a name that looks like a placeholder (`{error}`) as it is, instead of filling it in.
+- **Very deep folders:** copying, moving or deleting a tree thousands of folders deep stopped the program (its stack ran out at about 3 000 levels). Operations now have room for the deepest trees NTFS allows.
 
 - **Strictly portable:** nothing is read from or written to `%APPDATA%` any more. Before, a copy without `config.toml` took the settings from `%APPDATA%`, and when the program's folder was read-only the settings, and the SCP and FTP plugins' known servers and last connections, went to `%APPDATA%` without a word. Now a read-only folder is reported at start.
 - **Multi-user mode:** Settings → General → Settings location moves the settings and what the plugins saved to `%APPDATA%\RustySalamander` for good, so each Windows user has their own; the choice is kept in `multiuser.toml` next to the program (Windows asks for administrator rights when that folder is protected). For plugin authors: `sal_plugin_api::data_dir(dir)` is where a plugin saves.

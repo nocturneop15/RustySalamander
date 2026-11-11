@@ -67,12 +67,21 @@ pub fn edit(path: &Path, editor: Option<&str>) -> io::Result<()> {
     }
 }
 
+/// A path as one quoted argument of a command line. Windows paths can't
+/// contain `"`, so a name with `&`, `|`, `%`, spaces… stays one argument
+/// and is never read as a command; a trailing `\` is doubled so it doesn't
+/// escape the closing quote.
+pub fn quote_path(path: &str) -> String {
+    let tail = if path.ends_with('\\') { "\\" } else { "" };
+    format!("\"{}{tail}\"", path.replace('"', ""))
+}
+
 /// Program and argument string for running `command` on `file`: `{file}` in
 /// the arguments is replaced by the quoted path; without it the quoted path
 /// is appended. The program itself may be quoted (`"C:\Program Files\…"`).
 pub fn program_command(command: &str, file: &Path) -> io::Result<(String, String)> {
     let (program, rest) = split_command(command).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no program is set"))?;
-    let quoted = format!("\"{}\"", crate::encoding::display_path(file));
+    let quoted = quote_path(&crate::encoding::display_path(file));
     let args = if rest.contains("{file}") {
         rest.replace("\"{file}\"", &quoted).replace("{file}", &quoted)
     } else if rest.is_empty() {
@@ -187,7 +196,9 @@ pub fn terminal_launch(kind: TerminalKind, custom: &str, dir: &Path) -> io::Resu
     match kind {
         TerminalKind::Custom => {
             let (program, rest) = split_command(custom).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no custom terminal command is set (Options > Terminal)"))?;
-            let raw = rest.replace("{dir}", &dir_str);
+            // quoted, so a folder named "x & calc" can't run calc
+            let quoted = quote_path(&dir_str);
+            let raw = rest.replace("\"{dir}\"", &quoted).replace("{dir}", &quoted);
             Ok(Launch { program: program.replace("{dir}", &dir_str), args: Vec::new(), raw_args: (!raw.is_empty()).then_some(raw), dir: dir.to_path_buf() })
         }
         #[cfg(windows)]
@@ -274,6 +285,28 @@ pub fn recycle(_paths: &[PathBuf]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder or file name with `&`, `|`, `%`… stays one quoted argument:
+    /// it can't start another command (cmd.exe would run `& calc`).
+    #[test]
+    fn names_are_quoted_in_commands() {
+        let l = terminal_launch(TerminalKind::Custom, "cmd.exe /k cd /d {dir}", Path::new(r"C:\x & calc")).unwrap();
+        assert_eq!(l.raw_args.as_deref(), Some(r#"/k cd /d "C:\x & calc""#));
+        let l = terminal_launch(TerminalKind::Custom, r#"wt.exe -d "{dir}""#, Path::new(r"C:\a | b ^ %PATH%")).unwrap();
+        assert_eq!(l.raw_args.as_deref(), Some(r#"-d "C:\a | b ^ %PATH%""#));
+        // a drive root's trailing backslash doesn't escape the closing quote
+        let l = terminal_launch(TerminalKind::Custom, "x.exe {dir} --next", Path::new(r"C:\")).unwrap();
+        assert_eq!(l.raw_args.as_deref(), Some(r#""C:\\" --next"#));
+        let (p, a) = program_command("notepad++.exe -n1 {file}", Path::new(r"C:\x\a & del b.txt")).unwrap();
+        assert_eq!((p.as_str(), a.as_str()), ("notepad++.exe", r#"-n1 "C:\x\a & del b.txt""#));
+        let (_, a) = program_command("ed.exe", Path::new(r"C:\x\$(calc)`calc`.txt")).unwrap();
+        assert_eq!(a, r#""C:\x\$(calc)`calc`.txt""#);
+        assert_eq!(quote_path("a\"b"), "\"ab\"", "a quote can't close the argument");
+        for s in crate::hostile::inputs() {
+            let _ = terminal_launch(TerminalKind::Custom, &s, Path::new(&s));
+            let _ = program_command(&s, Path::new(&s));
+        }
+    }
 
     #[test]
     fn custom_command_parsing() {

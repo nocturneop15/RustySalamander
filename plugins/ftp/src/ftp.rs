@@ -436,36 +436,52 @@ impl Ftp {
     }
 }
 
+/// A path as an FTP command can carry it: a line break would end the
+/// command and start another one (`DELE …`), so such a path is refused.
+pub(crate) fn one_line(path: &str) -> io::Result<&str> {
+    if path.contains(['\r', '\n', '\0']) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, tr("A name or path on an FTP server can't contain line breaks.")));
+    }
+    Ok(path)
+}
+
 impl Remote for Ftp {
     fn home(&self) -> String {
         self.home.clone()
     }
 
     fn list(&self, dir: &str) -> io::Result<Vec<Entry>> {
+        let dir = one_line(dir)?;
         self.with(|c| c.list(dir))
     }
 
     fn read(&self, path: &str, to: Chunks) -> io::Result<()> {
+        let path = one_line(path)?;
         self.with(|c| c.read(path, to))
     }
 
     fn write(&self, path: &str, from: &mut dyn Read, modified: Option<SystemTime>) -> io::Result<()> {
+        let path = one_line(path)?;
         self.with(|c| c.write(path, from, modified))
     }
 
     fn mkdir(&self, path: &str) -> io::Result<()> {
+        let path = one_line(path)?;
         self.with(|c| c.s.mkdir(path).map_err(|e| c.err(e)))
     }
 
     fn remove_file(&self, path: &str) -> io::Result<()> {
+        let path = one_line(path)?;
         self.with(|c| c.s.rm(path).map_err(|e| c.err(e)))
     }
 
     fn remove_dir(&self, path: &str) -> io::Result<()> {
+        let path = one_line(path)?;
         self.with(|c| c.s.rmdir(path).map_err(|e| c.err(e)))
     }
 
     fn rename(&self, old: &str, new: &str) -> io::Result<()> {
+        let (old, new) = (one_line(old)?, one_line(new)?);
         self.with(|c| c.s.rename(old, new).map_err(|e| c.err(e)))
     }
 

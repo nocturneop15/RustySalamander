@@ -163,10 +163,10 @@ impl Scp {
             }
             host = h.to_owned();
         }
-        if host.is_empty() || host.contains(['/', '\\', ' ', '@']) {
+        if host.is_empty() || host.contains(['/', '\\', ' ', '@']) || host.chars().any(char::is_control) || host.len() > 253 {
             return Err(invalid(n_("Enter the server's name or address.")));
         }
-        if user.is_empty() || user.contains(['/', '\\', ' ', '@', ':']) {
+        if user.is_empty() || user.contains(['/', '\\', ' ', '@', ':']) || user.chars().any(char::is_control) {
             return Err(invalid(n_("Enter a user name.")));
         }
         let port: u16 = match get("port") {

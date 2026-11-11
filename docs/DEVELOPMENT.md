@@ -54,6 +54,10 @@ Rules the tests keep, and new tests must keep too:
 - **Use temporary folders** (`tempfile::tempdir()`), never the working directory.
 - **Plugin DLLs stay loaded** until the test process ends, so tests that copy plugins put them under `target\<profile>\test-plugins\<test name>`, not in a temporary folder that would have to be deleted.
 
+**Hostile input.** `sal_core::hostile` lists what a person (or a paste) may type: device names and paths, paths that leave the folder, forbidden and control characters, command injection, placeholders, odd Unicode and very long text. Every field is tested with it: `fileops` (names, renames, copy targets), `location` (the path bar), `shell` (quoting of `{dir}` and `{file}`), `hostile_input_in_every_window` in `app.rs` (new folder, rename, copy, selection masks, path bar, quick search, settings), the FTP and SCP connect forms, the Search form and the Viewer's Find. A new field gets the same test.
+
+**Very deep trees.** `very_deep_trees` copies and deletes a tree 3 000 folders deep on a job's thread (`fileops::JOB_STACK`); it takes minutes, so it is `#[ignore]`d: `cargo test --release -p sal-core very_deep -- --ignored`.
+
 **Snapshot tests** render parts of the UI to PNG files so you can look at them. They are `#[ignore]`d:
 
 ```powershell

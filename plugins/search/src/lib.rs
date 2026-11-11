@@ -570,6 +570,33 @@ impl FolderPlugin for Search {
 mod tests {
     use super::*;
 
+    /// Hostile text in every field of the search form: a message back in
+    /// the form, or a search that ends; never a panic. A folder that is a
+    /// device or isn't there is refused.
+    #[test]
+    fn hostile_search_form() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("data");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "hello").unwrap();
+        let dir = root.display().to_string();
+        let p = Search::start(Path::new(".")).unwrap();
+        for s in sal_core::hostile::inputs() {
+            for syntax in ["mask", "regex"] {
+                if let Ok(Reply::Results(r)) = start(&p, &[("dir", &dir), ("names", &s), ("syntax", syntax), ("text", &s), ("text_regex", if syntax == "regex" { "1" } else { "" })]) {
+                    wait(&p, &r.mount.root());
+                }
+            }
+            if !Path::new(&s).is_dir() {
+                match start(&p, &[("dir", &s), ("names", "*")]) {
+                    Ok(Reply::Form(f)) => assert!(!f.fields[0].label.is_empty()),
+                    Ok(Reply::Results(r)) => panic!("searched {s:?}: {}", r.title),
+                    other => panic!("{s:?}: {other:?}"),
+                }
+            }
+        }
+    }
+
     fn wait(p: &Search, root: &Path) -> Activity {
         let t = Instant::now();
         loop {

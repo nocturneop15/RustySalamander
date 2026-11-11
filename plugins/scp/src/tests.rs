@@ -301,3 +301,28 @@ fn a_session_with_a_real_ssh_server() {
     drop(scp);
     server_rt.shutdown_background();
 }
+
+/// Hostile text in the connect form: refused before anything is sent, with
+/// a message; a line break never reaches a command to the server.
+#[test]
+fn hostile_connect_form() {
+    let t = tempfile::tempdir().unwrap();
+    let data = t.path().join("plugins").join("scp");
+    fs::create_dir_all(&data).unwrap();
+    let p = Scp::start(&data).unwrap();
+    let bad_hosts = ["", " ", "a b", "a/b", "a\\b", "me@", "host\r\nQUIT", "host\0", "\u{1b}[31mx", "& calc.exe", "| calc"];
+    let long_host = "a".repeat(300);
+    for host in bad_hosts.iter().copied().chain([long_host.as_str()]) {
+        let e = p.run("login", &values(&[("x", ""), ("host", host), ("user", "me"), ("auth", "password"), ("password", "x")])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "host {host:?}: {e}");
+        assert!(!e.to_string().is_empty());
+    }
+    for user in ["me\r\nDELE x", "me\0", "a/b", "a:b", "a@b", "tab\there"] {
+        let e = p.run("login", &values(&[("x", ""), ("host", "127.0.0.1"), ("port", "1"), ("user", user), ("auth", "password"), ("password", "x")])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "user {user:?}: {e}");
+    }
+    for port in ["0", "-1", "65536", "99999999999999999999", "22a", "0x16", " 1 2", "%PORT%"] {
+        let e = p.run("login", &values(&[("x", ""), ("host", "127.0.0.1"), ("port", port), ("user", "me"), ("auth", "password"), ("password", "x")])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "port {port:?}: {e}");
+    }
+}

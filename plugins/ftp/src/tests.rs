@@ -822,3 +822,39 @@ fn data_connections_found_automatically() {
     assert_eq!(srv.take_log(), ["PORT"]);
     p.close(&root);
 }
+
+/// Hostile text in the connect form: refused before anything is sent, with
+/// a message; a line break never reaches a command to the server.
+#[test]
+fn hostile_connect_form() {
+    let t = tempfile::tempdir().unwrap();
+    let data = t.path().join("plugins").join("ftp");
+    fs::create_dir_all(&data).unwrap();
+    let p = FtpPlugin::start(&data).unwrap();
+    let bad_hosts = ["", " ", "a b", "a/b", "a\\b", "me@", "host\r\nQUIT", "host\0", "\u{1b}[31mx", "& calc.exe", "| calc"];
+    let long_host = "a".repeat(300);
+    for host in bad_hosts.iter().copied().chain([long_host.as_str()]) {
+        let e = p.run("login", &values(&[("protocol", "sftp"), ("host", host), ("user", "me"), ("auth", "password"), ("password", "x")])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "host {host:?}: {e}");
+        assert!(!e.to_string().is_empty());
+    }
+    for user in ["me\r\nDELE x", "me\0", "a/b", "a:b", "a@b", "tab\there"] {
+        let e = p.run("login", &values(&[("protocol", "sftp"), ("host", "127.0.0.1"), ("port", "1"), ("user", user), ("auth", "password"), ("password", "x")])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "user {user:?}: {e}");
+    }
+    for port in ["0", "-1", "65536", "99999999999999999999", "22a", "0x16", " 1 2", "%PORT%"] {
+        let e = p.run("login", &values(&[("protocol", "sftp"), ("host", "127.0.0.1"), ("port", port), ("user", "me"), ("auth", "password"), ("password", "x")])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "port {port:?}: {e}");
+    }
+    // a line break in the password would start another FTP command
+    for pw in ["x\r\nDELE important", "x\nQUIT", "x\0"] {
+        let e = p.run("login", &values(&[("protocol", "ftp"), ("host", "127.0.0.1"), ("port", "1"), ("user", "me"), ("password", pw)])).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+        assert!(e.to_string().contains("line breaks"), "{e}");
+    }
+    // and in a path, wherever it comes from
+    for path in ["/a\r\nDELE b", "/a\nb", "/a\0"] {
+        assert_eq!(crate::ftp::one_line(path).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+    assert!(crate::ftp::one_line("/Příliš & | ; $(x) `y` %z% 'q'").is_ok());
+}

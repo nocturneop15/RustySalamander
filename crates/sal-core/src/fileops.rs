@@ -758,6 +758,14 @@ pub fn delete(sources: &[PathBuf], obs: &mut dyn OpObserver) -> OpSummary {
     ctx.summary
 }
 
+/// The stack of a thread that copies, moves or deletes: copying and
+/// deleting go down a tree one call per folder, and NTFS allows trees about
+/// 16 000 folders deep. Only what is used of it is ever allocated.
+pub const JOB_STACK: usize = 256 * 1024 * 1024;
+
+#[cfg(test)]
+const DEEP_TEST_LEVELS: usize = 3_000;
+
 /// Create a directory (F7); intermediate directories are created as needed.
 pub fn make_dir(parent: &Path, name: &str) -> io::Result<PathBuf> {
     validate_name(name, true)?;
@@ -781,15 +789,105 @@ pub fn rename(src: &Path, new_name: &str) -> io::Result<PathBuf> {
     Ok(dst)
 }
 
-/// Reject names Windows cannot store. Any Unicode character is fine.
-pub fn validate_name(name: &str, allow_separators: bool) -> io::Result<()> {
-    let bad = |c: char| (c as u32) < 32 || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (!allow_separators && matches!(c, '\\' | '/'));
-    let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid name"));
+/// The longest name of one file or folder, in UTF-16 units (NTFS, and most
+/// other file systems, in bytes).
+pub const MAX_NAME: usize = 255;
+
+/// Whether Windows keeps `name` for a device (`CON`, `nul.txt`, `COM1`…):
+/// a file of that name would be the device, not a file.
+pub fn is_device_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    match base.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        b if b.starts_with("COM") || b.starts_with("LPT") => {
+            let n = &b[3..];
+            n.len() == 1 && n.as_bytes()[0].is_ascii_digit() || matches!(n, "¹" | "²" | "³")
+        }
+        _ => false,
     }
+}
+
+fn invalid(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg)
+}
+
+/// One name (no separators) as Windows can store it.
+fn check_component(name: &str, wildcards: bool) -> io::Result<()> {
+    if name.is_empty() {
+        return Err(invalid("a folder name in the path is empty".into()));
+    }
+    if name == "." || name == ".." {
+        return Err(invalid("\".\" and \"..\" can't be used as a name".into()));
+    }
+    let bad = |c: char| (c as u32) < 32 || c == '\u{7f}' || matches!(c, '<' | '>' | ':' | '"' | '|') || (!wildcards && matches!(c, '?' | '*'));
     if let Some(c) = name.chars().find(|&c| bad(c)) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("name must not contain {c:?}")));
+        return Err(invalid(if (c as u32) < 32 || c == '\u{7f}' { "a name must not contain control characters".into() } else { format!("a name must not contain {c}") }));
+    }
+    // Windows drops a trailing dot or space: the item would get another name
+    if !wildcards && (name.ends_with('.') || name.ends_with(' ')) {
+        return Err(invalid(format!("\"{name}\" ends with a dot or a space, which Windows drops")));
+    }
+    if is_device_name(name) {
+        return Err(invalid(format!("\"{name}\" is a name Windows keeps for a device")));
+    }
+    if name.encode_utf16().count() > MAX_NAME {
+        return Err(invalid(format!("a name can have at most {MAX_NAME} characters")));
+    }
+    Ok(())
+}
+
+/// Reject names Windows cannot store, or would store as something else:
+/// characters it forbids, control characters, device names (`CON`,
+/// `NUL`…), a trailing dot or space, more than [`MAX_NAME`] characters.
+/// Any other Unicode character is fine. With `allow_separators`, a relative
+/// path of folders (`a\b\c`), without `.` or `..`.
+pub fn validate_name(name: &str, allow_separators: bool) -> io::Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(invalid("no name was entered".into()));
+    }
+    if !allow_separators {
+        if let Some(c) = name.chars().find(|c| matches!(c, '\\' | '/')) {
+            return Err(invalid(format!("a name must not contain {c}")));
+        }
+    }
+    for part in name.split(['\\', '/']) {
+        check_component(part, false)?;
+    }
+    Ok(())
+}
+
+/// Check where a copy or move goes (as typed, made absolute): no device
+/// (`\\.\…`, `NUL`, `CON`…), no characters Windows forbids, no alternate
+/// data stream (`file:stream`), no control characters. `*` and `?` are
+/// allowed in the last name, a mask that renames (`*.bak`). `in_plugin`: the
+/// target is inside a plugin's archive or connection (the caller asked the
+/// plugins), whose names the plugin checks; only control characters are
+/// refused there.
+pub fn validate_target(target: &Path, in_plugin: bool) -> io::Result<()> {
+    let s = target.to_string_lossy();
+    if s.chars().any(|c| (c as u32) < 32 || c == '\u{7f}') {
+        return Err(invalid("the target must not contain control characters".into()));
+    }
+    if in_plugin {
+        return Ok(());
+    }
+    // \\?\C:\… and \\?\UNC\… are ordinary paths; anything else there is a device
+    let device = |rest: &[u8]| !(rest.len() >= 3 && rest[0].is_ascii_alphabetic() && rest[1..3] == *b":\\" || rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"UNC\\"));
+    let b = s.as_bytes();
+    if b.starts_with(br"\\.\") || b.starts_with(br"\\?\") && device(&b[4..]) || b.starts_with(br"\??\") {
+        return Err(invalid(format!("{s} is a device, not a folder")));
+    }
+    // "a:b" is drive A:'s current folder, then b: never what is meant
+    if matches!(target.components().next(), Some(std::path::Component::Prefix(_))) && !target.has_root() {
+        let drive = s.chars().take(2).collect::<String>();
+        return Err(invalid(format!("{s} has no folder after the drive; type {drive}\\ and the folder")));
+    }
+    let names: Vec<&std::ffi::OsStr> = target.components().filter_map(|c| if let std::path::Component::Normal(n) = c { Some(n) } else { None }).collect();
+    for (i, n) in names.iter().enumerate() {
+        let n = n.to_string_lossy();
+        let last = i + 1 == names.len();
+        check_component(&n, last && crate::masks::has_wildcards(&n))?;
     }
     Ok(())
 }
@@ -1080,5 +1178,141 @@ mod tests {
         fs::create_dir(&out).unwrap();
         transfer(OpKind::Copy, std::slice::from_ref(&e.path), &out, &mut Auto(ConflictAction::Cancel));
         assert_eq!(fs::read_to_string(out.join(&name)).unwrap(), "lossless");
+    }
+
+    /// Every hostile input: no panic; names that would be devices, leave
+    /// the folder, or that Windows forbids or changes are refused with a
+    /// message; nothing is made outside the folder.
+    #[test]
+    fn hostile_names_are_refused_and_nothing_leaves_the_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let parent = t.path().join("p");
+        fs::create_dir(&parent).unwrap();
+        for bad in crate::hostile::never_a_name() {
+            assert!(validate_name(&bad, true).is_err(), "accepted as a folder path: {bad:?}");
+            assert!(validate_name(&bad, false).is_err(), "accepted as a name: {bad:?}");
+            let e = make_dir(&parent, &bad).unwrap_err();
+            assert!(!e.to_string().is_empty());
+        }
+        for s in crate::hostile::inputs() {
+            let _ = make_dir(&parent, s.trim());
+            let _ = validate_target(&parent.join(&s), false);
+        }
+        let outside: Vec<String> = fs::read_dir(t.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(outside, vec!["p".to_string()], "nothing outside the folder");
+        // what was made has names Windows keeps as typed
+        fn walk(d: &Path) {
+            for e in fs::read_dir(d).unwrap() {
+                let e = e.unwrap();
+                let n = e.file_name().to_string_lossy().into_owned();
+                assert!(validate_name(&n, false).is_ok(), "made {n:?}");
+                if e.file_type().unwrap().is_dir() {
+                    walk(&e.path());
+                }
+            }
+        }
+        walk(&parent);
+        // odd but valid names are kept
+        for good in ["Příliš žluťoučký kůň", "日本語のファイル", "& calc.exe", "%PATH%", "{error}", "👨‍👩‍👧‍👦", "zero\u{200b}width", "\u{202e}gpj.exe", "CONSOLE", "com10", "nul_", "x.con"] {
+            assert!(validate_name(good, false).is_ok(), "{good:?}");
+        }
+        assert!(validate_name(&"a".repeat(MAX_NAME), false).is_ok());
+        assert!(validate_name(&"😀".repeat(MAX_NAME / 2), false).is_ok());
+        assert!(validate_name(&"😀".repeat(MAX_NAME / 2 + 1), false).is_err(), "counted in UTF-16 units");
+    }
+
+    /// Renaming to a hostile name: refused, or done in the same folder.
+    #[test]
+    fn hostile_renames_stay_in_the_folder() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("d");
+        fs::create_dir(&dir).unwrap();
+        let mut f = dir.join("victim.txt");
+        fs::write(&f, "x").unwrap();
+        for s in crate::hostile::inputs() {
+            if let Ok(new) = rename(&f, s.trim()) {
+                assert_eq!(new.parent(), Some(dir.as_path()), "{s:?}");
+                f = rename(&new, "victim.txt").unwrap();
+            }
+        }
+        for bad in crate::hostile::never_a_name() {
+            assert!(rename(&f, &bad).is_err(), "{bad:?}");
+        }
+        assert!(f.exists());
+        assert_eq!(fs::read_dir(t.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
+
+    /// Where a copy or move may go.
+    #[test]
+    fn copy_targets() {
+        for bad in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\C:",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1\x",
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x",
+            r"\??\C:\x",
+            r"C:\x\NUL",
+            r"C:\x\nul.txt",
+            r"C:\x\con\y",
+            r"C:\x\COM1.log",
+            r"C:\x\a:b",
+            r"C:\x\file.txt:stream",
+            r"C:\x\a|b",
+            r"C:\x\a<b",
+            r"C:\x\*\y",
+            "C:\\x\\line\nbreak",
+            "C:\\x\\a\0b",
+            r"C:\x\trailing.\y",
+            "a:b",
+            "C:relative",
+        ] {
+            assert!(validate_target(Path::new(bad), false).is_err(), "{bad}");
+        }
+        for good in [r"C:\x\y", r"\\?\C:\x", r"\\?\UNC\server\share\d", r"\\server\share\d", r"C:\x\*.bak", r"C:\x\a?c.*", r"D:\Příliš\日本 & co", r"C:\x\..\y"] {
+            assert!(validate_target(Path::new(good), false).is_ok(), "{good}");
+        }
+        // inside a plugin: its names are the plugin's business, line breaks are not
+        assert!(validate_target(Path::new(r"\\?\scp\me@host\a:b"), true).is_ok());
+        assert!(validate_target(Path::new("\\\\?\\ftp\\host\\a\r\nDELE x"), true).is_err());
+        // no panic on anything
+        for s in crate::hostile::inputs() {
+            let _ = validate_target(Path::new(&s), false);
+            let _ = validate_target(Path::new(&format!(r"\\?\{s}")), false);
+        }
+    }
+
+    /// A tree thousands of folders deep (as an archive or another program
+    /// can leave): counted, copied and deleted on a job's thread without
+    /// running out of stack (with 2 MB it overflowed at 3 000 folders).
+    /// Slow, minutes: `cargo test --release -- --ignored very_deep`.
+    #[test]
+    #[ignore]
+    fn very_deep_trees() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("deep");
+        let mut p = src.clone();
+        fs::create_dir(&p).unwrap();
+        for _ in 0..DEEP_TEST_LEVELS {
+            p.push("a");
+            fs::create_dir(&p).unwrap();
+        }
+        fs::write(p.join("bottom.txt"), "deep").unwrap();
+        let dst = t.path().join("copy");
+        fs::create_dir(&dst).unwrap();
+        let (src2, dst2) = (src.clone(), dst.clone());
+        let summary = std::thread::Builder::new()
+            .stack_size(JOB_STACK)
+            .spawn(move || {
+                assert_eq!(measure(std::slice::from_ref(&src2)), (1, 4));
+                let s = transfer(OpKind::Copy, std::slice::from_ref(&src2), &dst2, &mut Auto(ConflictAction::Cancel));
+                delete(&[src2.clone(), dst2.join("deep")], &mut Auto(ConflictAction::Cancel));
+                s
+            })
+            .unwrap()
+            .join()
+            .expect("the job's thread ran out of stack");
+        assert_eq!(summary.files, 1);
+        assert!(!src.exists() && !dst.join("deep").exists());
     }
 }

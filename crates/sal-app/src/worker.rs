@@ -330,7 +330,9 @@ impl Job {
         let ctx2 = ctx.clone();
         let (kind, sources, target, plugin) = (spec.kind, spec.sources.clone(), spec.target.clone(), spec.plugin.clone());
         let options = TransferOptions { verify: spec.options.verify, checksum_name: spec.options.checksum_name.clone() };
-        thread::spawn(move || {
+        // copying and deleting go down a tree one call per folder: a tree
+        // thousands of folders deep needs more than the usual 2 MB of stack
+        let job = move || {
             let result = match kind {
                 JobKind::Transfer(k) => Ok(fileops::transfer_with(k, &sources, &target, &options, &mut obs)),
                 JobKind::Delete => Ok(fileops::delete(&sources, &mut obs)),
@@ -342,7 +344,8 @@ impl Job {
             };
             let _ = tx.send(Msg::Done(result));
             ctx2.request_repaint();
-        });
+        };
+        thread::Builder::new().name("job".into()).stack_size(fileops::JOB_STACK).spawn(job).expect("a job's thread can't be started");
         let mut rate = Rate::new(Instant::now());
         if paused.load(Ordering::Relaxed) {
             rate.pause(Instant::now());

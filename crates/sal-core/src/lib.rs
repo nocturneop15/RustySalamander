@@ -11,6 +11,8 @@ pub mod drives;
 pub mod encoding;
 pub mod entry;
 pub mod fileops;
+#[doc(hidden)]
+pub mod hostile;
 pub mod listing;
 pub mod location;
 pub mod masks;
