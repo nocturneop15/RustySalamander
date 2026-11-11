@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.5-beta (2026-11-11)
+
+- **Plugin windows opened from a command look like the program:** the Compare window took the system's theme, fonts and accent color instead of the ones chosen in the program. For plugin authors: a plugin command's values now carry the program's look (`theme`, fonts, accent colors, animations), as viewers' options do.
+
 ## 0.9.4-beta (2026-11-07)
 
 - **Quick over Remote Desktop (#1):** in a Remote Desktop session the program draws its windows on the processor and puts on screen only what changed since the last frame, with Windows' GDI, instead of drawing the whole window with Direct3D each frame. A cursor moving a row is drawn and sent as a strip or two of the window, and a frame that changes nothing costs nothing, so a held arrow key keeps up also in large windows. It looks the same, and the Viewer and Compare windows and the dialogs draw the same way. Animations are off in this mode (fading, smooth scrolling, the blinking text cursor), whatever View → Animations says; the setting is kept for the usual way. The program chooses this by itself in a Remote Desktop session and where Windows has no Direct3D 12; the environment variable `SAL_RENDER` (`gdi`, `wgpu`) chooses otherwise. The debug log says which way the program draws and why, and for each frame how much was drawn and sent and how long it took.

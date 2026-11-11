@@ -295,7 +295,8 @@ An error from `run` is shown as a message, except `Interrupted`.
 - `cursor`: the path of the item under the active panel's cursor (empty on `..`);
 - `selected`: the paths of the items selected in the active panel, as an encoded list (`sal_plugin_api::ui::decode`);
 - `other`, `other_cursor`, `other_selected`: the same for the other panel;
-- `owner`: the program's window handle as a number; pass the values on to `sal_window::Windows::open` and a window the command opens appears over the program's window, on the same monitor (from RustySalamander 0.9.1).
+- `owner`: the program's window handle as a number; pass the values on to `sal_window::Windows::open` and a window the command opens appears over the program's window, on the same monitor (from RustySalamander 0.9.1);
+- how the program looks, as viewers get it in `options` (see [Viewers and editors](#viewers-and-editors)): `theme`, `ui_font`, `mono_font`, `scrollbars`, `accent_light`, `accent_dark`, `accent`, `animations`; `sal_window::Windows::open` applies them, so a window the command opens matches the program (from RustySalamander 0.9.5). A form field with one of these ids keeps its own value. Keep a copy if the plugin opens windows later, while a file operation runs (a question).
 
 `side` and the values after it come from interface 7; older programs don't send them, so read them with a default.
 

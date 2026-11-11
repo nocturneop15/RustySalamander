@@ -917,6 +917,13 @@ impl App {
         values.insert("other_selected".into(), selected(other));
         // a window the command opens (a comparison) opens over the program's
         values.insert("owner".into(), self.owner_value());
+        // and looks like it: theme, fonts, accent colors, animations (the
+        // form's own fields keep their values)
+        for (k, v) in self.opener_options(false) {
+            if k != "temporary" {
+                values.entry(k).or_insert(v);
+            }
+        }
         match plugins::mount_root_of(&here) {
             Some((root, id)) if id == plugin.id() => values.insert("mount".into(), sal_plugin_api::ui::path_value(&root)),
             _ => values.remove("mount"),
