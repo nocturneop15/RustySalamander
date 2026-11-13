@@ -455,6 +455,7 @@ Archives, servers, search, the viewer and comparison are plugins. They are files
 
 - **Settings → Plugins** lists them, with what each does, its version and its state. Untick one to turn it off; it applies at once.
 - **The Plugins menu** has the commands of the plugins that are on, the open connections and searches (to disconnect or close them), and *Plugin settings…*.
+- **Plugin commands run in the background,** several plugins at once (a plugin runs one command at a time; its other commands are greyed until it is done). Each running command has a line in the status bar saying what it does, with **Cancel**: the command stops at the next point it can, and what it finished stays.
 - **Installing a plugin:** copy its folder into `plugins` and restart. **Removing:** delete its folder.
 - Plugins get updates of their own (see [Updates](#15-updates)).
 

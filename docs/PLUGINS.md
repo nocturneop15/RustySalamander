@@ -320,6 +320,13 @@ Three methods of `FolderPlugin` serve it; each has a default, so other plugins i
 - `stop(root)`: the window's Stop button. Keep what was done so far.
 - `real_path(file, inner) -> Option<PathBuf>`: the file on disk an item stands for. Go to file shows it in its folder, and Enter, F3 and F4 open, view and edit that file itself instead of a temporary copy (in any connection or archive whose items have one). In a panel, the clipboard (Ctrl+C, Ctrl+X), Copy full paths, the context menu, Properties and a drag out of the window use these files too; items without one are left out.
 
+**A command that takes long** (importing tapes, connecting): `run` keeps running on its thread, while commands of other plugins run too (a plugin gets one command at a time). The status bar shows a line per running command, with **Cancel**:
+
+- `activity(Path::new(""))` (the empty root) is asked for every 0.25 s from another thread: `text` is shown ("LTO tape catalog: LTO003L5 is in \\.\Tape0: reading its LTFS volume…"); empty text shows "working…". It must not wait for the command (keep the text in its own `Mutex`).
+- `stop(Path::new(""))` is Cancel: stop at the next point you can and return. An `Interrupted` error, or any error after Cancel, is shown as nothing; a `Message` (what was done before Cancel) is shown.
+
+A plugin that implements neither still runs side by side with others; its line says "working…" and Cancel has no effect on it.
+
 A search runs on a thread of the plugin's own, started by `run`, which returns at once. The search plugin keeps its searches in a `Mutex<HashMap<authority, Arc<Job>>>`, with atomic counters and a `Mutex<Vec<Found>>` the search thread fills and `list` and `activity` read.
 
 **Security.** Passwords reach the plugin only in `values`; don't log them, put them in error messages, or save them (the SCP plugin saves the last server, port, user and key path, never a password). Check what a server proves about itself (the SCP plugin verifies host keys against `known_hosts` and asks before trusting a new one), and treat every name a server sends as untrusted (see [Rules and pitfalls](#rules-and-pitfalls)).

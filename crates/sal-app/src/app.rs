@@ -378,9 +378,30 @@ fn conn_group_name(group: u8) -> &'static str {
 }
 
 /// A plugin command running in the background, and where its reply arrives.
+/// A plugin command running in the background. Commands of different
+/// plugins run side by side; a plugin runs one at a time.
 struct PluginTask {
     plugin: Arc<dyn FolderPlugin>,
     reply: std::sync::mpsc::Receiver<std::io::Result<plugins::Reply>>,
+    /// What the plugin says it is doing (its `activity` for the empty root),
+    /// asked for on another thread so a busy plugin can't hold up the window.
+    activity: Arc<std::sync::Mutex<sal_plugin_api::Activity>>,
+    /// Set when the command ends: the thread asking stops.
+    done: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancel was pressed (the plugin's `stop` for the empty root).
+    cancelling: bool,
+}
+
+impl PluginTask {
+    /// The command's line in the status bar.
+    fn text(&self, name: &str) -> String {
+        let a = self.activity.lock().unwrap();
+        match (self.cancelling, a.text.is_empty()) {
+            (true, _) => trf("{plugin}: cancelling…", &[("plugin", &name)]),
+            (false, true) => trf("{plugin}: working…", &[("plugin", &name)]),
+            (false, false) => format!("{name}: {}", a.text),
+        }
+    }
 }
 
 pub struct App {
@@ -414,7 +435,7 @@ pub struct App {
     /// The plugins that are on (Settings → Plugins).
     plugins: Plugins,
     /// A plugin command running in the background (e.g. connecting).
-    plugin_task: Option<PluginTask>,
+    plugin_tasks: Vec<PluginTask>,
     /// Where the next operation goes (set by the Copy/Move dialog's queue buttons).
     queue_place: Placement,
     /// How the next operation [`Self::start_job`] starts runs (taken by it).
@@ -822,7 +843,7 @@ impl App {
             last_mask: "*.*".into(),
             jobs: Jobs::default(),
             plugins,
-            plugin_task: None,
+            plugin_tasks: Vec::new(),
             queue_place: Placement::Now,
             job_options: JobOptions::default(),
             reports: Vec::new(),
@@ -921,8 +942,9 @@ impl App {
             let shown: Vec<String> = values.iter().map(|(k, v)| if is_secret(k) { format!("{k}=(hidden)") } else { format!("{k}={v:?}") }).collect();
             crate::debuglog::did(format_args!("plugin {} command {command:?} {}", plugin.id(), shown.join(" ")));
         }
-        if self.plugin_task.is_some() {
-            self.status = tr("A plugin command is still running.").into();
+        // one command at a time for a plugin; other plugins aren't held up
+        if self.plugin_tasks.iter().any(|t| t.plugin.id() == plugin.id()) {
+            self.status = trf("{plugin} is still working. Wait for it, or cancel it in the status bar.", &[("plugin", &self.plugins.name_of(plugin.id()))]);
             return;
         }
         let here = self.act().path().to_path_buf();
@@ -955,27 +977,85 @@ impl App {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let (p, wake) = (plugin.clone(), ctx.clone());
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done2 = done.clone();
         std::thread::spawn(move || {
             let _ = tx.send(p.run(&command, &values));
+            done2.store(true, std::sync::atomic::Ordering::Relaxed);
             wake.request_repaint();
         });
-        self.status = trf("{plugin}: working…", &[("plugin", &self.plugins.name_of(plugin.id()))]);
-        self.plugin_task = Some(PluginTask { plugin, reply: rx });
+        // what it is doing, asked for now and then while it runs
+        let activity = Arc::new(std::sync::Mutex::new(sal_plugin_api::Activity::default()));
+        let (p, a, d, wake) = (plugin.clone(), activity.clone(), done.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            while !d.load(std::sync::atomic::Ordering::Relaxed) {
+                let now = p.activity(Path::new(""));
+                let changed = *a.lock().unwrap() != now;
+                if changed {
+                    *a.lock().unwrap() = now;
+                    wake.request_repaint();
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+        self.plugin_tasks.push(PluginTask { plugin, reply: rx, activity, done, cancelling: false });
     }
 
-    /// Handle the reply of the plugin command running in the background.
+    /// Cancel the plugin command `i`: the plugin is asked to stop (it ends
+    /// with what it finished; a plugin that can't stop finishes on its own).
+    fn cancel_plugin_task(&mut self, i: usize) {
+        let Some(t) = self.plugin_tasks.get_mut(i) else { return };
+        if t.cancelling {
+            return;
+        }
+        t.cancelling = true;
+        crate::debuglog::did(format_args!("plugin {} command cancelled", t.plugin.id()));
+        let p = t.plugin.clone();
+        std::thread::spawn(move || p.stop(Path::new("")));
+    }
+
+    /// The running plugin commands in the status bar: what each is doing,
+    /// with Cancel.
+    fn plugin_tasks_ui(&mut self, ui: &mut egui::Ui) {
+        let mut cancel = None;
+        for (i, t) in self.plugin_tasks.iter().enumerate() {
+            let text = t.text(&self.plugins.name_of(t.plugin.id()));
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(ui.text_style_height(&egui::TextStyle::Small)));
+                if ui.add_enabled(!t.cancelling, egui::Button::new(tr("Cancel")).small()).on_hover_text(tr("Stops the plugin's command; what it finished stays")).clicked() {
+                    cancel = Some(i);
+                }
+                ui.add(egui::Label::new(text).truncate());
+            });
+        }
+        if let Some(i) = cancel {
+            self.cancel_plugin_task(i);
+        }
+    }
+
+    /// Handle the replies of the plugin commands running in the background.
     fn poll_plugin_task(&mut self, ctx: &egui::Context) {
-        let Some(task) = &self.plugin_task else { return };
-        let reply = match task.reply.try_recv() {
-            Ok(r) => r,
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(100));
-                return;
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(std::io::Error::other(tr("The plugin stopped."))),
-        };
-        let plugin = self.plugin_task.take().map(|t| t.plugin).expect("task");
-        self.status.clear();
+        let mut i = 0;
+        while i < self.plugin_tasks.len() {
+            let reply = match self.plugin_tasks[i].reply.try_recv() {
+                Ok(r) => r,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(250));
+                    i += 1;
+                    continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(std::io::Error::other(tr("The plugin stopped."))),
+            };
+            let task = self.plugin_tasks.remove(i);
+            task.done.store(true, std::sync::atomic::Ordering::Relaxed);
+            // a cancelled command ends quietly, whatever it says
+            let reply = if task.cancelling && reply.is_err() { Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "")) } else { reply };
+            self.plugin_reply(task.plugin, reply);
+        }
+    }
+
+    /// What a plugin command answered.
+    fn plugin_reply(&mut self, plugin: Arc<dyn FolderPlugin>, reply: std::io::Result<plugins::Reply>) {
         let name = self.plugins.name_of(plugin.id());
         match reply {
             Ok(plugins::Reply::Done) => {}
@@ -1175,8 +1255,8 @@ impl App {
     /// selector): the plugin runs `command` with them; the window and the
     /// panels showing them follow until it is done.
     fn refresh_results(&mut self, ctx: &egui::Context, plugin: Arc<dyn FolderPlugin>, root: &Path, command: String) {
-        if command.is_empty() || self.plugin_task.is_some() {
-            self.status = tr("A plugin command is still running.").into();
+        if command.is_empty() || self.plugin_tasks.iter().any(|t| t.plugin.id() == plugin.id()) {
+            self.status = trf("{plugin} is still working. Wait for it, or cancel it in the status bar.", &[("plugin", &self.plugins.name_of(plugin.id()))]);
             return;
         }
         let values: plugins::Values = [("results".to_owned(), sal_plugin_api::ui::path_value(root))].into();
@@ -5266,7 +5346,8 @@ const CONFLICT_DEFAULT: usize = 2;
         let plugin_menu: Vec<(String, Arc<dyn FolderPlugin>, Vec<plugins::Command>)> =
             self.plugins.active.iter().map(|p| (self.plugins.name_of(p.id()), p.clone(), p.commands())).filter(|(_, _, c)| !c.is_empty()).collect();
         let connections = plugins::connections();
-        let busy = self.plugin_task.is_some();
+        // a plugin that runs a command offers no other until it is done
+        let busy: Vec<String> = self.plugin_tasks.iter().map(|t| t.plugin.id().to_owned()).collect();
         let mut plugin_pick: Option<(Arc<dyn FolderPlugin>, String)> = None;
         let mut disconnect: Option<PathBuf> = None;
         let mut plugin_settings = false;
@@ -5371,7 +5452,7 @@ const CONFLICT_DEFAULT: usize = 2;
                 for (name, plugin, commands) in &plugin_menu {
                     ui.label(RichText::new(name.as_str()).small().weak());
                     for c in commands {
-                        if ui.add_enabled(!busy, egui::Button::new(c.label.as_str())).clicked() {
+                        if ui.add_enabled(!busy.iter().any(|b| b == plugin.id()), egui::Button::new(c.label.as_str())).clicked() {
                             plugin_pick = Some((plugin.clone(), c.id.clone()));
                             ui.close_menu();
                         }
@@ -6648,7 +6729,7 @@ impl App {
         put("operations queued", self.jobs.queue.len().to_string());
         put("operations window", if self.jobs.hidden { "hidden" } else { "shown when running" }.into());
         put("result window", if self.reports.is_empty() { "closed".into() } else { report_protocol(&self.reports) });
-        put("plugin command", self.plugin_task.as_ref().map(|t| format!("{} running", t.plugin.id())).unwrap_or_else(|| "none".into()));
+        put("plugin commands", if self.plugin_tasks.is_empty() { "none".into() } else { self.plugin_tasks.iter().map(|t| format!("{} running{}", t.plugin.id(), if t.cancelling { ", cancelling" } else { "" })).collect::<Vec<_>>().join("; ") });
         put("update check", if self.update_check.is_some() { "running" } else { "none" }.into());
         put("context menu", if self.ctx_menu.is_some() { "open" } else { "closed" }.into());
         put("dragging", self.panel_drag.as_ref().map(|_| "items from a panel").unwrap_or("no").into());
@@ -6858,6 +6939,7 @@ impl App {
         let side = frame.inner_margin.left;
         let frame = frame.inner_margin(egui::Margin { left: side, right: side, top: layout::GAP_SMALL, bottom: side });
         egui::TopBottomPanel::bottom("fkeys").frame(frame).show(ctx, |ui| {
+            self.plugin_tasks_ui(ui);
             self.jobs_indicator(ui);
             if !self.status.is_empty() {
                 let strong = ui.visuals().strong_text_color();
@@ -7976,7 +8058,7 @@ mod tests {
         let until = Instant::now() + Duration::from_secs(20);
         while Instant::now() < until {
             ui.frames(1);
-            if ui.app.plugin_task.is_none() {
+            if ui.app.plugin_tasks.is_empty() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -9941,6 +10023,113 @@ mod tests {
             }
         }
         assert!(made > 10, "the valid odd names were made ({made})");
+    }
+
+    /// A plugin whose command works until it is stopped, saying what it does.
+    struct Slow {
+        id: &'static str,
+        stopped: std::sync::atomic::AtomicBool,
+        step: std::sync::Mutex<String>,
+    }
+
+    impl Slow {
+        fn new(id: &'static str) -> Arc<Slow> {
+            Arc::new(Slow { id, stopped: Default::default(), step: Default::default() })
+        }
+    }
+
+    impl FolderPlugin for Slow {
+        fn id(&self) -> &str {
+            self.id
+        }
+        fn handles(&self, _: &str) -> bool {
+            false
+        }
+        fn can_write(&self, _: &Path) -> bool {
+            false
+        }
+        fn status(&self) -> String {
+            String::new()
+        }
+        fn list(&self, _: &Path, _: &str) -> std::io::Result<plugins::Index> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn extract(&self, _: &Path, _: &[String], _: &Path, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn add(&self, _: &Path, _: &[(PathBuf, String)], _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn delete(&self, _: &Path, _: &[String], _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn rename(&self, _: &Path, _: &str, _: &str, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn mkdir(&self, _: &Path, _: &str, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn run(&self, _: &str, _: &plugins::Values) -> std::io::Result<plugins::Reply> {
+            for n in 1.. {
+                *self.step.lock().unwrap() = format!("step {n}");
+                if self.stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "stopped"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                if n > 1500 {
+                    break;
+                }
+            }
+            Ok(plugins::Reply::Message("finished on its own".into()))
+        }
+        fn activity(&self, root: &Path) -> sal_plugin_api::Activity {
+            assert_eq!(root, Path::new(""), "the running command");
+            sal_plugin_api::Activity { running: true, text: self.step.lock().unwrap().clone() }
+        }
+        fn stop(&self, root: &Path) {
+            assert_eq!(root, Path::new(""));
+            self.stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Commands of two plugins run side by side; a second one for a busy
+    /// plugin waits its turn with a message. Each shows what it does in the
+    /// status bar, and Cancel stops it quietly.
+    #[test]
+    fn plugin_commands_run_side_by_side_and_cancel() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let (a, b) = (Slow::new("tapes"), Slow::new("other"));
+        let ctx = ui.ctx.clone();
+        ui.app.run_plugin_command(&ctx, a.clone(), "work".into(), plugins::Values::new());
+        ui.app.run_plugin_command(&ctx, b.clone(), "work".into(), plugins::Values::new());
+        assert_eq!(ui.app.plugin_tasks.len(), 2, "another plugin isn't held up");
+        ui.app.run_plugin_command(&ctx, a.clone(), "more".into(), plugins::Values::new());
+        assert_eq!(ui.app.plugin_tasks.len(), 2, "the busy plugin's second command waits");
+        assert!(ui.app.status.contains("still working"), "{}", ui.app.status);
+        // what they do comes in through `activity` of the empty root
+        let until = Instant::now() + Duration::from_secs(10);
+        while !ui.app.plugin_tasks.iter().all(|t| t.activity.lock().unwrap().text.starts_with("step")) {
+            assert!(Instant::now() < until, "no activity shown");
+            ui.frames(1);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let shown = ui.app.plugin_tasks[0].text("Tapes");
+        assert!(shown.starts_with("Tapes: step"), "{shown}");
+        // Cancel the first: it ends without a message; the second goes on
+        ui.app.cancel_plugin_task(0);
+        assert!(ui.app.plugin_tasks[0].text("Tapes").contains("cancelling"));
+        let until = Instant::now() + Duration::from_secs(10);
+        while ui.app.plugin_tasks.len() == 2 {
+            assert!(Instant::now() < until, "not cancelled");
+            ui.frames(1);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(ui.app.plugin_tasks.len(), 1);
+        assert_eq!(ui.app.plugin_tasks[0].plugin.id(), "other");
+        assert!(matches!(ui.app.dialog, Dialog::None), "a cancelled command says nothing");
+        ui.app.cancel_plugin_task(0);
+        wait_plugin(&mut ui);
     }
 
     /// The question before switching to multi-user mode is permanent, so

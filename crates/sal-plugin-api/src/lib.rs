@@ -132,7 +132,12 @@ pub trait FolderPlugin: Send + Sync {
     ///   panel.
     ///
     /// It runs in the background, so it may take a while (connecting to a
-    /// server).
+    /// server). Commands of other plugins run meanwhile; this plugin gets no
+    /// other command until it returns. While it runs, the program shows
+    /// what [`FolderPlugin::activity`] says for the empty root, with
+    /// Cancel, which calls [`FolderPlugin::stop`] for the empty root: a
+    /// long command reports its steps and returns early when stopped (an
+    /// error of kind `Interrupted` is shown as nothing).
     fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
         let _ = input;
         Err(io::Error::new(io::ErrorKind::Unsupported, format!("unknown command \"{command}\"")))
@@ -147,12 +152,19 @@ pub trait FolderPlugin: Send + Sync {
     /// as a search filling it with results; the program shows it in the
     /// connection's results window ([`Reply::Results`]) and asks again while
     /// [`Activity::running`]. The default is nothing.
+    ///
+    /// The empty root (`Path::new("")`) means the command [`FolderPlugin::run`]
+    /// is running now: its `text` is shown in the program's status bar
+    /// ("Importing LTO003L5: reading its index…"). It is asked for from
+    /// another thread while the command runs, so it must not wait for the
+    /// command.
     fn activity(&self, root: &Path) -> Activity {
         let _ = root;
         Activity::default()
     }
     /// Stop what [`FolderPlugin::activity`] reports as running; what was done
-    /// so far stays.
+    /// so far stays. The empty root: the command [`FolderPlugin::run`] is
+    /// running (Cancel in the status bar).
     fn stop(&self, root: &Path) {
         let _ = root;
     }

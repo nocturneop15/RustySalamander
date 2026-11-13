@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.8-beta (2026-11-13)
+
+- **Plugin commands side by side, with what they do and Cancel:** a long plugin command (importing tapes, connecting to a server) no longer holds up the commands of other plugins. Each running command has a line in the status bar saying what it is doing, with **Cancel**. For plugin authors: `activity` and `stop` for the empty root are the command running now (see "Commands, forms and connections" in `docs/PLUGINS.md`); no new interface version is needed.
+
 ## 0.9.7-beta (2026-11-11)
 
 - **Update in place or into a new folder:** a new version of the program can now replace this one in its folder, keeping settings and every plugin, your own too (files in use are set aside and deleted at the next start; if anything fails, all is put back), or go into a new folder as before. Into a new folder, your own plugins and languages can go along: before, only the files they had saved were copied, without the plugin itself.
