@@ -261,7 +261,8 @@ unsafe extern "C" fn mkdir<T: Plugin>(this: *mut c_void, file: Wide, inner: Str,
 /// [`VTable::commands`].
 unsafe extern "C" fn commands<T: Plugin>(this: *mut c_void, out: *const StrOut) {
     let list = catch_unwind(|| me::<T>(this).commands()).unwrap_or_default();
-    (*out).send(&crate::ui::encode_commands(&list));
+    let items = catch_unwind(|| me::<T>(this).item_commands()).unwrap_or_default();
+    (*out).send(&crate::ui::encode_menus(&list, items.as_deref()));
 }
 
 /// [`VTable::run`].

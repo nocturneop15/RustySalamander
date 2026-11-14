@@ -302,9 +302,28 @@ pub(crate) fn encode_commands(commands: &[Command]) -> String {
     encode(&commands.iter().flat_map(|c| [c.id.as_str(), c.label.as_str()]).collect::<Vec<_>>())
 }
 
-/// Commands from [`encode_commands`].
+/// Commands from [`encode_commands`] (or [`encode_menus`]: its pairs).
 pub(crate) fn decode_commands(s: &str) -> Vec<Command> {
     decode(s).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| Command { id: c[0].clone(), label: c[1].clone() }).collect()
+}
+
+/// The Plugins menu's commands and, if the plugin has them, the context
+/// menu's: the menu's as [`encode_commands`], then the context menu's
+/// encoded as one more string. A program that reads only pairs (every one
+/// before 0.9.9-beta) leaves that odd last string out, so the encoding
+/// stays the same for it.
+pub(crate) fn encode_menus(commands: &[Command], items: Option<&[Command]>) -> String {
+    let mut s = encode_commands(commands);
+    if let Some(items) = items {
+        s.push_str(&encode(&[encode_commands(items)]));
+    }
+    s
+}
+
+/// The context menu's commands from [`encode_menus`]; `None` if it had none.
+pub(crate) fn decode_item_commands(s: &str) -> Option<Vec<Command>> {
+    let parts = decode(s)?;
+    if parts.len() % 2 == 1 { parts.last().map(|last| decode_commands(last)) } else { None }
 }
 
 /// Viewers and editors as text: id, kind, label and masks of each.
@@ -574,6 +593,14 @@ mod tests {
         }
         let commands = vec![Command { id: "connect".into(), label: "Connect…".into() }, Command { id: "x".into(), label: "".into() }];
         assert_eq!(decode_commands(&encode_commands(&commands)), commands);
+        // the context menu's after them: read by new programs, left out by old ones
+        let items = vec![Command { id: "format".into(), label: "Format the tape…".into() }];
+        let both = encode_menus(&commands, Some(&items));
+        assert_eq!(decode_commands(&both), commands);
+        assert_eq!(decode_item_commands(&both), Some(items));
+        assert_eq!(decode_item_commands(&encode_menus(&commands, Some(&[]))), Some(Vec::new()));
+        assert_eq!(decode_item_commands(&encode_menus(&commands, None)), None);
+        assert_eq!(encode_menus(&commands, None), encode_commands(&commands));
         let values: Values = [("a".to_owned(), "1".to_owned()), ("heslo".to_owned(), "p:ss,".to_owned())].into();
         assert_eq!(decode_values(&encode_values(&values)), values);
         let openers = vec![

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.9-beta (2026-11-14)
+
+- **A context menu in plugin panels:** right-click (or the menu key) on items that aren't files on disk, such as the tapes of the LTO catalog or a server's files, shows the plugin's commands for them (a plugin names those in its new `item_commands()`; one that doesn't shows all of its Plugins menu); on the background the Plugins menu's. They apply to the clicked or selected items. Before, the panel said the context menu isn't available.
+- **Plugin forms fit their window:** long labels wrap, notes and tick boxes take the whole width, a long list of tick boxes scrolls, options that don't fit side by side go one under the other, and text fields no longer reach past the window's edge.
+
 ## 0.9.8-beta (2026-11-13)
 
 - **Plugin commands side by side, with what they do and Cancel:** a long plugin command (importing tapes, connecting to a server) no longer holds up the commands of other plugins. Each running command has a line in the status bar saying what it is doing, with **Cancel**. For plugin authors: `activity` and `stop` for the empty root are the command running now (see "Commands, forms and connections" in `docs/PLUGINS.md`); no new interface version is needed.

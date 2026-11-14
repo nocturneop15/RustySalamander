@@ -488,6 +488,9 @@ pub struct App {
     /// ([`JOB_DONE_SHOWN`]) instead of "No operations running".
     job_done: Option<(String, Instant)>,
     ctx_menu: Option<CtxMenu>,
+    /// The commands the last plugin context menu offered (for the tests,
+    /// which have no native menu).
+    plugin_menu_shown: Vec<String>,
     /// When the SAL_DIAG_SEARCH diagnostics started their search.
     diag_since: Option<Instant>,
     /// Whether Windows animates the main window (minimizing, closing), as
@@ -874,6 +877,7 @@ impl App {
             release_pointer: false,
             job_done: None,
             ctx_menu: None,
+            plugin_menu_shown: Vec::new(),
             diag_since: None,
             transitions: None,
             rmb: None,
@@ -1781,17 +1785,16 @@ impl App {
         let mut dir = p.path().to_path_buf();
         // a plugin's items: the files on disk they stand for, if any
         let items = if plugin {
-            if items.is_empty() {
-                self.status = tr("The context menu isn't available in plugin panels.").into();
-                return;
-            }
-            match self.real_items(&items) {
+            // items that are files on disk get the usual menu; anything else
+            // (tapes, a connection's items, the background) the plugin's commands
+            match if items.is_empty() { Err(String::new()) } else { self.real_items(&items) } {
                 Ok(real) => {
                     dir = Self::folder_of(&real);
                     real
                 }
-                Err(e) => {
-                    self.status = e;
+                Err(_) => {
+                    let on_items = !items.is_empty();
+                    self.plugin_context_menu(ctx, panel, pos, from_mouse, on_items);
                     return;
                 }
             }
@@ -1828,6 +1831,32 @@ impl App {
             }
             // no native window (tests): the menu drawn by the app
             (ContextMenuStyle::Windows11 | ContextMenuStyle::Windows11Full, None) => self.ctx_menu = Some(menu),
+        }
+    }
+
+    /// The context menu of a plugin's panel whose items aren't files on
+    /// disk: on items the plugin's commands for them (all of the Plugins
+    /// menu's if it names none), on the background the Plugins menu's; run
+    /// on the clicked or selected items like from there.
+    fn plugin_context_menu(&mut self, ctx: &egui::Context, panel: usize, pos: egui::Pos2, from_mouse: bool, on_items: bool) {
+        let Some(plugin) = self.panels[panel].archive.as_ref().map(|a| a.plugin.clone()) else { return };
+        let commands = if on_items { plugin.item_commands().unwrap_or_else(|| plugin.commands()) } else { plugin.commands() };
+        if commands.is_empty() {
+            self.status = tr("The context menu isn't available in plugin panels.").into();
+            return;
+        }
+        // a plugin that is working offers its commands when it is done
+        let busy = self.plugin_tasks.iter().any(|t| t.plugin.id() == plugin.id());
+        let name = self.plugins.name_of(plugin.id());
+        let mut rows: Vec<shellmenu::NativeRow> = vec![Some((u32::MAX, name, String::new(), false)), None];
+        rows.extend(commands.iter().enumerate().map(|(i, c)| Some((i as u32 + 1, c.label.clone(), String::new(), !busy))));
+        self.plugin_menu_shown = commands.iter().map(|c| c.id.clone()).collect();
+        let Some(h) = self.hwnd else { return };
+        let at = self.menu_point(ctx, h, pos, from_mouse);
+        let id = shellmenu::show_native(h, &rows, at) as usize;
+        if let Some(c) = commands.get(id.wrapping_sub(1)) {
+            crate::debuglog::did(format_args!("context menu: plugin {} command {}", plugin.id(), c.id));
+            self.run_plugin_command(ctx, plugin, c.id.clone(), plugins::Values::new());
         }
     }
 
@@ -5605,42 +5634,99 @@ fn from_other_label(panel: usize) -> (&'static str, &'static str) {
     }
 }
 
-/// The fields of a plugin's form: a label and an input per row. The first
+/// How many rows of tick boxes a plugin's form shows before their list
+/// scrolls (a tape library's tapes).
+const FORM_CHECK_ROWS: usize = 10;
+
+/// The fields of a plugin's form: a label and an input per row, the labels
+/// in a column at most two fifths of the width (a longer one wraps), the
+/// inputs in the rest. Notes and tick boxes take the whole width; a run of
+/// more than [`FORM_CHECK_ROWS`] tick boxes is a list that scrolls, and
+/// options that don't fit side by side go one under the other. The first
 /// text input takes the focus when the dialog opens; `browse` is set to the
 /// field whose Browse… button was clicked.
 fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Values, focus: bool, browse: &mut Option<String>) {
     use plugins::FieldKind;
     let mut focus_next = true;
-    // the label column is as wide as the longest label of an input; tick
-    // boxes and notes go in the input column, so they don't widen it
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let text_w = |ui: &egui::Ui, s: &str| ui.fonts(|fonts| fonts.layout_no_wrap(s.to_owned(), font.clone(), Color32::WHITE).size().x);
+    let full_w = ui.available_width();
+    // the label column: as wide as the longest label of an input, at most two fifths
     let label_w = form
         .fields
         .iter()
         .filter(|f| !matches!(f.kind, FieldKind::Hidden | FieldKind::Note | FieldKind::Check))
-        .map(|f| ui.fonts(|fonts| fonts.layout_no_wrap(f.label.clone(), egui::TextStyle::Body.resolve(ui.style()), Color32::WHITE).size().x))
+        .map(|f| text_w(ui, &f.label))
         .fold(0.0f32, f32::max)
+        .min(full_w * 0.4)
         .ceil();
     layout::controls(ui);
     let gap = layout::FORM_SPACING.x;
     let row_h = ui.spacing().interact_size.y;
     ui.spacing_mut().item_spacing.y = layout::FORM_SPACING.y;
     let enabled_fields = sal_plugin_api::ui::enabled_fields(&form.fields, values);
-    for f in &form.fields {
-        if f.kind == FieldKind::Hidden {
-            continue;
+    let enabled_of = |f: &sal_plugin_api::Field| enabled_fields.get(&f.id).copied().unwrap_or(true);
+    let check = |ui: &mut egui::Ui, f: &sal_plugin_api::Field, value: &mut String, enabled: bool| {
+        ui.add_enabled_ui(enabled, |ui| {
+            let mut on = !value.is_empty();
+            if ui.checkbox(&mut on, f.label.as_str()).changed() {
+                *value = if on { "1".into() } else { String::new() };
+            }
+        });
+    };
+    let fields: Vec<&sal_plugin_api::Field> = form.fields.iter().filter(|f| f.kind != FieldKind::Hidden).collect();
+    let mut i = 0;
+    while i < fields.len() {
+        let f = fields[i];
+        let enabled = enabled_of(f);
+        match &f.kind {
+            FieldKind::Note => {
+                let note = if f.id == "error" { RichText::new(f.label.as_str()).color(ui.visuals().warn_fg_color) } else { RichText::new(f.label.as_str()).small().weak() };
+                ui.add(egui::Label::new(note).wrap());
+                i += 1;
+                continue;
+            }
+            FieldKind::Check => {
+                // a run of tick boxes: the whole width, a long one in a list that scrolls
+                let run = fields[i..].iter().take_while(|g| g.kind == FieldKind::Check).count();
+                let group = &fields[i..i + run];
+                if run > FORM_CHECK_ROWS {
+                    let rows_h = FORM_CHECK_ROWS as f32 * (row_h + layout::ITEM_SPACING.y);
+                    layout::well_frame(ui.style()).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        egui::ScrollArea::vertical().id_salt(("plugin-checks", &f.id)).max_height(rows_h).auto_shrink([false, true]).show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = layout::ITEM_SPACING.y;
+                            for g in group {
+                                let enabled = enabled_of(g);
+                                check(ui, g, values.entry(g.id.clone()).or_default(), enabled);
+                            }
+                        });
+                    });
+                } else {
+                    for g in group {
+                        let enabled = enabled_of(g);
+                        check(ui, g, values.entry(g.id.clone()).or_default(), enabled);
+                    }
+                }
+                i += run;
+                continue;
+            }
+            _ => {}
         }
-        let enabled = enabled_fields.get(&f.id).copied().unwrap_or(true);
+        i += 1;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            let label = if matches!(f.kind, FieldKind::Note | FieldKind::Check) { "" } else { f.label.as_str() };
-            ui.allocate_ui_with_layout(egui::vec2(label_w, row_h), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.set_min_size(egui::vec2(label_w, row_h));
-                ui.add_enabled(enabled, egui::Label::new(label));
+            ui.allocate_ui_with_layout(egui::vec2(label_w, row_h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(label_w);
+                ui.set_min_height(row_h);
+                ui.add_enabled(enabled, egui::Label::new(f.label.as_str()).wrap());
             });
             let w = ui.available_width();
             let value = values.entry(f.id.clone()).or_default();
             ui.add_enabled_ui(enabled, |ui| {
                 ui.spacing_mut().item_spacing.x = layout::ITEM_SPACING.x;
+                // a text field's margin is outside its desired width
+                let field_w = w - 2.0 * layout::FIELD_MARGIN.x;
                 let mut text = |ui: &mut egui::Ui, value: &mut String, password: bool, width: f32| {
                     let r = ui.add(layout::text_field(value).password(password).desired_width(width).id_salt(("plugin-field", &f.id)));
                     if focus_next && enabled && (focus || ui.memory(|m| m.focused().is_none())) {
@@ -5649,14 +5735,13 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
                     focus_next = false;
                 };
                 match &f.kind {
-                    FieldKind::Text => text(ui, value, false, w),
-                    FieldKind::Password => text(ui, value, true, w),
+                    FieldKind::Text => text(ui, value, false, field_w),
+                    FieldKind::Password => text(ui, value, true, field_w),
                     FieldKind::File | FieldKind::Folder => {
                         let browse_label = tr("Browse…");
                         let bw = ui.fonts(|fonts| fonts.layout_no_wrap(browse_label.to_owned(), egui::TextStyle::Button.resolve(ui.style()), Color32::WHITE).size().x)
                             + 2.0 * ui.spacing().button_padding.x;
-                        // the text field's margin is outside its desired width
-                        text(ui, value, false, (w - bw - layout::ITEM_SPACING.x - 2.0 * layout::FIELD_MARGIN.x).max(120.0));
+                        text(ui, value, false, (field_w - bw - layout::ITEM_SPACING.x).max(120.0));
                         if ui.button(browse_label).clicked() {
                             *browse = Some(f.id.clone());
                         }
@@ -5665,26 +5750,26 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
                         // a disabled choice shows its first option, as it counts as that
                         // (the pick stays, for when it is enabled again)
                         let shown = if enabled { value.as_str() } else { options.first().map_or("", |(v, _)| v.as_str()) }.to_owned();
-                        for (v, label) in options {
-                            if ui.radio(shown == *v, label.as_str()).clicked() {
-                                *value = v.clone();
+                        let radio_w = |label: &str| ui.spacing().icon_width + ui.spacing().icon_spacing + text_w(ui, label);
+                        let side_by_side = options.iter().map(|(_, l)| radio_w(l)).sum::<f32>() + layout::ITEM_SPACING.x * options.len().saturating_sub(1) as f32 <= w;
+                        let mut radios = |ui: &mut egui::Ui| {
+                            for (v, label) in options {
+                                if ui.add(egui::RadioButton::new(shown == *v, label.as_str())).clicked() {
+                                    *value = v.clone();
+                                }
                             }
+                        };
+                        if side_by_side {
+                            radios(ui);
+                        } else {
+                            ui.vertical(|ui| {
+                                ui.set_width(w);
+                                ui.spacing_mut().item_spacing.y = layout::ITEM_SPACING.y;
+                                radios(ui);
+                            });
                         }
                     }
-                    FieldKind::Check => {
-                        let mut on = !value.is_empty();
-                        if ui.checkbox(&mut on, f.label.as_str()).changed() {
-                            *value = if on { "1".into() } else { String::new() };
-                        }
-                    }
-                    FieldKind::Note => {
-                        let note = if f.id == "error" { RichText::new(f.label.as_str()).color(ui.visuals().warn_fg_color) } else { RichText::new(f.label.as_str()).small().weak() };
-                        ui.vertical(|ui| {
-                            ui.set_width(w);
-                            ui.add(egui::Label::new(note).wrap());
-                        });
-                    }
-                    FieldKind::Hidden => {}
+                    FieldKind::Check | FieldKind::Note | FieldKind::Hidden => {}
                 }
             });
         });
@@ -10051,8 +10136,16 @@ mod tests {
         fn status(&self) -> String {
             String::new()
         }
+        /// Two tapes, as folders of its connection.
         fn list(&self, _: &Path, _: &str) -> std::io::Result<plugins::Index> {
-            Err(std::io::ErrorKind::Unsupported.into())
+            let tape = |p: &str| sal_plugin_api::Item { path: p.into(), dir: true, size: 0, modified: None, attrs: sal_plugin_api::ATTR_DIRECTORY, index: None };
+            Ok(plugins::Index { items: vec![tape("LTO001L5"), tape("LTO002L5")], complete: true })
+        }
+        fn commands(&self) -> Vec<plugins::Command> {
+            vec![plugins::Command { id: "format".into(), label: "Format…".into() }, plugins::Command { id: "eject".into(), label: "Eject…".into() }]
+        }
+        fn item_commands(&self) -> Option<Vec<plugins::Command>> {
+            Some(vec![plugins::Command { id: "eject".into(), label: "Eject the tape…".into() }])
         }
         fn extract(&self, _: &Path, _: &[String], _: &Path, _: &mut sal_plugin_api::Progress) -> std::io::Result<()> {
             Err(std::io::ErrorKind::Unsupported.into())
@@ -10090,6 +10183,70 @@ mod tests {
             assert_eq!(root, Path::new(""));
             self.stopped.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Right-click on a plugin's items that aren't files on disk (tapes):
+    /// the plugin's commands, not "isn't available".
+    #[test]
+    fn plugin_items_have_the_plugins_commands_as_context_menu() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let plugin: Arc<dyn FolderPlugin> = Slow::new("tapes");
+        ui.app.plugins.active.push(plugin.clone());
+        for p in &mut ui.app.panels {
+            p.plugins = ui.app.plugins.active.clone();
+        }
+        ui.app.open_connection(&plugin, &plugins::Mount { scheme: "lto".into(), authority: "library".into(), folder: String::new() });
+        ui.frames(2);
+        assert!(ui.app.panels[0].archive.is_some(), "the connection is shown");
+        let row = ui.app.panels[0].entries().iter().position(|e| e.name == "LTO002L5").expect("a tape");
+        let ctx = ui.ctx.clone();
+        ui.app.open_context_menu(&ctx, 0, Some(row), egui::pos2(100.0, 100.0), true);
+        // the commands the plugin has for its items
+        assert_eq!(ui.app.plugin_menu_shown, vec!["eject".to_string()]);
+        assert!(!ui.app.status.contains("isn't available"), "{}", ui.app.status);
+        // on the background those of the Plugins menu
+        ui.app.plugin_menu_shown.clear();
+        ui.app.open_context_menu(&ctx, 0, None, egui::pos2(100.0, 400.0), true);
+        assert_eq!(ui.app.plugin_menu_shown.len(), 2);
+        // the connection list is shared by the tests: leave none behind
+        ui.app.close_connection(&sal_plugin_api::mount_root("lto", "library"));
+    }
+
+    /// A plugin's form stays inside its window: long labels wrap, notes and
+    /// many tick boxes take the whole width (the boxes in a list that
+    /// scrolls), options that don't fit go one under the other.
+    #[test]
+    fn plugin_forms_fit_their_window() {
+        use plugins::FieldKind;
+        let field = |id: &str, label: &str, kind: FieldKind| sal_plugin_api::Field { id: id.into(), label: label.into(), kind, ..Default::default() };
+        let mut fields = vec![field("n", &"Formatting erases everything on the tapes. ".repeat(4), FieldKind::Note)];
+        for i in 0..20 {
+            fields.push(field(&format!("tape:{i}"), &format!("3{i:02}AFGL5  ·  slot {i}  ·  LTFS, 2859 files, 1.4 TB"), FieldKind::Check));
+        }
+        fields.push(field("b", "Another tape (its barcode, e.g. a new one in a standalone drive, which is a long label)", FieldKind::Text));
+        fields.push(field("m", "Look for", FieldKind::Choice(vec![("a".into(), "names containing it".into()), ("b".into(), "names matching it: * any characters, ? one (*.mkv)".into())])));
+        fields.push(field("f", "Folder", FieldKind::Folder));
+        let form = plugins::Form { title: "Format tapes".into(), ok: "Format".into(), command: "x".into(), fields };
+        let ctx = egui::Context::default();
+        let width = 600.0;
+        let mut used = egui::Rect::NOTHING;
+        let mut values = plugins::Values::new();
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 900.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.allocate_ui(egui::vec2(width, 2000.0), |ui| {
+                        ui.set_max_width(width);
+                        let mut browse = None;
+                        plugin_form(ui, &form, &mut values, false, &mut browse);
+                        used = ui.min_rect();
+                    });
+                });
+            });
+        }
+        assert!(used.width() <= width + 0.5, "the form is {} wide in {width}", used.width());
+        // twenty tick boxes scroll: the form is far shorter than twenty rows and the rest
+        assert!(used.height() < 600.0, "the form is {} high", used.height());
     }
 
     /// Commands of two plugins run side by side; a second one for a busy

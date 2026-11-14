@@ -454,6 +454,7 @@ Entering a folder or going up in one panel takes the other along. F5 from one si
 Archives, servers, search, the viewer and comparison are plugins. They are files in the `plugins` folder next to the program, each in its own folder.
 
 - **Settings → Plugins** lists them, with what each does, its version and its state. Untick one to turn it off; it applies at once.
+- **Right-click in a plugin's panel** on items that aren't files on disk (tapes, a server's files) shows that plugin's commands, the same as in the Plugins menu, for the clicked or selected items.
 - **The Plugins menu** has the commands of the plugins that are on, the open connections and searches (to disconnect or close them), and *Plugin settings…*.
 - **Plugin commands run in the background,** several plugins at once (a plugin runs one command at a time; its other commands are greyed until it is done). Each running command has a line in the status bar saying what it does, with **Cancel**: the command stops at the next point it can, and what it finished stays.
 - **Installing a plugin:** copy its folder into `plugins` and restart. **Removing:** delete its folder.

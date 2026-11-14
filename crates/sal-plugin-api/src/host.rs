@@ -233,6 +233,12 @@ impl FolderPlugin for Remote {
         crate::ui::decode_commands(&s)
     }
 
+    fn item_commands(&self) -> Option<Vec<Command>> {
+        let mut s = String::new();
+        unsafe { (self.vt.commands)(self.this, &StrOut::new(&mut s)) };
+        crate::ui::decode_item_commands(&s)
+    }
+
     fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
         let values = crate::ui::encode_values(input);
         let mut reply = String::new();

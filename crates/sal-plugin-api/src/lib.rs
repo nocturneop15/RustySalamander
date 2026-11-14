@@ -118,6 +118,20 @@ pub trait FolderPlugin: Send + Sync {
     fn commands(&self) -> Vec<Command> {
         Vec::new()
     }
+    /// The commands of the context menu on the plugin's items in a panel
+    /// (a right-click on a tape, a server's file that isn't on disk); they
+    /// run like [`FolderPlugin::commands`], with the clicked or selected
+    /// items in `cursor` and `selected`, so they are usually ids from there,
+    /// perhaps labelled for one item ("Format the tape…"). `None`: the menu
+    /// has every command of [`FolderPlugin::commands`]; `Some` of an empty
+    /// list: the items have no menu. A right-click on the panel's background
+    /// shows [`FolderPlugin::commands`].
+    ///
+    /// Programs before 0.9.9-beta don't ask for it (their context menu in
+    /// plugin panels says it isn't available).
+    fn item_commands(&self) -> Option<Vec<Command>> {
+        None
+    }
     /// Run `command` (from [`FolderPlugin::commands`], or the
     /// [`Form::command`] of a form the plugin showed) with `input`: the
     /// form's values, plus what the program adds:
