@@ -63,12 +63,23 @@ impl Windows {
 
     /// Show what `make` makes in a new window, looking as `options` say.
     pub fn open(&self, make: Make, options: Values) -> io::Result<()> {
+        self.open_as(make, options, false)
+    }
+
+    /// [`Self::open`], and the program's window takes no input until this
+    /// one closes (a warning to read before going on). Programs before
+    /// 0.9.10 show it without that.
+    pub fn open_modal(&self, make: Make, options: Values) -> io::Result<()> {
+        self.open_as(make, options, true)
+    }
+
+    fn open_as(&self, make: Make, options: Values, modal: bool) -> io::Result<()> {
         let host = sal_plugin_api::export::host().filter(|h| h.version >= 9).ok_or_else(|| io::Error::other("this RustySalamander can't show the plugin's windows"))?;
         let (icon, size, stopped) = (self.icon, self.size, self.stopped.clone());
         std::thread::Builder::new().name("plugin window".into()).spawn(move || {
             let Ok(content) = catch_unwind(AssertUnwindSafe(make)) else { return };
             let win = Box::new(Window::new(content, &options, Some(host), stopped));
-            let init = wire::Init { egui: wire::EGUI.into(), title: win.content.title(), icon: (*icon()).clone(), size };
+            let init = wire::Init { egui: wire::EGUI.into(), title: win.content.title(), icon: (*icon()).clone(), size, modal };
             let init = wire::encode(&init);
             let win = Box::into_raw(win);
             // the program owns it now, or it couldn't take it

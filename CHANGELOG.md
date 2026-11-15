@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.10-beta (2026-11-15)
+
+- **Copies on a network drive stay on the server:** files are copied by Windows' own copy (`CopyFileExW`), so on an SMB share the server copies the data itself instead of sending every byte to this computer and back; within one NAS, a copy goes at the speed of its disks, not of the network. It also copies all times, attributes and alternate data streams. A copy checked by checksum still reads the data here (the checksum needs it).
+- **Moving a folder into one of the same name renames what is inside it:** on the same drive (or share) nothing is copied; before, the whole folder was copied and deleted. A file you skip keeps its folder where it was.
+- **A move copies only when the target is on another drive:** a rename that fails for another reason (a file in use, access denied) now asks Retry / Skip / Cancel, instead of starting a copy whose delete would fail too.
+- **Plugin windows can be modal** (`sal_window::Windows::open_modal`): the main window takes no input until it is closed, for a warning that must be read before going on. Plugins and programs before this understand each other: such a window from a newer plugin shows in an older program without being modal.
+
 ## 0.9.9-beta (2026-11-14)
 
 - **A context menu in plugin panels:** right-click (or the menu key) on items that aren't files on disk, such as the tapes of the LTO catalog or a server's files, shows the plugin's commands for them (a plugin names those in its new `item_commands()`; one that doesn't shows all of its Plugins menu); on the background the Plugins menu's. They apply to the clicked or selected items. Before, the panel said the context menu isn't available.

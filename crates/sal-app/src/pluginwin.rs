@@ -35,7 +35,7 @@ static CTX: Mutex<Option<egui::Context>> = Mutex::new(None);
 
 /// `HostApi::open_window`: a plugin's window, shown from the next frame.
 pub unsafe extern "C" fn open_window(_: *mut c_void, win: *mut c_void, fns: *const WindowFns, init: Bytes) -> bool {
-    let Some(init) = wire::decode::<wire::Init>(init.get()) else { return false };
+    let Some(init) = wire::Init::decode(init.get()) else { return false };
     if win.is_null() || fns.is_null() || init.egui != wire::EGUI {
         crate::debuglog::write(format!("!!! ERROR a plugin's window can't be shown (egui {:?}, the program's {})", init.egui, wire::EGUI));
         return false;
@@ -63,19 +63,31 @@ fn wake(delay: Duration) {
 pub struct Windows {
     wins: Vec<Win>,
     serial: u64,
+    /// A modal window keeps the main window disabled.
+    holding: bool,
 }
 
 impl Windows {
     /// Show the windows, and those opened since the last frame: over the
     /// program's window `owner`, with Windows' own animation if `animations`.
-    pub fn show(&mut self, ctx: &egui::Context, owner: Option<isize>, animations: bool) {
+    /// While a modal one is open, `owner` takes no input; `dialog_holds`:
+    /// one of the program's modal dialogs keeps it so too (it stays so when
+    /// the plugin's window closes).
+    pub fn show(&mut self, ctx: &egui::Context, owner: Option<isize>, animations: bool, dialog_holds: bool) {
         CTX.lock().unwrap().get_or_insert_with(|| ctx.clone());
         for o in std::mem::take(&mut *OPENED.lock().unwrap()) {
             self.serial += 1;
             let step = self.wins.len();
             let id = ViewportId::from_hash_of(("plugin window", self.serial));
-            let wire::Init { title, icon, size, .. } = o.init;
-            self.wins.push(Win { id, key: self.serial, win: o.win, fns: o.fns, title, icon: Arc::new(icon), size, step, settled: 0, textures: Textures::default(), out: Vec::new() });
+            let wire::Init { title, icon, size, modal, .. } = o.init;
+            self.wins.push(Win { id, key: self.serial, win: o.win, fns: o.fns, title, icon: Arc::new(icon), size, step, settled: 0, modal, textures: Textures::default(), out: Vec::new() });
+        }
+        let held_before = self.holding;
+        // a modal window shown: the main window waits (again, should a
+        // dialog of the program have let it go meanwhile)
+        self.holding = self.wins.iter().any(|w| w.modal && w.settled == SHOWN);
+        if let (true, Some(owner)) = (self.holding, owner) {
+            crate::dialogwin::hold_owner(owner, true);
         }
         let mut gone = Vec::new();
         for w in &mut self.wins {
@@ -94,6 +106,15 @@ impl Windows {
             crate::debuglog::write(format!("plugin window closes: {}", w.title));
         }
         self.wins.retain(|w| !gone.contains(&w.key));
+        // the last modal window closed: the main window takes input again,
+        // before the window goes (else Windows activates another program)
+        let still = self.wins.iter().any(|w| w.modal && w.settled == SHOWN);
+        if (held_before || self.holding) && !still {
+            self.holding = false;
+            if let (false, Some(owner)) = (dialog_holds, owner) {
+                crate::dialogwin::hold_owner(owner, false);
+            }
+        }
         // the closed windows go away in the next frame
         ctx.request_repaint();
     }
@@ -112,6 +133,8 @@ struct Win {
     step: usize,
     /// Frames it waited for its window to show it (`SHOWN` once shown).
     settled: u32,
+    /// The main window takes no input while it is open.
+    modal: bool,
     /// Its textures among the program's.
     textures: Textures,
     /// The last frame's output, reused.
@@ -266,7 +289,7 @@ pub fn take_opened() -> Vec<(String, TestWindow)> {
     std::mem::take(&mut *OPENED.lock().unwrap())
         .into_iter()
         .map(|o| {
-            let mut w = Win { id: ViewportId::ROOT, key: 0, win: o.win, fns: o.fns, title: o.init.title.clone(), icon: Arc::new(o.init.icon), size: o.init.size, step: 0, settled: SHOWN, textures: Textures::default(), out: Vec::new() };
+            let mut w = Win { id: ViewportId::ROOT, key: 0, win: o.win, fns: o.fns, title: o.init.title.clone(), icon: Arc::new(o.init.icon), size: o.init.size, step: 0, settled: SHOWN, modal: o.init.modal, textures: Textures::default(), out: Vec::new() };
             let f = move |raw: egui::RawInput| {
                 let input = wire::encode(&raw);
                 let state = unsafe { (w.fns.frame)(w.win, Bytes::of(&input), &BytesOut::new(&mut w.out)) };

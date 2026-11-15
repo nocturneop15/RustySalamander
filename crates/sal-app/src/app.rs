@@ -6689,7 +6689,7 @@ impl App {
             }
         }
         self.frame(ctx);
-        self.plugin_windows.show(ctx, self.hwnd, animated(self.cfg.animations));
+        self.plugin_windows.show(ctx, self.hwnd, animated(self.cfg.animations), crate::dialogwin::holds_owner(&self.dialog_places));
         self.diag_menu(ctx);
         self.diag_dialog(ctx);
         self.diag_view(ctx);

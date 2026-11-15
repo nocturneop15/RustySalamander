@@ -19,6 +19,28 @@ pub struct Init {
     pub icon: egui::IconData,
     /// The inner size, in points.
     pub size: [f32; 2],
+    /// The program's window takes no input while this one is open (a
+    /// warning to read before going on). Last: a program before it reads
+    /// the fields above and leaves this out (bincode allows trailing bytes),
+    /// so the window shows there, only not modal.
+    pub modal: bool,
+}
+
+/// [`Init`] as plugins before [`Init::modal`] send it.
+#[derive(Deserialize)]
+struct InitBefore {
+    egui: String,
+    title: String,
+    icon: egui::IconData,
+    size: [f32; 2],
+}
+
+impl Init {
+    /// The window a plugin opens, from what it sent: as it is, or, from a
+    /// plugin before [`Init::modal`], not modal.
+    pub fn decode(b: &[u8]) -> Option<Init> {
+        decode::<Init>(b).or_else(|| decode::<InitBefore>(b).map(|i| Init { egui: i.egui, title: i.title, icon: i.icon, size: i.size, modal: false }))
+    }
 }
 
 /// What to draw, from one frame of a window.
@@ -76,5 +98,33 @@ mod tests {
         assert_eq!(back.meshes[0].1.vertices, out.meshes[0].1.vertices);
         assert_eq!(back.primitives().len(), 1);
         assert!(decode::<Init>(&[1, 2, 3]).is_none());
+    }
+
+    /// Plugins and programs from before and after `modal` understand each
+    /// other: an old plugin's window isn't modal, and an old program reads
+    /// a new plugin's window without the flag.
+    #[test]
+    fn modal_is_optional_both_ways() {
+        #[derive(Serialize, Deserialize)]
+        struct Old {
+            egui: String,
+            title: String,
+            icon: egui::IconData,
+            size: [f32; 2],
+        }
+        let icon = egui::IconData { rgba: vec![1, 2, 3, 4], width: 1, height: 1 };
+        let new = Init { egui: EGUI.into(), title: "Varování 🦎".into(), icon: icon.clone(), size: [480.0, 200.0], modal: true };
+        let back = Init::decode(&encode(&new)).unwrap();
+        assert!(back.modal);
+        assert_eq!((back.title.as_str(), back.size), ("Varování 🦎", [480.0, 200.0]));
+        // an old plugin's window
+        let old = Old { egui: EGUI.into(), title: "Insert tape".into(), icon, size: [480.0, 120.0] };
+        let back = Init::decode(&encode(&old)).unwrap();
+        assert!(!back.modal);
+        assert_eq!(back.title, "Insert tape");
+        // an old program reading a new plugin's window
+        let read: Old = decode(&encode(&new)).expect("trailing bytes allowed");
+        assert_eq!(read.title, "Varování 🦎");
+        assert!(Init::decode(&[1, 2, 3]).is_none());
     }
 }

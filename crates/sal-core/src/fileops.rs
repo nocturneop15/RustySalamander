@@ -375,8 +375,6 @@ impl Ctx<'_> {
     fn copy_file_data(&mut self, src: &Path, dst: &Path) -> io::Result<(u64, Option<[u8; 32]>)> {
         let md = fs::metadata(src)?;
         self.progress.verifying = false;
-        let mut hasher = (self.verify == Verify::Checksum).then(Sha256::new);
-        let mut input = fs::File::open(src)?;
         // clear read-only on an existing target so it can be overwritten
         if let Ok(dmd) = fs::metadata(dst) {
             let mut perms = dmd.permissions();
@@ -386,6 +384,15 @@ impl Ctx<'_> {
                 fs::set_permissions(dst, perms)?;
             }
         }
+        // Windows copies it: on a network drive the server copies the data
+        // itself (SMB server-side copy) instead of sending it here and back.
+        // A checksum needs the bytes here anyway, so that one reads them.
+        #[cfg(windows)]
+        if self.verify != Verify::Checksum {
+            return self.system_copy(src, dst, &md);
+        }
+        let mut hasher = (self.verify == Verify::Checksum).then(Sha256::new);
+        let mut input = fs::File::open(src)?;
         let mut output = fs::File::create(dst)?;
         let mut total = 0u64;
         let result = (|| -> io::Result<()> {
@@ -429,6 +436,90 @@ impl Ctx<'_> {
         };
         fs::set_permissions(dst, md.permissions())?;
         Ok((total, sum))
+    }
+
+    /// [`Self::copy_file_data`] by `CopyFileExW`, which lets an SMB server
+    /// (or an ODX-capable SAN) copy the data without it passing through this
+    /// computer. Checks the sizes with [`Verify::Size`].
+    #[cfg(windows)]
+    fn system_copy(&mut self, src: &Path, dst: &Path, md: &fs::Metadata) -> io::Result<(u64, Option<[u8; 32]>)> {
+        use std::ffi::c_void;
+        use windows_sys::Win32::Foundation::{ERROR_REQUEST_ABORTED, HANDLE};
+        use windows_sys::Win32::Storage::FileSystem::{CopyFileExW, LPPROGRESS_ROUTINE_CALLBACK_REASON};
+        // winbase.h (in windows-sys behind WindowsProgramming)
+        const PROGRESS_CONTINUE: u32 = 0;
+        const PROGRESS_CANCEL: u32 = 1;
+        const COPY_FILE_ALLOW_DECRYPTED_DESTINATION: u32 = 0x8;
+
+        struct Data<'c, 'a> {
+            ctx: &'c mut Ctx<'a>,
+            start: u64,
+            len: u64,
+            cancelled: bool,
+        }
+        unsafe extern "system" fn routine(
+            _total: i64,
+            done: i64,
+            _stream_size: i64,
+            _stream_done: i64,
+            _stream: u32,
+            _reason: LPPROGRESS_ROUTINE_CALLBACK_REASON,
+            _from: HANDLE,
+            _to: HANDLE,
+            data: *const c_void,
+        ) -> u32 {
+            // SAFETY: `data` is the `Data` below, alive for the whole call,
+            // and the routine runs on this thread
+            let d = unsafe { &mut *(data as *mut Data) };
+            // streams beyond the main one count too: not past the file's size
+            d.ctx.progress.bytes_done = d.start + (done.max(0) as u64).min(d.len);
+            if d.ctx.report(false).is_err() {
+                d.cancelled = true;
+                return PROGRESS_CANCEL;
+            }
+            PROGRESS_CONTINUE
+        }
+
+        let (from, to) = (long_wide(src)?, long_wide(dst)?);
+        let len = md.len();
+        let mut data = Data { start: self.progress.bytes_done, len, cancelled: false, ctx: self };
+        // SAFETY: both names end in a NUL; `data` outlives the call
+        let ok = unsafe { CopyFileExW(from.as_ptr(), to.as_ptr(), Some(routine), &mut data as *mut Data as *const c_void, std::ptr::null_mut(), COPY_FILE_ALLOW_DECRYPTED_DESTINATION) };
+        let cancelled = data.cancelled;
+        let start = data.start;
+        if ok == 0 {
+            let e = io::Error::last_os_error();
+            let _ = fs::remove_file(dst);
+            if cancelled || e.raw_os_error() == Some(ERROR_REQUEST_ABORTED as i32) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            return Err(e);
+        }
+        self.progress.bytes_done = start + len;
+        let result = (|| -> io::Result<()> {
+            // times and attributes came with the copy
+            if self.verify != Verify::None {
+                // on the disk before it is checked (writable for that: a
+                // read-only original gives a read-only copy, set back below)
+                if md.permissions().readonly() {
+                    let mut perms = md.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                    fs::set_permissions(dst, perms)?;
+                }
+                fs::OpenOptions::new().write(true).open(dst)?.sync_all()?;
+                // what the original has now: it changed while copied if not `len`
+                let now = fs::metadata(src)?.len();
+                self.check_copy(src, dst, len, now, None)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            let _ = fs::remove_file(dst);
+            return Err(e);
+        }
+        fs::set_permissions(dst, md.permissions())?;
+        Ok((len, None))
     }
 
     /// Copy `src` with everything below it.
@@ -476,8 +567,9 @@ impl Ctx<'_> {
         if fs::symlink_metadata(dst).is_ok() {
             let is_dir = src.is_dir();
             if is_dir && dst.is_dir() {
-                // merge directories: move children one by one
-                return self.move_by_copy(src, dst);
+                // merge directories: move children one by one (each renamed
+                // when it can be, so nothing is copied on the same volume)
+                return self.merge_dirs(src, dst);
             }
             if !self.resolve_conflict(src, dst)? {
                 self.summary.skipped += 1;
@@ -490,8 +582,13 @@ impl Ctx<'_> {
         // fast path: rename within a volume
         self.progress.current = src.to_path_buf();
         self.report(true)?;
-        match fs::rename(src, dst) {
-            Ok(()) => {
+        let renamed = self.attempt(src, |_| match fs::rename(src, dst) {
+            Ok(()) => Ok(true),
+            Err(e) if rename_needs_copy(&e) => Ok(false),
+            Err(e) => Err(e),
+        })?;
+        match renamed {
+            Some(true) => {
                 let (f, b) = measure(&[dst.to_path_buf()]);
                 self.progress.files_done += f;
                 self.progress.bytes_done += b;
@@ -504,8 +601,42 @@ impl Ctx<'_> {
                 }
                 Ok(true)
             }
-            Err(_) => self.move_by_copy(src, dst),
+            Some(false) => self.move_by_copy(src, dst),
+            None => {
+                // skipped after the error: done with, for the progress
+                let (f, b) = measure(&[src.to_path_buf()]);
+                self.progress.files_done += f;
+                self.progress.bytes_done += b * self.passes();
+                Ok(false)
+            }
         }
+    }
+
+    /// Move the contents of the directory `src` into the existing `dst`,
+    /// item by item, then remove `src` when all of it went.
+    fn merge_dirs(&mut self, src: &Path, dst: &Path) -> Step {
+        if dst.starts_with(src) {
+            let e = io::Error::new(io::ErrorKind::InvalidInput, "cannot move a directory into itself");
+            return match self.obs.error(src, &e) {
+                ErrorAction::Cancel => Err(()),
+                _ => Ok(false),
+            };
+        }
+        let children = match self.attempt(src, |_| fs::read_dir(src)?.map(|e| e.map(|e| e.path())).collect::<io::Result<Vec<_>>>())? {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+        let mut all_ok = true;
+        for child in children {
+            let name = child.file_name().unwrap_or_default();
+            all_ok &= self.move_item(&child, &dst.join(name))?;
+        }
+        if !all_ok {
+            // what was skipped stays where it was, in its folder
+            return Ok(false);
+        }
+        // empty now: deleting it counts nothing
+        self.delete_tree(src, false)
     }
 
     /// How many times each byte is read: twice when the copies are read back.
@@ -628,6 +759,41 @@ fn new_ctx<'a>(obs: &'a mut dyn OpObserver, sources: &[PathBuf]) -> Ctx<'a> {
         buf: vec![0; 1 << 20],
         verify: Verify::None,
         sums: Vec::new(),
+    }
+}
+
+/// `p` for a wide Windows API, NUL-terminated: absolute and with the `\\?\`
+/// (or `\\?\UNC\`) prefix, so paths beyond `MAX_PATH` work as they do in std.
+#[cfg(windows)]
+fn long_wide(p: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let abs = std::path::absolute(p)?;
+    let wide: Vec<u16> = abs.as_os_str().encode_wide().collect();
+    let text = abs.to_string_lossy();
+    let mut out: Vec<u16> = if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
+        wide
+    } else if let Some(rest) = wide.strip_prefix(&[b'\\' as u16, b'\\' as u16][..]) {
+        r"\\?\UNC\".encode_utf16().chain(rest.iter().copied()).collect()
+    } else {
+        r"\\?\".encode_utf16().chain(wide).collect()
+    };
+    out.push(0);
+    Ok(out)
+}
+
+/// Whether a failed rename means the target is on another volume (or a file
+/// system that cannot rename), so a move has to copy and delete. Other
+/// errors (in use, access denied) would fail the copy's delete too.
+fn rename_needs_copy(e: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        // ERROR_INVALID_FUNCTION, ERROR_NOT_SAME_DEVICE, ERROR_NOT_SUPPORTED
+        matches!(e.raw_os_error(), Some(1 | 17 | 50))
+    }
+    #[cfg(not(windows))]
+    {
+        // EXDEV
+        e.raw_os_error() == Some(18)
     }
 }
 
@@ -1012,12 +1178,80 @@ mod tests {
         assert!(!src.join("dir").exists() && dst.join("dir/a.txt").exists());
         assert_eq!(fs::read_to_string(src.join("m.sha256")).unwrap(), format!("{ABC} *dir/a.txt\n"), "kept where the originals were");
         assert_eq!(fs::read_to_string(dst.join("m.sha256")).unwrap(), format!("{ABC} *dir/a.txt\n"));
-        // merging into a folder that exists copies, checks, then deletes
+        // merging into a folder that exists renames what is inside it
         fs::create_dir_all(src.join("dir")).unwrap();
         fs::write(src.join("dir").join("b.txt"), "abc").unwrap();
         let s = transfer_with(OpKind::Move, &[src.join("dir")], &dst, &options, &mut Auto(ConflictAction::Cancel));
-        assert_eq!((s.files, s.verified, s.renamed), (1, 1, 0));
+        assert_eq!((s.files, s.verified, s.renamed), (1, 0, 1));
         assert!(!src.join("dir").exists() && dst.join("dir/b.txt").exists());
+    }
+
+    /// A move into a folder of the same name renames each item inside it
+    /// (nothing is copied on one volume), merging deeper where both have a
+    /// folder, and asks about files both have.
+    #[test]
+    fn merging_move_renames_children() {
+        let t = tempfile::tempdir().unwrap();
+        let (src, dst) = (t.path().join("src"), t.path().join("dst"));
+        fs::create_dir_all(src.join("Photos/2024")).unwrap();
+        fs::create_dir_all(src.join("Photos/2025")).unwrap();
+        fs::create_dir_all(dst.join("Photos/2024")).unwrap();
+        fs::write(src.join("Photos/2024/a.jpg"), "new").unwrap();
+        fs::write(src.join("Photos/2024/b.jpg"), "b").unwrap();
+        fs::write(src.join("Photos/2025/c.jpg"), "c").unwrap();
+        fs::write(dst.join("Photos/2024/a.jpg"), "old").unwrap();
+        fs::write(dst.join("Photos/2024/keep.jpg"), "k").unwrap();
+        let s = transfer(OpKind::Move, &[src.join("Photos")], &dst, &mut Auto(ConflictAction::Overwrite));
+        assert!(!s.cancelled);
+        assert_eq!((s.files, s.renamed, s.skipped), (3, 3, 0));
+        assert!(!src.join("Photos").exists());
+        assert_eq!(fs::read_to_string(dst.join("Photos/2024/a.jpg")).unwrap(), "new");
+        assert!(dst.join("Photos/2024/keep.jpg").exists() && dst.join("Photos/2025/c.jpg").exists());
+
+        // a skipped file keeps its folder (and what is left in it) at the source
+        fs::create_dir_all(src.join("Photos")).unwrap();
+        fs::write(src.join("Photos/x.jpg"), "1").unwrap();
+        fs::write(dst.join("Photos/x.jpg"), "2").unwrap();
+        fs::write(src.join("Photos/y.jpg"), "3").unwrap();
+        let s = transfer(OpKind::Move, &[src.join("Photos")], &dst, &mut Auto(ConflictAction::Skip));
+        assert_eq!((s.files, s.skipped), (1, 1));
+        assert!(src.join("Photos/x.jpg").exists() && !src.join("Photos/y.jpg").exists());
+        assert_eq!(fs::read_to_string(dst.join("Photos/x.jpg")).unwrap(), "2");
+    }
+
+    /// The system copy keeps times and the read-only attribute, checks sizes,
+    /// and copies paths beyond MAX_PATH.
+    #[test]
+    fn system_copy_keeps_attributes_and_long_paths() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("ro.txt");
+        fs::write(&src, "read only").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_500_000_000);
+        fs::File::options().write(true).open(&src).unwrap().set_modified(old).unwrap();
+        let mut perms = fs::metadata(&src).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&src, perms).unwrap();
+        let mut deep = t.path().join("long");
+        while deep.as_os_str().len() < 300 {
+            deep.push("a_rather_long_folder_name_here");
+        }
+        for out in [t.path().join("out"), deep] {
+            fs::create_dir_all(&out).unwrap();
+            let options = TransferOptions { verify: Verify::Size, ..Default::default() };
+            let s = transfer_with(OpKind::Copy, std::slice::from_ref(&src), &out, &options, &mut Auto(ConflictAction::Cancel));
+            assert_eq!((s.files, s.verified), (1, 1), "{}", out.display());
+            let md = fs::metadata(out.join("ro.txt")).unwrap();
+            assert!(md.permissions().readonly());
+            assert_eq!(md.modified().unwrap(), old);
+            assert_eq!(fs::read_to_string(out.join("ro.txt")).unwrap(), "read only");
+            // again over the read-only copy
+            let s = transfer_with(OpKind::Copy, std::slice::from_ref(&src), &out, &options, &mut Auto(ConflictAction::Overwrite));
+            assert_eq!(s.files, 1);
+        }
+        let mut perms = fs::metadata(&src).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&src, perms).unwrap();
     }
 
     /// Overwrite All answered inside one merged folder holds for the next

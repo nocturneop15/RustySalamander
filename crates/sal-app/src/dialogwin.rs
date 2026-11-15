@@ -399,6 +399,21 @@ fn enable(owner: isize, on: bool) {
 #[cfg(not(windows))]
 fn enable(_: isize, _: bool) {}
 
+/// Whether one of the program's modal dialogs keeps the main window
+/// disabled now.
+pub fn holds_owner(places: &Places) -> bool {
+    places.values().any(|p| p.disabled_owner)
+}
+
+/// A plugin's modal window opens (`hold`: the main window `owner` takes no
+/// input) or closes (it takes input again and comes to the front).
+pub fn hold_owner(owner: isize, hold: bool) {
+    enable(owner, !hold);
+    if !hold {
+        activate(owner);
+    }
+}
+
 /// Bring the main window to the front, but only while one of our windows is
 /// in the foreground: a job finishing in the background must not steal it.
 fn activate(owner: isize) {
