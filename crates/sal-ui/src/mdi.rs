@@ -66,6 +66,9 @@ pub const MENU_UP: &str = "\u{F0360}";
 pub const MENU_DOWN: &str = "\u{F035D}";
 pub const CHEVRON_UP: &str = "\u{F0143}";
 pub const CHEVRON_DOWN: &str = "\u{F0140}";
+/// Following a file as it grows (the viewer), and stopping that.
+pub const PLAY: &str = "\u{F040A}";
+pub const PAUSE: &str = "\u{F03E4}";
 
 #[cfg(test)]
 mod tests {

@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme};
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{FontStyle, HighlightState, Theme};
+use syntect::parsing::{ParseState, SyntaxSet};
 use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
 /// Larger files are shown without colors.
@@ -67,14 +67,47 @@ pub fn names() -> &'static [String] {
     })
 }
 
+/// Where coloring stands after a line: carried on from there, the lines
+/// after it are colored as if all the text before them had been.
+#[derive(Clone)]
+pub struct State {
+    highlight: HighlightState,
+    parse: ParseState,
+}
+
+// SAFETY: a `ParseState` can hold an Oniguruma `Region` (the groups a
+// pattern matched), which isn't `Send` only because it wraps a raw pointer.
+// The region is the state's own allocation, with nothing tied to the thread
+// that made it, and a `State` is only ever owned by one thread at a time
+// (moved to the coloring thread, moved back with its result), never shared.
+unsafe impl Send for State {}
+
 /// The colored spans of each line in the syntax `syntax`, with the dark or
 /// the light theme. `None` when the syntax is unknown, or `stop` was set.
+#[cfg(test)]
 pub fn highlight(lines: &[String], syntax: &str, dark: bool, stop: &AtomicBool) -> Option<Vec<Vec<Span>>> {
+    highlight_from(lines, syntax, dark, None, 0, stop).map(|(spans, _)| spans)
+}
+
+/// [`highlight`] from `from` on (the state after the lines before these;
+/// `None`: from the start of the file), and the state after the first
+/// `keep` of them, to carry on from there later.
+pub fn highlight_from(lines: &[String], syntax: &str, dark: bool, from: Option<State>, keep: usize, stop: &AtomicBool) -> Option<(Vec<Vec<Span>>, State)> {
     let ss = syntaxes();
     let syntax = ss.find_syntax_by_name(syntax)?;
-    let mut h = HighlightLines::new(syntax, theme(dark));
+    let theme = theme(dark);
+    let mut h = match from {
+        Some(s) => HighlightLines::from_state(theme, s.highlight, s.parse),
+        None => HighlightLines::new(syntax, theme),
+    };
+    let mut kept = None;
     let mut out = Vec::with_capacity(lines.len());
     for (i, line) in lines.iter().enumerate() {
+        if i == keep {
+            let (highlight, parse) = h.state();
+            kept = Some(State { highlight: highlight.clone(), parse: parse.clone() });
+            h = HighlightLines::from_state(theme, highlight, parse);
+        }
         if i % 256 == 0 && stop.load(Ordering::Relaxed) {
             return None;
         }
@@ -106,7 +139,11 @@ pub fn highlight(lines: &[String], syntax: &str, dark: bool, stop: &AtomicBool) 
         }
         out.push(spans);
     }
-    Some(out)
+    let kept = kept.unwrap_or_else(|| {
+        let (highlight, parse) = h.state();
+        State { highlight, parse }
+    });
+    Some((out, kept))
 }
 
 #[cfg(test)]
@@ -148,5 +185,18 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         assert!(highlight(&lines, "JSON", true, &stop).is_none());
         assert!(highlight(&lines, "No such syntax", true, &AtomicBool::new(false)).is_none());
+    }
+
+    /// Lines colored on from a state are colored as if the whole text had
+    /// been: a string opened on one line goes on in the next.
+    #[test]
+    fn carried_on_from_a_state() {
+        let lines: Vec<String> = ["a = 1", "b = \"\"\"long", "still in the string", "\"\"\"", "c = 2"].map(String::from).to_vec();
+        let stop = AtomicBool::new(false);
+        let whole = highlight(&lines, "Python", true, &stop).unwrap();
+        let (first, after_two) = highlight_from(&lines[..3], "Python", true, None, 2, &stop).unwrap();
+        assert_eq!(first, whole[..3]);
+        let (rest, _) = highlight_from(&lines[2..], "Python", true, Some(after_two), 0, &stop).unwrap();
+        assert_eq!(rest, whole[2..]);
     }
 }

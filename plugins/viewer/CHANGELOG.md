@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.7.0-alpha (2026-11-16)
+
+- **Follows a file as it grows, like `tail -f`:** the ▶ button at the left of the toolbar (or Ctrl+T) shows what is added to the file as it is written, a log for instance, four times a second; ⏸ (Ctrl+T again) stops it. The view goes to the end of the file and stays there as lines come, unless you scroll up to read; scroll back to the end and it follows again. A line written in pieces is shown whole once it is; a log started anew (shorter, or another file in its place) is read anew; a file deleted meanwhile leaves the text as it was. A file too large to show whole shows its last 32 MB instead of its first (*showing last …*), and the oldest text goes as more comes. Colors, search marks and the Hex view follow too: lines added are colored on from the lines before them, without coloring the whole file again. Works with RustySalamander 0.9.4-beta and later.
+
 ## 0.6.4-alpha (2026-11-07)
 
 - **Drawn by the program:** the Viewer's window is shown and drawn by RustySalamander (plugin interface 9), so the plugin no longer carries a graphics library of its own and is much smaller, and the window draws wherever the program's does: also on the processor over Remote Desktop and on Windows 8.1 / Server 2012 R2. Needs RustySalamander 0.9.4-beta or later.

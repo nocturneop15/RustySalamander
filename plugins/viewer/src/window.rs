@@ -2,6 +2,8 @@
 //! a find bar. The windows themselves, on a thread of their own, are
 //! `sal-window`'s.
 
+use std::time::{Duration, Instant};
+
 use sal_core::encoding;
 use sal_plugin_api::{tr, trf};
 use sal_window::egui::{self, Color32, RichText};
@@ -17,7 +19,18 @@ pub struct ViewerWin {
     find: FindBar,
     /// The first line shown: a new search starts there.
     top_line: usize,
+    /// Following the file as it grows (Play), like `tail -f`.
+    following: bool,
+    /// When the file was last looked at for more.
+    polled: Option<Instant>,
+    /// Go to the end of the text (next frame).
+    to_end: bool,
 }
+
+/// How often a followed file is looked at for more.
+const POLL: Duration = Duration::from_millis(250);
+/// A scroll offset past the end of any text (the scroll area stops at its end).
+const TO_END: f32 = 1e10;
 
 /// Finding text (Ctrl+F): what is looked for, and every match.
 #[derive(Default)]
@@ -87,7 +100,32 @@ impl FindBar {
 
 impl ViewerWin {
     pub fn new(doc: Doc) -> ViewerWin {
-        ViewerWin { doc, find: FindBar::default(), top_line: 0 }
+        ViewerWin { doc, find: FindBar::default(), top_line: 0, following: false, polled: None, to_end: false }
+    }
+
+    /// Play: follow the file from its end; Pause: stop.
+    fn set_following(&mut self, on: bool) {
+        self.following = on;
+        if on {
+            self.doc.follow();
+            self.polled = Some(Instant::now());
+            self.to_end = true;
+        }
+    }
+
+    /// While following: what was added to the file since, now and then.
+    fn poll(&mut self, ctx: &egui::Context) {
+        if !self.following {
+            return;
+        }
+        if self.polled.is_none_or(|t| t.elapsed() >= POLL) {
+            self.doc.poll();
+            self.polled = Some(Instant::now());
+            if !self.doc.can_wrap() {
+                self.doc.wrap = false;
+            }
+        }
+        ctx.request_repaint_after(POLL);
     }
 }
 
@@ -104,6 +142,13 @@ impl Content for ViewerWin {
     /// The toolbar (Text/Hex, wrap, encoding, syntax, size), the find bar,
     /// and the text or the bytes.
     fn show(&mut self, ctx: &egui::Context) -> bool {
+        if ctx.input(|i| i.key_pressed(egui::Key::T) && i.modifiers.command) {
+            self.set_following(!self.following);
+        }
+        self.poll(ctx);
+        let mut play = None;
+        let following = self.following;
+        let to_end = std::mem::take(&mut self.to_end);
         let doc = &mut self.doc;
         let find = &mut self.find;
         let wake = {
@@ -137,6 +182,15 @@ impl Content for ViewerWin {
         egui::TopBottomPanel::top("viewer_bar").frame(sal_ui::layout::bar_frame(&ctx.style())).show(ctx, |ui| {
             sal_ui::layout::controls(ui);
             ui.horizontal(|ui| {
+                let (icon, tip) = if following {
+                    (sal_ui::mdi::PAUSE, tr("Pause: stop showing what is added to the file (Ctrl+T)"))
+                } else {
+                    (sal_ui::mdi::PLAY, tr("Play: show what is added to the file as it is written, like a log (Ctrl+T)"))
+                };
+                if ui.selectable_label(following, icon).on_hover_text(tip).clicked() {
+                    play = Some(!following);
+                }
+                ui.separator();
                 ui.selectable_value(&mut doc.hex, false, tr("Text"));
                 ui.selectable_value(&mut doc.hex, true, tr("Hex")).on_hover_text(tr("F4 toggles"));
                 ui.separator();
@@ -191,7 +245,9 @@ impl Content for ViewerWin {
                 }
                 ui.separator();
                 let mut info = trf("{bytes} bytes", &[("bytes", &encoding::format_thousands(doc.file_len))]);
-                if doc.file_len > doc.len() as u64 {
+                if doc.start() > 0 {
+                    info.push_str(&trf(" (showing last {size})", &[("size", &encoding::format_size(doc.len() as u64))]));
+                } else if doc.file_len > doc.len() as u64 {
                     info.push_str(&trf(" (showing first {size})", &[("size", &encoding::format_size(doc.len() as u64))]));
                 }
                 ui.label(info);
@@ -257,7 +313,11 @@ impl Content for ViewerWin {
             let bars = sal_ui::scroll_bar_visibility(ui);
             let marks = Marks::new(ui, &find.hits, find.current);
             if doc.hex {
-                egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).show_rows(ui, row_h, doc.hex_rows(), |ui, range| {
+                let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
+                if to_end {
+                    area = area.vertical_scroll_offset(TO_END);
+                }
+                area.show_rows(ui, row_h, doc.hex_rows(), |ui, range| {
                     for r in range {
                         ui.add(egui::Label::new(RichText::new(doc.hex_line(r)).monospace()).extend());
                     }
@@ -265,7 +325,11 @@ impl Content for ViewerWin {
             } else if doc.wrap {
                 let reveal = find.reveal.then(|| find.current.map(|c| find.hits[c].line)).flatten();
                 find.reveal = false;
-                egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(bars).show(ui, |ui| {
+                let mut area = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
+                if to_end {
+                    area = area.vertical_scroll_offset(TO_END);
+                }
+                area.show(ui, |ui| {
                     for (i, l) in doc.lines.iter().enumerate() {
                         let mut job = line_job(ui, l, doc.line_spans(i), &marks.on_line(i));
                         job.wrap.max_width = ui.available_width();
@@ -276,7 +340,10 @@ impl Content for ViewerWin {
                     }
                 });
             } else {
-                let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars);
+                let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
+                if to_end {
+                    area = area.vertical_scroll_offset(TO_END);
+                }
                 if let Some(hit) = find.current.filter(|_| find.reveal).map(|c| find.hits[c]) {
                     find.reveal = false;
                     // the match's line in the middle, its text in sight
@@ -299,6 +366,10 @@ impl Content for ViewerWin {
                 });
             }
         });
+        if let Some(on) = play {
+            self.set_following(on);
+            ctx.request_repaint();
+        }
         true
     }
 }
@@ -513,5 +584,47 @@ mod tests {
         assert!(!w.find.open && !w.takes_escape(), "Escape closed the bar, not the window");
         frame(&mut w, &[], "");
         assert!(w.find.hits.is_empty(), "no marks without the bar");
+    }
+
+    /// Ctrl+T plays: lines written to the file show up (after a while);
+    /// paused, they don't.
+    #[test]
+    fn play_and_pause() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("app.log");
+        std::fs::write(&file, "start\n").unwrap();
+        let mut w = ViewerWin::new(Doc::open(&file));
+        let ctx = egui::Context::default();
+        let frame = |w: &mut ViewerWin, ctrl_t: bool| {
+            let events = if ctrl_t {
+                vec![egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND }]
+            } else {
+                Vec::new()
+            };
+            let modifiers = if ctrl_t { egui::Modifiers::COMMAND } else { egui::Modifiers::NONE };
+            let _ = ctx.run(egui::RawInput { events, modifiers, ..Default::default() }, |ctx| {
+                w.show(ctx);
+            });
+        };
+        let write = |text: &str| {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(&file).unwrap().write_all(text.as_bytes()).unwrap();
+        };
+        write("paused\n");
+        frame(&mut w, false);
+        assert_eq!(w.doc.lines, ["start"], "not followed yet");
+        frame(&mut w, true);
+        assert!(w.following);
+        assert_eq!(w.doc.lines, ["start", "paused"], "Play catches up at once");
+        write("live\n");
+        w.polled = Some(Instant::now() - POLL);
+        frame(&mut w, false);
+        assert_eq!(w.doc.lines.last().unwrap(), "live");
+        frame(&mut w, true);
+        assert!(!w.following);
+        write("not shown\n");
+        w.polled = None;
+        frame(&mut w, false);
+        assert_eq!(w.doc.lines.last().unwrap(), "live", "paused");
     }
 }
