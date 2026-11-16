@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A plugin's window opening while another of the program's windows is in front comes up over it:** the result of a backup finishing while a viewer was in front stayed hidden until the viewer was closed. A plugin's window now shows whichever window is in front, and comes to the front with the focus (while you work in another program, it only goes above the program's windows).
+
 ## 0.9.10-beta (2026-11-15)
 
 - **Copies on a network drive stay on the server:** files are copied by Windows' own copy (`CopyFileExW`), so on an SMB share the server copies the data itself instead of sending every byte to this computer and back; within one NAS, a copy goes at the speed of its disks, not of the network. It also copies all times, attributes and alternate data streams. A copy checked by checksum still reads the data here (the checksum needs it).

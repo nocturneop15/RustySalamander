@@ -341,6 +341,22 @@ pub fn bring_to_front(places: &Places, key: &str) {
     }
 }
 
+/// Bring the window `h` forward once it is on the screen: to the front with
+/// the focus while one of our windows has the foreground, else only above
+/// the program's other windows (a job finishing while the user works in
+/// another program doesn't take the focus). False while it isn't shown yet.
+pub fn come_forward(h: isize) -> bool {
+    if !is_visible(h) {
+        return false;
+    }
+    if our_app_is_foreground() {
+        set_foreground(h);
+    } else {
+        raise(h);
+    }
+    true
+}
+
 /// The window of the open dialog `key`, once it exists (the owner of a
 /// standard dialog it opens).
 pub fn hwnd(places: &Places, key: &str) -> Option<isize> {

@@ -54,7 +54,9 @@ pub unsafe extern "C" fn repaint(_: *mut c_void, after_ms: u64) {
 /// Draw the program's window (and so the plugins' windows) after `delay`.
 fn wake(delay: Duration) {
     if let Some(ctx) = &*CTX.lock().unwrap() {
-        ctx.request_repaint_after(delay);
+        // the main window's frame shows them all (a repaint asked for another
+        // window, one of the plugins' still hidden, may never come)
+        ctx.request_repaint_after_for(delay, ViewportId::ROOT);
     }
 }
 
@@ -80,7 +82,7 @@ impl Windows {
             let step = self.wins.len();
             let id = ViewportId::from_hash_of(("plugin window", self.serial));
             let wire::Init { title, icon, size, modal, .. } = o.init;
-            self.wins.push(Win { id, key: self.serial, win: o.win, fns: o.fns, title, icon: Arc::new(icon), size, step, settled: 0, modal, textures: Textures::default(), out: Vec::new() });
+            self.wins.push(Win { id, key: self.serial, win: o.win, fns: o.fns, title, icon: Arc::new(icon), size, step, settled: 0, modal, hwnd: None, fronted: false, settled_frames: 0, textures: Textures::default(), out: Vec::new() });
         }
         let held_before = self.holding;
         // a modal window shown: the main window waits (again, should a
@@ -98,6 +100,11 @@ impl Windows {
                     gone.push(w.key);
                 }
             });
+        }
+        // a window still on its way to the screen: the next frame comes
+        // from the main window, whichever of the program's windows is in front
+        if self.wins.iter().any(|w| !w.fronted) {
+            ctx.request_repaint_of(ViewportId::ROOT);
         }
         if gone.is_empty() {
             return;
@@ -135,6 +142,13 @@ struct Win {
     settled: u32,
     /// The main window takes no input while it is open.
     modal: bool,
+    /// Its window on the screen, once found.
+    hwnd: Option<isize>,
+    /// Brought in front of the program's other windows once shown (or
+    /// given up on).
+    fronted: bool,
+    /// Frames it has been shown for, waiting to be brought forward.
+    settled_frames: u32,
     /// Its textures among the program's.
     textures: Textures,
     /// The last frame's output, reused.
@@ -161,6 +175,7 @@ impl Win {
         if self.settled != SHOWN {
             let found = sal_ui::native::thread_window(&self.title);
             if let Some(h) = found {
+                self.hwnd = Some(h);
                 sal_ui::native::set_transitions(h, animations);
                 // over the program's window, on its monitor
                 if let Some(owner) = owner {
@@ -171,8 +186,13 @@ impl Win {
             if found.is_some() || self.settled > 3 {
                 // shown by the next frame's builder
                 self.settled = SHOWN;
+                self.fronted = self.hwnd.is_none();
             }
-            vctx.request_repaint();
+        } else if !self.fronted {
+            // shown from the frame after it settled: in front of the program's
+            // other windows (a result over a viewer left open), not behind them
+            self.settled_frames += 1;
+            self.fronted = self.hwnd.is_none_or(crate::dialogwin::come_forward) || self.settled_frames > 10;
         }
         // the plugin's egui has one window, the main one
         let mut raw = vctx.input(|i| i.raw.clone());
@@ -289,7 +309,7 @@ pub fn take_opened() -> Vec<(String, TestWindow)> {
     std::mem::take(&mut *OPENED.lock().unwrap())
         .into_iter()
         .map(|o| {
-            let mut w = Win { id: ViewportId::ROOT, key: 0, win: o.win, fns: o.fns, title: o.init.title.clone(), icon: Arc::new(o.init.icon), size: o.init.size, step: 0, settled: SHOWN, modal: o.init.modal, textures: Textures::default(), out: Vec::new() };
+            let mut w = Win { id: ViewportId::ROOT, key: 0, win: o.win, fns: o.fns, title: o.init.title.clone(), icon: Arc::new(o.init.icon), size: o.init.size, step: 0, settled: SHOWN, modal: o.init.modal, hwnd: None, fronted: true, settled_frames: 0, textures: Textures::default(), out: Vec::new() };
             let f = move |raw: egui::RawInput| {
                 let input = wire::encode(&raw);
                 let state = unsafe { (w.fns.frame)(w.win, Bytes::of(&input), &BytesOut::new(&mut w.out)) };
