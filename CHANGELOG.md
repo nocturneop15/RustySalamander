@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.11-beta (2026-11-16)
 
 - **A plugin's window opening while another of the program's windows is in front comes up over it:** the result of a backup finishing while a viewer was in front stayed hidden until the viewer was closed. A plugin's window now shows whichever window is in front, and comes to the front with the focus (while you work in another program, it only goes above the program's windows).
 
