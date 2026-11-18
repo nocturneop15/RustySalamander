@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.7.1-alpha (2026-11-18)
+
+- **Scrolls with the keyboard:** ↑ and ↓ move the text a line, Page Up and Page Down a screen, Home and End (also with Ctrl) to the start and the end, ← and → sideways; in the Text and the Hex view alike. While the find box has the keyboard, the keys are its. When following a file, going up stops at what you read; End follows again. Works with RustySalamander 0.9.4-beta and later.
+
 ## 0.7.0-alpha (2026-11-16)
 
 - **Follows a file as it grows, like `tail -f`:** the ▶ button at the left of the toolbar (or Ctrl+T) shows what is added to the file as it is written, a log for instance, four times a second; ⏸ (Ctrl+T again) stops it. The view goes to the end of the file and stays there as lines come, unless you scroll up to read; scroll back to the end and it follows again. A line written in pieces is shown whole once it is; a log started anew (shorter, or another file in its place) is read anew; a file deleted meanwhile leaves the text as it was. A file too large to show whole shows its last 32 MB instead of its first (*showing last …*), and the oldest text goes as more comes. Colors, search marks and the Hex view follow too: lines added are colored on from the lines before them, without coloring the whole file again. Works with RustySalamander 0.9.4-beta and later.

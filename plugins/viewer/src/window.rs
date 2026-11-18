@@ -303,6 +303,7 @@ impl Content for ViewerWin {
         if find.reveal && doc.hex && step.is_some() {
             doc.hex = false;
         }
+        let keys = Keys::read(ctx);
         let top_line = &mut self.top_line;
         egui::CentralPanel::default().frame(sal_ui::layout::content_frame(&ctx.style())).show(ctx, |ui| {
             if let Some(e) = &doc.error {
@@ -312,12 +313,17 @@ impl Content for ViewerWin {
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
             let bars = sal_ui::scroll_bar_visibility(ui);
             let marks = Marks::new(ui, &find.hits, find.current);
+            let pitch = row_h + ui.spacing().item_spacing.y;
+            let page = (ui.available_height() - pitch).max(pitch);
+            let scroll = |area: egui::ScrollArea| keys.jump(area, following && !keys.leaves_end());
             if doc.hex {
                 let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
                 if to_end {
                     area = area.vertical_scroll_offset(TO_END);
                 }
+                area = scroll(area);
                 area.show_rows(ui, row_h, doc.hex_rows(), |ui, range| {
+                    keys.scroll(ui, pitch, page);
                     for r in range {
                         ui.add(egui::Label::new(RichText::new(doc.hex_line(r)).monospace()).extend());
                     }
@@ -329,7 +335,9 @@ impl Content for ViewerWin {
                 if to_end {
                     area = area.vertical_scroll_offset(TO_END);
                 }
+                area = scroll(area);
                 area.show(ui, |ui| {
+                    keys.scroll(ui, pitch, page);
                     for (i, l) in doc.lines.iter().enumerate() {
                         let mut job = line_job(ui, l, doc.line_spans(i), &marks.on_line(i));
                         job.wrap.max_width = ui.available_width();
@@ -347,8 +355,7 @@ impl Content for ViewerWin {
                 if let Some(hit) = find.current.filter(|_| find.reveal).map(|c| find.hits[c]) {
                     find.reveal = false;
                     // the match's line in the middle, its text in sight
-                    let pitch = row_h + ui.spacing().item_spacing.y;
-                    let view = ui.available_size();
+                        let view = ui.available_size();
                     let y = (hit.line as f32 * pitch - view.y / 2.0).max(0.0);
                     let line = &doc.lines[hit.line];
                     let font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -357,7 +364,9 @@ impl Content for ViewerWin {
                     let x = if x1 > view.x * 0.9 { (x0 - view.x / 3.0).max(0.0) } else { 0.0 };
                     area = area.vertical_scroll_offset(y).horizontal_scroll_offset(x);
                 }
+                area = scroll(area);
                 area.show_rows(ui, row_h, doc.lines.len(), |ui, range| {
+                    keys.scroll(ui, pitch, page);
                     *top_line = range.start;
                     for i in range {
                         let job = line_job(ui, &doc.lines[i], doc.line_spans(i), &marks.on_line(i));
@@ -371,6 +380,72 @@ impl Content for ViewerWin {
             ctx.request_repaint();
         }
         true
+    }
+}
+
+/// Scrolling by the keyboard: arrows a line (or a few characters), Page
+/// Up/Down a screen, Ctrl+Home/End (or Home/End) to the start / the end.
+/// Not while a text field (the find bar) has the keyboard.
+#[derive(Default, Clone, Copy)]
+struct Keys {
+    /// Lines down (negative: up).
+    lines: f32,
+    /// Screens down (negative: up).
+    pages: f32,
+    /// Columns right (negative: left).
+    cols: f32,
+    home: bool,
+    end: bool,
+}
+
+impl Keys {
+    fn read(ctx: &egui::Context) -> Keys {
+        if ctx.wants_keyboard_input() {
+            return Keys::default();
+        }
+        ctx.input(|i| {
+            let n = |k: egui::Key| i.num_presses(k) as f32;
+            let alt = i.modifiers.alt;
+            if alt {
+                return Keys::default();
+            }
+            use egui::Key::*;
+            Keys {
+                lines: n(ArrowDown) - n(ArrowUp),
+                pages: n(PageDown) - n(PageUp),
+                cols: n(ArrowRight) - n(ArrowLeft),
+                home: i.key_pressed(Home),
+                end: i.key_pressed(End),
+            }
+        })
+    }
+
+    /// Going up (or to the start) leaves the end a followed file sticks to.
+    fn leaves_end(&self) -> bool {
+        self.lines < 0.0 || self.pages < 0.0 || self.home
+    }
+
+    /// Home / End: straight to the start or the end; sticking to the end
+    /// only while `stick`.
+    fn jump(&self, area: egui::ScrollArea, stick: bool) -> egui::ScrollArea {
+        let area = area.stick_to_bottom(stick);
+        if self.home {
+            area.vertical_scroll_offset(0.0).horizontal_scroll_offset(0.0)
+        } else if self.end {
+            area.vertical_scroll_offset(TO_END)
+        } else {
+            area
+        }
+    }
+
+    /// Lines, pages and columns: scroll the area `ui` is in.
+    fn scroll(&self, ui: &egui::Ui, pitch: f32, page: f32) {
+        let col = ui.fonts(|f| f.glyph_width(&egui::TextStyle::Monospace.resolve(ui.style()), '0'));
+        let delta = egui::vec2(self.cols * col * 4.0, self.lines * pitch + self.pages * page);
+        if delta != egui::Vec2::ZERO {
+            // a positive delta moves the content down: the view up
+            ui.scroll_with_delta_animation(-delta, egui::style::ScrollAnimation::none());
+        }
     }
 }
 
@@ -584,6 +659,54 @@ mod tests {
         assert!(!w.find.open && !w.takes_escape(), "Escape closed the bar, not the window");
         frame(&mut w, &[], "");
         assert!(w.find.hits.is_empty(), "no marks without the bar");
+    }
+
+    /// The arrows, Page Up/Down and Home/End scroll the text and the bytes;
+    /// not while the find bar has the keyboard.
+    #[test]
+    fn keyboard_scrolls() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("a.txt");
+        let text: String = (0..500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, text).unwrap();
+        let mut w = ViewerWin::new(Doc::open(&file));
+        let ctx = egui::Context::default();
+        let clock = std::cell::Cell::new(0.0);
+        let frame = |w: &mut ViewerWin, key: Option<egui::Key>| {
+            let events = key.map(|key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                events: events.into_iter().collect(),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                w.show(ctx);
+            });
+            // scrolling is animated: let the time go by
+            for _ in 0..3 {
+                clock.set(clock.get() + 1.0);
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0))),
+                    time: Some(clock.get()),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    w.show(ctx);
+                });
+            }
+            w.top_line
+        };
+        assert_eq!(frame(&mut w, None), 0);
+        assert_eq!(frame(&mut w, Some(egui::Key::ArrowDown)), 1, "a line down");
+        let page = frame(&mut w, Some(egui::Key::PageDown));
+        assert!(page > 10, "a screen down: {page}");
+        assert_eq!(frame(&mut w, Some(egui::Key::ArrowUp)), page - 1);
+        assert!(frame(&mut w, Some(egui::Key::End)) > 450, "the end");
+        assert_eq!(frame(&mut w, Some(egui::Key::Home)), 0, "the start");
+        w.find.open = true;
+        w.find.focus = true;
+        frame(&mut w, None);
+        assert_eq!(frame(&mut w, Some(egui::Key::PageDown)), 0, "the find field has the keyboard");
     }
 
     /// Ctrl+T plays: lines written to the file show up (after a while);
