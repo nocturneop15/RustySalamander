@@ -108,6 +108,94 @@ mod imp {
         Ok((menu, pidls))
     }
 
+    /// The id of the item at `pos` in `hmenu`, a submenu's too.
+    fn item_id(hmenu: HMENU, pos: u32) -> u32 {
+        use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemInfoW, MENUITEMINFOW, MIIM_ID};
+        let mut info = MENUITEMINFOW { cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32, fMask: MIIM_ID, ..Default::default() };
+        match unsafe { GetMenuItemInfoW(hmenu, pos, true, &mut info) } {
+            Ok(()) => info.wID,
+            Err(_) => u32::MAX,
+        }
+    }
+
+    /// Move the item at `from` in `hmenu` to `to`, a submenu with its items.
+    fn move_item(hmenu: HMENU, from: u32, to: u32) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetMenuItemInfoW, InsertMenuItemW, RemoveMenu, MENUITEMINFOW, MF_BYPOSITION, MIIM_BITMAP, MIIM_DATA, MIIM_FTYPE, MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU,
+        };
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_BITMAP | MIIM_DATA | MIIM_FTYPE | MIIM_ID | MIIM_STATE | MIIM_STRING | MIIM_SUBMENU,
+            ..Default::default()
+        };
+        unsafe {
+            // first the text's length, then the text
+            if GetMenuItemInfoW(hmenu, from, true, &mut info).is_err() {
+                return;
+            }
+            let mut text = vec![0u16; info.cch as usize + 1];
+            info.cch += 1;
+            info.dwTypeData = windows::core::PWSTR(text.as_mut_ptr());
+            if GetMenuItemInfoW(hmenu, from, true, &mut info).is_err() {
+                return;
+            }
+            // RemoveMenu keeps the submenu, which the handler fills when it opens
+            if RemoveMenu(hmenu, from, MF_BYPOSITION).is_ok() {
+                let _ = InsertMenuItemW(hmenu, to, true, &info);
+            }
+        }
+    }
+
+    /// The PIDL of `dir`.
+    fn folder_pidl(dir: &Path) -> Result<Pidls, String> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        }
+        let name = wide(&sal_core::encoding::display_path(dir));
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        unsafe { SHParseDisplayName(PCWSTR(name.as_ptr()), None, &mut pidl, 0, None) }.map_err(|e| format!("{}: {}", dir.display(), e.message()))?;
+        Ok(Pidls(vec![pidl]))
+    }
+
+    /// The menu of the folder `dir`'s background, as Explorer shows it on
+    /// empty space: "New", "Paste", "Properties" and the extensions
+    /// registered for folder backgrounds.
+    fn background_menu(owner: HWND, dir: &Path) -> Result<(IContextMenu, Pidls), String> {
+        let pidls = folder_pidl(dir)?;
+        let pidl = pidls.0[0];
+        let desktop: IShellFolder = unsafe { SHGetDesktopFolder() }.map_err(|e| e.message().to_string())?;
+        // the desktop's own PIDL is empty
+        let folder: IShellFolder = if unsafe { (*pidl).mkid.cb } == 0 {
+            desktop
+        } else {
+            unsafe { desktop.BindToObject(pidl, None) }.map_err(|e| format!("{}: {}", dir.display(), e.message()))?
+        };
+        let menu: IContextMenu = unsafe { folder.CreateViewObject(owner) }.map_err(|e| format!("{}: {}", dir.display(), e.message()))?;
+        Ok((menu, pidls))
+    }
+
+    /// The items' menu, or the background menu of `dir` when there are none.
+    fn menu_for(owner: HWND, items: &[PathBuf], dir: &Path) -> Result<(IContextMenu, Pidls), String> {
+        if items.is_empty() {
+            background_menu(owner, dir)
+        } else {
+            context_menu(owner, items)
+        }
+    }
+
+    /// The shell's "New" menu (folder, shortcut, the registered file types)
+    /// for creating items in `dir`.
+    fn new_menu(dir: &Path) -> Result<(IContextMenu, Pidls), String> {
+        use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+        use windows::Win32::System::Registry::HKEY;
+        use windows::Win32::UI::Shell::{IShellExtInit, CLSID_NewMenu};
+        let pidls = folder_pidl(dir)?;
+        let menu: IContextMenu = unsafe { CoCreateInstance(&CLSID_NewMenu, None, CLSCTX_INPROC_SERVER) }.map_err(|e| e.message().to_string())?;
+        let init: IShellExtInit = menu.cast().map_err(|e| e.message().to_string())?;
+        unsafe { init.Initialize(Some(pidls.0[0] as *const ITEMIDLIST), None, HKEY::default()) }.map_err(|e| e.message().to_string())?;
+        Ok((menu, pidls))
+    }
+
     /// The verb ("open", "properties") of the menu item `id`, if it has one.
     #[cfg(test)]
     fn verb_of(menu: &IContextMenu, id: u32) -> Option<String> {
@@ -159,16 +247,22 @@ mod imp {
     }
 
     thread_local! {
-        static ACTIVE: RefCell<Option<IContextMenu>> = const { RefCell::new(None) };
+        /// The shell menu handler of the open menu, and the menu's own handle.
+        static ACTIVE: RefCell<Option<(IContextMenu, HMENU)>> = const { RefCell::new(None) };
     }
 
     /// Forwards owner-draw and lazy-submenu messages ("Send to", "Open with")
-    /// to the menu handlers while the menu is open.
+    /// to the menu handlers while the menu is open. The opening of the whole
+    /// menu is not theirs: the "New" handler would fill it with its submenu's
+    /// items.
     unsafe extern "system" fn subclass(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
         if matches!(msg, WM_INITMENUPOPUP | WM_DRAWITEM | WM_MEASUREITEM | WM_MENUCHAR) {
             let handled = ACTIVE.with(|a| {
                 let a = a.borrow();
-                let menu = a.as_ref()?;
+                let (menu, root) = a.as_ref()?;
+                if msg == WM_INITMENUPOPUP && wp.0 == root.0 as usize {
+                    return None;
+                }
                 if let Ok(m3) = menu.cast::<IContextMenu3>() {
                     let mut res = LRESULT(0);
                     if m3.HandleMenuMsg2(msg, wp, lp, Some(&mut res)).is_ok() {
@@ -208,7 +302,7 @@ mod imp {
 
     /// Show `hmenu`, whose shell items belong to `menu`, at `at`; the chosen id (0 = none).
     fn track(owner: HWND, hmenu: HMENU, menu: &IContextMenu, at: (i32, i32)) -> u32 {
-        ACTIVE.with(|a| *a.borrow_mut() = Some(menu.clone()));
+        ACTIVE.with(|a| *a.borrow_mut() = Some((menu.clone(), hmenu)));
         let id = unsafe {
             let _ = SetWindowSubclass(owner, Some(subclass), 0x5A1A, 0);
             release_capture(owner);
@@ -240,11 +334,12 @@ mod imp {
         }
     }
 
-    /// Show the shell's own context menu for `items` at `at`; what was picked.
+    /// Show the shell's own context menu for `items` at `at`, with none
+    /// the background menu of `dir`; what was picked.
     pub fn show_classic(owner: isize, items: &[PathBuf], dir: &Path, at: (i32, i32), extended: bool) -> Result<Picked, String> {
         let owner = hwnd(owner);
         let t0 = std::time::Instant::now();
-        let (menu, _pidls) = context_menu(owner, items)?;
+        let (menu, _pidls) = menu_for(owner, items, dir)?;
         let hmenu: HMENU = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
         let flags = CMF_NORMAL | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
         let result = (|| {
@@ -265,8 +360,10 @@ mod imp {
     const MERGED_FIRST: u32 = 0x100;
 
     /// One menu: our `rows` (as in [`show_native`]) and below them the
-    /// shell's items for `items`, without those whose verb is in `skip`
-    /// (lowercase; the commands we already have).
+    /// shell's items for `items` (with none for the background of `dir`),
+    /// without those whose verb is in `skip` (lowercase; the commands we
+    /// already have); those whose verb is in `first` (submenus like "new"
+    /// too) go to the top, above our rows.
     pub fn show_merged(
         owner: isize,
         rows: &[Option<(u32, String, String, bool)>],
@@ -275,11 +372,12 @@ mod imp {
         at: (i32, i32),
         extended: bool,
         skip: &[&str],
+        first: &[&str],
     ) -> Result<Merged, String> {
         use windows::Win32::UI::WindowsAndMessaging::{DeleteMenu, GetMenuItemCount, GetMenuItemID, GetMenuState, MF_BYPOSITION, MF_SEPARATOR};
         let owner = hwnd(owner);
         let t0 = std::time::Instant::now();
-        let (menu, _pidls) = context_menu(owner, items)?;
+        let (menu, _pidls) = menu_for(owner, items, dir)?;
         let hmenu: HMENU = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
         let flags = CMF_NORMAL | CMF_CANRENAME | if extended { CMF_EXTENDEDVERBS } else { 0 };
         let result = (|| {
@@ -301,6 +399,19 @@ mod imp {
                     }
                 }
                 i -= 1;
+            }
+            // the items that go first, in their order
+            let mut moved = 0;
+            for want in first {
+                let n = unsafe { GetMenuItemCount(hmenu) };
+                let found = (moved..n).find(|&i| {
+                    let id = item_id(hmenu, i as u32);
+                    id != u32::MAX && id >= MERGED_FIRST && verb_at(&menu, id, MERGED_FIRST).is_some_and(|v| v.eq_ignore_ascii_case(want))
+                });
+                if let Some(i) = found {
+                    move_item(hmenu, i as u32, moved as u32);
+                    moved += 1;
+                }
             }
             // no separators doubled or at the end
             let is_sep = |i: i32| unsafe { GetMenuState(hmenu, i as u32, MF_BYPOSITION) } & MF_SEPARATOR.0 != 0;
@@ -343,8 +454,9 @@ mod imp {
                 paths.extend(file);
             }
             paths.dedup();
-            for p in &paths {
-                let Ok((menu, _pidls)) = context_menu(HWND::default(), std::slice::from_ref(p)) else { continue };
+            let backgrounds = paths.iter().filter(|p| p.is_dir()).map(|d| background_menu(HWND::default(), d)).collect::<Vec<_>>();
+            for menu in paths.iter().map(|p| context_menu(HWND::default(), std::slice::from_ref(p))).chain(backgrounds) {
+                let Ok((menu, _pidls)) = menu else { continue };
                 if let Ok(hmenu) = unsafe { CreatePopupMenu() } {
                     unsafe {
                         let _ = menu.QueryContextMenu(hmenu, 0, FIRST_ID, LAST_ID, CMF_NORMAL | CMF_CANRENAME);
@@ -426,6 +538,35 @@ mod imp {
             id
         };
         id
+    }
+
+    /// Where the "New" menu's items start in [`show_native_new`].
+    const NEW_FIRST: u32 = 0x100;
+
+    /// [`show_native`] with the shell's "New" submenu for `dir` inserted at
+    /// position `pos` among the rows (all of the "New" menu's items are in
+    /// that submenu). The outer error: there is no "New" menu, nothing was
+    /// shown.
+    pub fn show_native_new(owner: isize, rows: &[Option<(u32, String, String, bool)>], pos: u32, dir: &Path, at: (i32, i32)) -> Result<Result<Merged, String>, String> {
+        let (menu, _pidls) = new_menu(dir)?;
+        let owner = hwnd(owner);
+        let hmenu: HMENU = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
+        append_rows(hmenu, rows);
+        if let Err(e) = unsafe { menu.QueryContextMenu(hmenu, pos, NEW_FIRST, LAST_ID, CMF_NORMAL) } {
+            unsafe {
+                let _ = DestroyMenu(hmenu);
+            }
+            return Err(e.message().to_string());
+        }
+        let result = match track(owner, hmenu, &menu, at) {
+            0 => Ok(Merged::Shell(Picked::Nothing)),
+            id if id < NEW_FIRST => Ok(Merged::Ours(id)),
+            id => pick(&menu, owner, id, NEW_FIRST, dir, at).map(Merged::Shell),
+        };
+        unsafe {
+            let _ = DestroyMenu(hmenu);
+        }
+        Ok(result)
     }
 
     /// The standard "Open" dialog for choosing a program. Returns the path,
@@ -586,6 +727,72 @@ mod imp {
         r
     }
 
+    /// The labels and verbs of `hmenu`'s rows, with submenus (opened as a
+    /// shown menu would open them) indented.
+    #[cfg(test)]
+    fn rows_of(menu: &IContextMenu, hmenu: HMENU, first: u32, depth: usize, out: &mut Vec<(String, Option<String>, u32)>) {
+        use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetSubMenu, MF_BYPOSITION};
+        let n = unsafe { GetMenuItemCount(hmenu) };
+        for i in 0..n {
+            let mut buf = [0u16; 256];
+            let len = unsafe { GetMenuStringW(hmenu, i as u32, Some(&mut buf), MF_BYPOSITION) }.max(0) as usize;
+            let label = format!("{}{}", "  ".repeat(depth), String::from_utf16_lossy(&buf[..len]));
+            let id = unsafe { GetMenuItemID(hmenu, i) };
+            let sub = unsafe { GetSubMenu(hmenu, i) };
+            if !sub.is_invalid() {
+                if let Ok(m3) = menu.cast::<IContextMenu3>() {
+                    let _ = unsafe { m3.HandleMenuMsg2(WM_INITMENUPOPUP, WPARAM(sub.0 as usize), LPARAM(i as isize), None) };
+                }
+                let wid = item_id(hmenu, i as u32);
+                out.push((label, verb_at(menu, wid, first), wid));
+                rows_of(menu, sub, first, depth + 1, out);
+            } else if id != u32::MAX {
+                out.push((label, verb_at(menu, id, first), id));
+            }
+        }
+    }
+
+    /// The rows of the background menu of `dir` (see [`rows_of`]), with the
+    /// item whose verb is `first` moved to the top.
+    #[cfg(test)]
+    pub fn background_rows(dir: &Path, first: Option<&str>) -> Result<Vec<(String, Option<String>, u32)>, String> {
+        use windows::Win32::UI::WindowsAndMessaging::GetMenuItemCount;
+        let (menu, _p) = background_menu(HWND::default(), dir)?;
+        let hmenu = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
+        unsafe { menu.QueryContextMenu(hmenu, 0, FIRST_ID, LAST_ID, CMF_NORMAL) }.map_err(|e| e.message().to_string())?;
+        if let Some(want) = first {
+            let n = unsafe { GetMenuItemCount(hmenu) };
+            let i = (0..n).find(|&i| verb_at(&menu, item_id(hmenu, i as u32), FIRST_ID).is_some_and(|v| v.eq_ignore_ascii_case(want)));
+            move_item(hmenu, i.ok_or(format!("no {want}"))? as u32, 0);
+        }
+        let mut out = Vec::new();
+        rows_of(&menu, hmenu, FIRST_ID, 0, &mut out);
+        unsafe {
+            let _ = DestroyMenu(hmenu);
+        }
+        Ok(out)
+    }
+
+    /// Create an item in `dir` with the "New" menu's row whose verb is `verb`;
+    /// the rows seen.
+    #[cfg(test)]
+    pub fn new_item(dir: &Path, verb: &str) -> Result<Vec<(String, Option<String>, u32)>, String> {
+        let (menu, _p) = new_menu(dir)?;
+        let hmenu = unsafe { CreatePopupMenu() }.map_err(|e| e.message().to_string())?;
+        unsafe { menu.QueryContextMenu(hmenu, 0, NEW_FIRST, LAST_ID, CMF_NORMAL) }.map_err(|e| e.message().to_string())?;
+        let mut out = Vec::new();
+        rows_of(&menu, hmenu, NEW_FIRST, 0, &mut out);
+        let id = out.iter().find(|r| r.1.as_deref().is_some_and(|v| v.eq_ignore_ascii_case(verb))).map(|r| r.2);
+        let r = match id {
+            Some(id) => invoke_at(&menu, HWND::default(), Ok(id), dir, POINT::default(), NEW_FIRST),
+            None => Err(format!("no {verb} in {out:?}")),
+        };
+        unsafe {
+            let _ = DestroyMenu(hmenu);
+        }
+        r.map(|_| out)
+    }
+
     #[cfg(test)]
     pub fn context_menu_for_test(items: &[PathBuf]) -> Result<(IContextMenu, impl Drop), String> {
         context_menu(HWND::default(), items)
@@ -622,10 +829,10 @@ mod imp {
 }
 
 #[cfg(all(windows, test))]
-use imp::verbs;
+use imp::{background_rows, new_item, verbs};
 #[cfg(windows)]
 pub use imp::{
-    arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, pick_save, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up,
+    arm_diag_timer, clipboard_has_files, diag, invoke_verb, pick_file, pick_folder, pick_program, pick_save, screen_point, set_menu_theme, show_classic, show_merged, show_native, show_native_new, warm_up,
 };
 
 #[cfg(not(windows))]
@@ -636,11 +843,15 @@ mod fallback {
         Err("the system context menu is only available on Windows".into())
     }
     /// Elsewhere there is no shell menu to merge.
-    pub fn show_merged(_: isize, _: &[Option<(u32, String, String, bool)>], _: &[PathBuf], _: &Path, _: (i32, i32), _: bool, _: &[&str]) -> Result<Merged, String> {
+    pub fn show_merged(_: isize, _: &[Option<(u32, String, String, bool)>], _: &[PathBuf], _: &Path, _: (i32, i32), _: bool, _: &[&str], _: &[&str]) -> Result<Merged, String> {
         Err("the system context menu is only available on Windows".into())
     }
     /// Elsewhere there are no shell extensions.
     pub fn warm_up(_: Vec<PathBuf>) {}
+
+    pub fn show_native_new(_: isize, _: &[Option<(u32, String, String, bool)>], _: u32, _: &Path, _: (i32, i32)) -> Result<Result<Merged, String>, String> {
+        Err("no shell menus".into())
+    }
     /// Elsewhere there are no shell verbs.
     pub fn invoke_verb(_: isize, _: &[PathBuf], _: &Path, verb: &str) -> Result<(), String> {
         Err(format!("\"{verb}\" is only available on Windows"))
@@ -678,7 +889,9 @@ mod fallback {
 }
 
 #[cfg(not(windows))]
-pub use fallback::{clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, pick_save, screen_point, set_menu_theme, show_classic, show_merged, show_native, warm_up};
+pub use fallback::{
+    clipboard_has_files, invoke_verb, pick_file, pick_folder, pick_program, pick_save, screen_point, set_menu_theme, show_classic, show_merged, show_native, show_native_new, warm_up,
+};
 
 #[cfg(all(test, windows))]
 mod tests {
@@ -738,5 +951,23 @@ mod tests {
         for want in ["copy", "cut", "properties"] {
             assert!(v.iter().any(|x| x.eq_ignore_ascii_case(want)), "{want} missing from {v:?}");
         }
+    }
+
+    /// Empty space has the background menu, with "New" in it, and the
+    /// "New" menu creates files.
+    #[test]
+    fn background_menu_offers_new() {
+        let t = tempfile::tempdir().unwrap();
+        let rows = background_rows(t.path(), None).unwrap();
+        assert!(rows.iter().any(|r| r.1.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("properties"))), "{rows:?}");
+        // "New" moved to the top keeps its submenu
+        let rows = background_rows(t.path(), Some("new")).unwrap();
+        assert_eq!(rows[0].1.as_deref(), Some("New"), "{rows:?}");
+        assert!(!rows[0].0.is_empty() && rows[1].0.starts_with("  ") && rows[1].1.is_some(), "{rows:?}");
+        new_item(t.path(), "NewFolder").unwrap();
+        new_item(t.path(), ".txt").unwrap();
+        let made: Vec<_> = std::fs::read_dir(t.path()).unwrap().flatten().map(|e| e.path()).collect();
+        assert!(made.iter().filter(|p| p.is_dir()).count() == 1, "{made:?}");
+        assert!(made.iter().any(|p| p.extension().is_some_and(|e| e == "txt")), "{made:?}");
     }
 }

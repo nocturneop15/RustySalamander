@@ -52,6 +52,8 @@ pub const INFORMATION_OUTLINE: &str = "\u{F02FD}";
 pub const FOLDER_PLUS_OUTLINE: &str = "\u{F0B9D}";
 pub const REFRESH: &str = "\u{F0450}";
 pub const SELECT_ALL: &str = "\u{F0486}";
+pub const SELECT_OFF: &str = "\u{F0488}";
+pub const SELECT_INVERSE: &str = "\u{F0487}";
 pub const DOTS_HORIZONTAL: &str = "\u{F01D8}";
 /// "From the right pane": the other panel's folder, into the left one.
 pub const REWIND: &str = "\u{F045F}";

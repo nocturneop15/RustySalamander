@@ -1802,35 +1802,64 @@ impl App {
             items
         };
         let menu = CtxMenu { panel, items, dir, pos, can_paste: shellmenu::clipboard_has_files(), plugin };
-        match (self.cfg.context_menu_style, self.hwnd) {
-            (ContextMenuStyle::Classic, _) => self.show_classic(ctx, menu.items, menu.dir, pos, from_mouse),
-            (ContextMenuStyle::Windows11, Some(h)) => {
-                let (actions, native) = self.native_rows(&menu, false);
-                let at = self.menu_point(ctx, h, pos, from_mouse);
-                let id = shellmenu::show_native(h, &native, at);
-                if id > 0 {
-                    self.run_menu_action(ctx, menu, actions[id as usize - 1]);
-                }
-            }
-            (ContextMenuStyle::Windows11Full, Some(h)) => {
-                let (actions, native) = self.native_rows(&menu, true);
-                let at = self.menu_point(ctx, h, pos, from_mouse);
-                let targets = if menu.items.is_empty() { vec![menu.dir.clone()] } else { menu.items.clone() };
-                // the shell's copies of what our part already has
-                let skip: &[&str] = if menu.items.is_empty() {
-                    &["paste", "properties"]
-                } else {
-                    &["open", "openas", "cut", "copy", "paste", "delete", "rename", "properties", "copyaspath"]
-                };
-                let extended = ctx.input(|i| i.modifiers.shift);
-                match shellmenu::show_merged(h, &native, &targets, &menu.dir, at, extended, skip) {
-                    Ok(Merged::Ours(id)) => self.run_menu_action(ctx, menu, actions[id as usize - 1]),
-                    Ok(Merged::Shell(picked)) => self.shell_picked(ctx, Ok(picked), menu.items, targets),
-                    Err(e) => self.error(e),
-                }
-            }
+        let Some(h) = self.hwnd else {
             // no native window (tests): the menu drawn by the app
-            (ContextMenuStyle::Windows11 | ContextMenuStyle::Windows11Full, None) => self.ctx_menu = Some(menu),
+            self.ctx_menu = Some(menu);
+            return;
+        };
+        let at = self.menu_point(ctx, h, pos, from_mouse);
+        match self.cfg.context_menu_style {
+            ContextMenuStyle::Minimal => self.show_minimal(ctx, h, menu, at),
+            ContextMenuStyle::Full => self.show_full(ctx, h, menu, at),
+        }
+    }
+
+    /// The minimal menu: the program's commands, on empty space with the
+    /// shell's "New" submenu (which has "Folder") in place of "New folder".
+    fn show_minimal(&mut self, ctx: &egui::Context, h: isize, menu: CtxMenu, at: (i32, i32)) {
+        let (actions, native) = self.native_rows(&menu, false);
+        let new_at = actions
+            .iter()
+            .position(|a| *a == MenuAction::NewFolder)
+            .and_then(|i| native.iter().position(|r| r.as_ref().is_some_and(|r| r.0 == i as u32 + 1)))
+            .filter(|_| menu.items.is_empty() && !menu.plugin);
+        let picked = match new_at {
+            Some(row) => {
+                let mut rows = native.clone();
+                rows.remove(row);
+                shellmenu::show_native_new(h, &rows, row as u32, &menu.dir, at).unwrap_or_else(|e| {
+                    shellmenu::diag(&format!("no New menu: {e}"));
+                    Ok(Merged::Ours(shellmenu::show_native(h, &native, at)))
+                })
+            }
+            None => Ok(Merged::Ours(shellmenu::show_native(h, &native, at))),
+        };
+        match picked {
+            Ok(Merged::Ours(0)) => {}
+            Ok(Merged::Ours(id)) => self.run_menu_action(ctx, menu, actions[id as usize - 1]),
+            Ok(Merged::Shell(picked)) => self.shell_picked(ctx, Ok(picked), Vec::new(), vec![menu.dir.clone()]),
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// The full menu: the program's commands and below them everything the
+    /// shell offers for the items (on empty space for the folder's
+    /// background, with "New" first), but the commands we already have.
+    fn show_full(&mut self, ctx: &egui::Context, h: isize, menu: CtxMenu, at: (i32, i32)) {
+        let (actions, native) = self.native_rows(&menu, true);
+        let targets = if menu.items.is_empty() { vec![menu.dir.clone()] } else { menu.items.clone() };
+        let skip: &[&str] = if menu.items.is_empty() {
+            &["paste", "properties"]
+        } else {
+            &["open", "openas", "cut", "copy", "paste", "delete", "rename", "properties", "copyaspath"]
+        };
+        let extended = ctx.input(|i| i.modifiers.shift);
+        // on empty space the shell's "New" first, as in the minimal menu
+        let first: &[&str] = if menu.items.is_empty() { &["new"] } else { &[] };
+        match shellmenu::show_merged(h, &native, &menu.items, &menu.dir, at, extended, skip, first) {
+            Ok(Merged::Ours(id)) => self.run_menu_action(ctx, menu, actions[id as usize - 1]),
+            Ok(Merged::Shell(picked)) => self.shell_picked(ctx, Ok(picked), menu.items, targets),
+            Err(e) => self.error(e),
         }
     }
 
@@ -1860,9 +1889,9 @@ impl App {
         }
     }
 
-    /// The Windows 11 style menu as native menu rows (ids from 1) and the
-    /// action of each id; `full`: without "Show more options", for the menu
-    /// that has the shell's items below.
+    /// The program's menu as native menu rows (ids from 1) and the action
+    /// of each id; `full`: for the menu that has the shell's items below,
+    /// without "Show more options" and "New folder" (the shell has "New").
     fn native_rows(&self, menu: &CtxMenu, full: bool) -> (Vec<MenuAction>, Vec<shellmenu::NativeRow>) {
         let (top, rows) = self.menu_model(menu);
         let mut actions = Vec::new();
@@ -1879,7 +1908,7 @@ impl App {
         }
         for row in &rows {
             match row {
-                ctxmenu::Row::Entry(e) if full && e.action == MenuAction::MoreOptions => {}
+                ctxmenu::Row::Entry(e) if full && matches!(e.action, MenuAction::MoreOptions | MenuAction::NewFolder) => {}
                 ctxmenu::Row::Entry(e) => add(e, &mut native),
                 ctxmenu::Row::Separator => native.push(None),
             }
@@ -1901,19 +1930,6 @@ impl App {
         }
     }
 
-    /// The full shell menu; for the background it is the folder's own menu.
-    fn show_classic(&mut self, ctx: &egui::Context, items: Vec<PathBuf>, dir: PathBuf, pos: egui::Pos2, from_mouse: bool) {
-        let Some(h) = self.hwnd else {
-            self.error(tr("The system context menu needs the application window."));
-            return;
-        };
-        let targets = if items.is_empty() { vec![dir.clone()] } else { items.clone() };
-        let at = self.menu_point(ctx, h, pos, from_mouse);
-        let extended = ctx.input(|i| i.modifiers.shift);
-        let picked = shellmenu::show_classic(h, &targets, &dir, at, extended);
-        self.shell_picked(ctx, picked, items, targets);
-    }
-
     /// Do what was picked among the shell's items: rename and delete are
     /// the panel's own, whatever the shell ran may have changed sizes.
     fn shell_picked(&mut self, ctx: &egui::Context, picked: Result<Picked, String>, items: Vec<PathBuf>, targets: Vec<PathBuf>) {
@@ -1929,7 +1945,7 @@ impl App {
         }
     }
 
-    /// Items of the Windows 11 style menu: (icon-row commands, list).
+    /// Items of the program's menu: (icon-row commands, list).
     fn menu_model(&self, menu: &CtxMenu) -> (Vec<ctxmenu::Entry>, Vec<ctxmenu::Row>) {
         let ov = &self.cfg.shortcuts;
         let key = |c: Cmd| menu_key(ov, c);
@@ -1967,22 +1983,23 @@ impl App {
             rows.push(ctxmenu::Row::Entry(entry(MenuAction::MoreOptions, tr("Show more options"), String::new(), true)));
             (top, rows)
         } else {
-            let mut top = Vec::new();
+            // "New folder" stands for the shell's "New" submenu where there is a window
+            let mut rows = vec![ctxmenu::Row::Entry(entry(MenuAction::NewFolder, tr("New folder"), key(Cmd::MkDir), true))];
             if menu.can_paste {
-                top.push(entry(MenuAction::Paste, tr("Paste"), key(Cmd::ClipboardPaste), true));
+                rows.push(ctxmenu::Row::Entry(entry(MenuAction::Paste, tr("Paste"), key(Cmd::ClipboardPaste), true)));
             }
-            let rows = vec![
-                ctxmenu::Row::Entry(entry(MenuAction::NewFolder, tr("New folder"), key(Cmd::MkDir), true)),
-                ctxmenu::Row::Entry(entry(MenuAction::Paste, tr("Paste"), key(Cmd::ClipboardPaste), menu.can_paste)),
-                ctxmenu::Row::Entry(entry(MenuAction::Refresh, tr("Refresh"), key(Cmd::Refresh), true)),
+            rows.extend([
+                ctxmenu::Row::Separator,
                 ctxmenu::Row::Entry(entry(MenuAction::SelectAll, tr("Select all"), key(Cmd::SelectAll), true)),
+                ctxmenu::Row::Entry(entry(MenuAction::SelectNone, tr("Unselect all"), key(Cmd::UnselectAll), true)),
+                ctxmenu::Row::Entry(entry(MenuAction::Invert, tr("Invert selection"), key(Cmd::Invert), true)),
                 ctxmenu::Row::Separator,
                 ctxmenu::Row::Entry(entry(MenuAction::Terminal, tr("Open in Terminal"), key(Cmd::Terminal), true)),
                 ctxmenu::Row::Entry(entry(MenuAction::Properties, tr("Properties"), String::new(), true)),
                 ctxmenu::Row::Separator,
                 ctxmenu::Row::Entry(entry(MenuAction::MoreOptions, tr("Show more options"), String::new(), true)),
-            ];
-            (top, rows)
+            ]);
+            (Vec::new(), rows)
         }
     }
 
@@ -2095,18 +2112,27 @@ impl App {
                 self.command(ctx, Cmd::MkDir);
                 Ok(())
             }
-            MenuAction::Refresh => {
-                self.command(ctx, Cmd::Refresh);
-                Ok(())
-            }
             MenuAction::SelectAll => {
                 self.panels[menu.panel].select_all(true);
                 Ok(())
             }
-            MenuAction::MoreOptions => {
-                self.show_classic(ctx, items, menu.dir, menu.pos, false);
+            MenuAction::SelectNone => {
+                self.panels[menu.panel].select_all(false);
                 Ok(())
             }
+            MenuAction::Invert => {
+                self.panels[menu.panel].invert_selection();
+                Ok(())
+            }
+            // the full menu where this one was
+            MenuAction::MoreOptions => match self.hwnd {
+                Some(h) => {
+                    let at = self.menu_point(ctx, h, menu.pos, false);
+                    self.show_full(ctx, h, menu, at);
+                    Ok(())
+                }
+                None => Err(tr("The system context menu needs the application window.").into()),
+            },
         };
         if let Err(e) = res {
             self.error(e);
@@ -4332,17 +4358,8 @@ impl App {
 
                                     ui.label(tr("Style"));
                                     ui.vertical(|ui| {
-                                        ui.radio_value(
-                                            &mut cfg.context_menu_style,
-                                            ContextMenuStyle::Windows11,
-                                            tr("Windows 11 (compact native menu, \"Show more options\" for the full one)"),
-                                        );
-                                        ui.radio_value(
-                                            &mut cfg.context_menu_style,
-                                            ContextMenuStyle::Windows11Full,
-                                            tr("Windows 11, full (the compact menu's commands with all shell extensions below them)"),
-                                        );
-                                        ui.radio_value(&mut cfg.context_menu_style, ContextMenuStyle::Classic, tr("Classic system menu (Windows 10 style, all shell extensions)"));
+                                        ui.radio_value(&mut cfg.context_menu_style, ContextMenuStyle::Minimal, tr("Minimal (the program's commands, \"Show more options\" for the full menu)"));
+                                        ui.radio_value(&mut cfg.context_menu_style, ContextMenuStyle::Full, tr("Full (the program's commands with all shell extensions below them)"));
                                     });
                                     ui.end_row();
                                 });
@@ -9686,19 +9703,6 @@ mod tests {
         click(&mut ui, egui::pos2(900.0, 400.0));
         assert!(ui.app.ctx_menu.is_none());
         assert!(matches!(ui.app.dialog, Dialog::None));
-    }
-
-    #[test]
-    fn classic_style_without_window_reports_error() {
-        let t = tempfile::tempdir().unwrap();
-        menu_files(t.path());
-        let mut ui = Ui::new(t.path(), t.path());
-        ui.app.cfg.context_menu_style = ContextMenuStyle::Classic;
-        let at = row_pos(&ui, 0, "a.txt");
-        right_press(&mut ui, at);
-        right_release(&mut ui, at);
-        assert!(ui.app.ctx_menu.is_none());
-        assert!(matches!(ui.app.dialog, Dialog::Message { .. }), "headless: no window for the native menu");
     }
 
     /// Ctrl+C, Ctrl+X and Ctrl+V in a panel run the shell's copy, cut and

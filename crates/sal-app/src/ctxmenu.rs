@@ -1,6 +1,6 @@
-//! Windows 11 style context menu drawn by the app: an icon row for the
-//! common commands, a short list, and "Show more options" for the classic
-//! shell menu (Windows offers no API to show Explorer's own new menu).
+//! The program's context menu drawn by the app (where there is no window
+//! for the native one): an icon row for the common commands, a short list,
+//! and "Show more options" for the full menu.
 
 use eframe::egui::{self, pos2, vec2, Align2, Color32, FontFamily, FontId, Id, Order, Pos2, Rect, Sense, Stroke, Ui};
 
@@ -18,8 +18,9 @@ pub enum MenuAction {
     Terminal,
     Properties,
     NewFolder,
-    Refresh,
     SelectAll,
+    SelectNone,
+    Invert,
     MoreOptions,
 }
 
@@ -41,8 +42,9 @@ impl MenuAction {
             Terminal => mdi::CONSOLE,
             Properties => mdi::INFORMATION_OUTLINE,
             NewFolder => mdi::FOLDER_PLUS_OUTLINE,
-            Refresh => mdi::REFRESH,
             SelectAll => mdi::SELECT_ALL,
+            SelectNone => mdi::SELECT_OFF,
+            Invert => mdi::SELECT_INVERSE,
             MoreOptions => mdi::DOTS_HORIZONTAL,
         }
     }

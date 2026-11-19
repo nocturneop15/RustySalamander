@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.12-beta (2026-11-19)
+
+- **New on empty space:** right-clicking the empty space of a panel offers Windows' **New** submenu (Folder, Shortcut, Text Document and every other kind of file Windows can create), first in the menu, as in Explorer. **Paste** is there whenever files were copied or cut, and **Select all**, **Unselect all** and **Invert selection** too. In the full menu, the items other programs add for folders (Git, PowerRename…) are those Explorer shows on empty space, not those of the folder as an item.
+- **Two context menu styles, both the program's own:** *Minimal* (the program's commands, *Show more options* for the full menu) and *Full* (the same commands with every shell extension below them). They replace *Windows 11*, *Windows 11, full* and *Classic*: Windows lets no other program show Explorer's own Windows 11 menu, so the names promised what they weren't. A saved *Windows 11* becomes *Minimal*, the other two *Full*. *Show more options* now opens the full menu where the short one was.
+- **Viewer 0.7.1-alpha** is now in the package: it scrolls with the keyboard.
+
 ## 0.9.11-beta (2026-11-16)
 
 - **A plugin's window opening while another of the program's windows is in front comes up over it:** the result of a backup finishing while a viewer was in front stayed hidden until the viewer was closed. A plugin's window now shows whichever window is in front, and comes to the front with the focus (while you work in another program, it only goes above the program's windows).

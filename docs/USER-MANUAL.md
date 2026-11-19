@@ -282,13 +282,12 @@ Copy, move and delete run in the background. You can keep working in the panels 
 
 ### The context menu
 
-**Right-click** an item for its menu. With items selected, the menu is for all selected items. Right-clicking the empty space below the list gives the menu of the folder itself. **Shift+F10** opens the menu from the keyboard.
+**Right-click** an item for its menu. With items selected, the menu is for all selected items. Right-clicking the empty space below the list gives the menu of the folder: **New** (Folder, Shortcut and every kind of file Windows can create, as in Explorer), **Paste** when files were copied or cut, Select all, Unselect all, Invert selection, Open in Terminal and Properties. **Shift+F10** opens the menu from the keyboard.
 
-There are three styles (Settings → General → Context menu → *Style*):
+The menu is RustySalamander's own, in two styles (Settings → General → Context menu → *Style*):
 
-- **Windows 11** (default): a short menu with Cut, Copy, Paste, Rename, Delete, Open, Open with…, Calculate size, Copy as path, Open in Terminal and Properties. **Show more options** opens the full Windows menu.
-- **Windows 11, full:** the same commands, and below them everything the full Windows menu has (Send to, 7-Zip, antivirus, cloud storage and other programs' items) in one menu.
-- **Classic:** the full Windows menu as in Windows 10, with every item. Hold **Shift** while opening it for extra items (such as *Copy as path* on older Windows).
+- **Minimal** (default): on items Cut, Copy, Paste, Rename, Delete, Open, Open with…, Calculate size, Copy as path, Open in Terminal and Properties. **Show more options** opens the full menu.
+- **Full:** the same commands, and below them everything Windows offers there (Send to, 7-Zip, antivirus, cloud storage and other programs' items) in one menu. Hold **Shift** while opening it for extra items.
 
 The full menus can take a moment to open: Windows asks every installed program that adds menu items. RustySalamander loads them in the background when it starts, so the first menu is quicker.
 
@@ -533,7 +532,7 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 | Setting | Choices | Default | What it does |
 |---|---|---|---|
 | Opens on | *Right-click*; *Long right-click: hold, then release (a short right-click selects)*, with a *hold time* of 250–1500 ms | Right-click, 500 ms | How the right mouse button opens the menu. |
-| Style | *Windows 11*, *Windows 11, full*, *Classic system menu* | Windows 11 | Which menu opens (see [The context menu](#the-context-menu)). |
+| Style | *Minimal*, *Full* | Minimal | Which menu opens (see [The context menu](#the-context-menu)). |
 
 #### External programs
 
@@ -710,7 +709,7 @@ Everything is in the program's folder:
 ## 20. Tips and troubleshooting
 
 - **A name looks odd or has `?` in Explorer:** RustySalamander shows every name correctly, including Chinese, Arabic and emoji, and names with characters Windows normally forbids (from Macs or network storage). Copy, rename and delete work on them as on any file.
-- **The full context menu is slow:** a program that adds menu items is slowing it down; Explorer's menu is just as slow. The *Windows 11* style opens at once; *Show more options* opens the full menu only when you need it.
+- **The full context menu is slow:** a program that adds menu items is slowing it down; Explorer's menu is just as slow. The *Minimal* style opens at once; *Show more options* opens the full menu only when you need it.
 - **A network folder takes long to open:** Windows waits for the server; an unreachable server can take up to 30 seconds.
 - **A folder size has a `*`:** some subfolders couldn't be read (no permission). Running the program as administrator lets it read more.
 - **Archives open with Windows instead of in the panel:** the 7-Zip plugin is off or missing; see Settings → Plugins.

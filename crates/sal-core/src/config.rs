@@ -130,13 +130,13 @@ pub enum ContextMenuTrigger {
 /// Which context menu is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ContextMenuStyle {
-    /// Compact Windows 11 style menu with "Show more options".
+    /// The program's commands, "Show more options" for the full menu.
     #[default]
-    Windows11,
-    /// The Windows 11 style commands and every shell extension in one menu.
-    Windows11Full,
-    /// The full classic shell menu (Windows 10 style, all shell extensions).
-    Classic,
+    #[serde(alias = "Windows11")]
+    Minimal,
+    /// The program's commands and every shell extension in one menu.
+    #[serde(alias = "Windows11Full", alias = "Classic")]
+    Full,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,7 +318,7 @@ impl Default for Config {
             fkey_bar: None,
             system_icons: true,
             context_menu_trigger: ContextMenuTrigger::ShortClick,
-            context_menu_style: ContextMenuStyle::Windows11,
+            context_menu_style: ContextMenuStyle::Minimal,
             long_press_ms: 500,
             shortcuts: BTreeMap::new(),
             root_shortcut: None,
@@ -616,13 +616,13 @@ mod tests {
         assert!(!c.always_show_scrollbars && c.show_fkey_bar && c.system_icons);
         let dark: Config = toml::from_str("theme = \"Dark\"").unwrap();
         assert_eq!(dark.theme, ThemeMode::Dark);
-        assert_eq!((c.context_menu_trigger, c.context_menu_style, c.long_press_ms), (ContextMenuTrigger::ShortClick, ContextMenuStyle::Windows11, 500));
+        assert_eq!((c.context_menu_trigger, c.context_menu_style, c.long_press_ms), (ContextMenuTrigger::ShortClick, ContextMenuStyle::Minimal, 500));
         let cm: Config = toml::from_str(
             "context_menu_trigger = \"LongPress\"
 context_menu_style = \"Classic\"",
         )
         .unwrap();
-        assert_eq!((cm.context_menu_trigger, cm.context_menu_style), (ContextMenuTrigger::LongPress, ContextMenuStyle::Classic));
+        assert_eq!((cm.context_menu_trigger, cm.context_menu_style), (ContextMenuTrigger::LongPress, ContextMenuStyle::Full));
         // overrides round-trip; the legacy field is read but never written
         let mut c2 = Config::default();
         c2.shortcuts.insert("copy".into(), vec!["Ctrl+K".into()]);
