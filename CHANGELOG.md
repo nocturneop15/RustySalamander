@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.13-beta (2026-11-20)
+
+- **Show changelog opens a viewer window:** the changes of an update open in the Viewer, as a Markdown file headed with the versions, instead of a narrow box in the update window whose lines were cut off.
+- **Updating in place is the default:** the update window first offers to update this version in its folder; installing the new version in a new folder is the other choice.
+- **Viewer 0.7.2-alpha** is now in the package: it selects text with the mouse and with Shift and the keys (Ctrl+A all), and copies it with Ctrl+C.
+
 ## 0.9.12-beta (2026-11-19)
 
 - **New on empty space:** right-clicking the empty space of a panel offers Windows' **New** submenu (Folder, Shortcut, Text Document and every other kind of file Windows can create), first in the menu, as in Explorer. **Paste** is there whenever files were copied or cut, and **Select all**, **Unselect all** and **Invert selection** too. In the full menu, the items other programs add for folders (Git, PowerRename…) are those Explorer shows on empty space, not those of the folder as an item.

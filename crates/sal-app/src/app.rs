@@ -170,6 +170,8 @@ struct UpdateRow {
     update: crate::update::Update,
     install: Option<crate::update::Install>,
     changelog: Option<crate::update::Changelog>,
+    /// "Show changelog" was pressed: it opens in the viewer once read (or
+    /// the window says why not).
     show_log: bool,
     /// The program: updated in its folder, else installed in a new one.
     in_place: bool,
@@ -179,10 +181,10 @@ struct UpdateRow {
 
 impl UpdateRow {
     /// An update not yet installed, its changelog not yet read. The
-    /// program is installed next to this version unless the person
-    /// chooses to update in place.
+    /// program is updated in its folder unless the person chooses a new
+    /// one.
     fn new(update: crate::update::Update) -> UpdateRow {
-        UpdateRow { update, install: None, changelog: None, show_log: false, in_place: false, own: true }
+        UpdateRow { update, install: None, changelog: None, show_log: false, in_place: true, own: true }
     }
 
     /// How the program is installed (plugins don't care).
@@ -1431,6 +1433,17 @@ impl App {
         match kind {
             OpenKind::Edit => sal_core::shell::edit(p, None).map_err(err),
             OpenKind::View => Err(tr("No viewer is set for this file. Turn on the Viewer plugin in Settings → Plugins, or choose a viewer in Settings → Viewers and editors.").into()),
+        }
+    }
+
+    /// What changed in an update, as a Markdown file in the Viewer plugin's
+    /// window (or what F3 views `.md` files with, without the plugin).
+    fn view_changelog(&self, update: &crate::update::Update, text: &str) -> Result<(), String> {
+        let file = changelog_file(update, text)?;
+        let viewer = self.plugins.active.iter().find_map(|x| (x.id() == "viewer").then(|| x.openers().into_iter().find(|o| o.kind == OpenKind::View).map(|o| (x, o))).flatten());
+        match viewer {
+            Some((plugin, opener)) => plugin.open_file(&opener.id, &file, &self.opener_options(false)).map_err(|e| format!("{}: {e}", display_path(&file))),
+            None => self.view_file(&file, false),
         }
     }
 
@@ -3912,8 +3925,7 @@ impl App {
                             let fits = u.fits();
                             let mut offer = |ui: &mut egui::Ui, action: Option<&str>| {
                                 ui.horizontal(|ui| {
-                                    let log = if row.show_log { tr("Hide changelog") } else { tr("Show changelog") };
-                                    if ui.button(log).clicked() {
+                                    if ui.button(tr("Show changelog")).on_hover_text(tr("Opens the changes in the viewer")).clicked() {
                                         toggle_log = Some(i);
                                     }
                                     if let Some(action) = action {
@@ -3995,11 +4007,8 @@ impl App {
                                     Some(Ok(text)) if text.is_empty() => {
                                         ui.label(RichText::new(tr("The changelog says nothing about these versions.")).weak());
                                     }
-                                    Some(Ok(text)) => {
-                                        layout::well_frame(ui.style()).show(ui, |ui| {
-                                            egui::ScrollArea::vertical().id_salt(("changelog", i)).max_height(240.0).auto_shrink([false, true]).show(ui, |ui| markdown(ui, &text));
-                                        });
-                                    }
+                                    // opened in the viewer (below)
+                                    Some(Ok(_)) => {}
                                     Some(Err(e)) => {
                                         ui.colored_label(ui.visuals().error_fg_color, trf("Could not read the changelog: {error}", &[("error", &e)]));
                                     }
@@ -4062,9 +4071,20 @@ impl App {
                 }
                 if let Some(i) = toggle_log.filter(|&i| i < rows.len()) {
                     let row = &mut rows[i];
-                    row.show_log = !row.show_log;
-                    if row.changelog.is_none() {
+                    row.show_log = true;
+                    // read again when reading failed
+                    if row.changelog.as_ref().is_none_or(|c| matches!(*c.lock().unwrap(), Some(Err(_)))) {
                         row.changelog = Some(crate::update::changelog(ctx, &row.update));
+                    }
+                }
+                // a changelog read: into the viewer
+                for row in rows.iter_mut().filter(|r| r.show_log) {
+                    let log = row.changelog.as_ref().and_then(|c| c.lock().unwrap().clone());
+                    if let Some(Ok(text)) = log.filter(|l| l.as_ref().is_ok_and(|t| !t.is_empty())) {
+                        row.show_log = false;
+                        if let Err(e) = self.view_changelog(&row.update, &text) {
+                            self.error(e);
+                        }
                     }
                 }
                 let to_start: Vec<usize> = if update_all { ready } else { start.into_iter().collect() };
@@ -5955,68 +5975,18 @@ fn update_offer(cfg: &Config, manual: bool) -> Option<crate::update::Offer> {
     Some(crate::update::Offer { plugins: plugins::plugins_dir()?, lang, declined: if manual { Vec::new() } else { cfg.declined_plugins.clone() } })
 }
 
-/// A changelog's Markdown, simply: `##` and `###` headings, `-` bullets,
-/// **bold** and `code`.
-fn markdown(ui: &mut egui::Ui, text: &str) {
-    let body = ui.text_style_height(&egui::TextStyle::Body);
-    for line in text.lines().map(str::trim_end) {
-        if let Some(h) = line.strip_prefix("## ") {
-            ui.add_space(layout::GAP_SMALL);
-            ui.label(RichText::new(h).strong().size(body * 1.15));
-        } else if let Some(h) = line.strip_prefix("### ") {
-            ui.add_space(layout::LINE_GAP);
-            ui.label(RichText::new(h).strong());
-        } else if let Some(item) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-            ui.horizontal_top(|ui| {
-                ui.add_space(layout::INDENT);
-                ui.label("•");
-                let job = inline_markdown(ui, item);
-                ui.label(job);
-            });
-        } else if line.trim().is_empty() {
-            ui.add_space(layout::LINE_GAP);
-        } else if !line.starts_with("# ") {
-            let job = inline_markdown(ui, line.trim_start());
-            ui.label(job);
-        }
-    }
-}
-
-/// A line with **bold** and `code` as a wrapped layout.
-fn inline_markdown(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
-    use egui::text::{LayoutJob, TextFormat};
-    let v = ui.visuals();
-    let normal = TextFormat { font_id: egui::TextStyle::Body.resolve(ui.style()), color: v.text_color(), ..Default::default() };
-    let strong = TextFormat { color: v.strong_text_color(), ..normal.clone() };
-    let code = TextFormat { font_id: egui::TextStyle::Monospace.resolve(ui.style()), color: v.text_color(), background: v.code_bg_color, ..Default::default() };
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = ui.available_width();
-    let mut bold = false;
-    let mut rest = text;
-    while !rest.is_empty() {
-        let star = rest.find("**");
-        let tick = rest.find('`');
-        let fmt = if bold { strong.clone() } else { normal.clone() };
-        match (star, tick) {
-            (Some(s), t) if t.is_none_or(|t| s < t) => {
-                job.append(&rest[..s], 0.0, fmt);
-                bold = !bold;
-                rest = &rest[s + 2..];
-            }
-            (_, Some(t)) => {
-                job.append(&rest[..t], 0.0, fmt);
-                let after = &rest[t + 1..];
-                let end = after.find('`').unwrap_or(after.len());
-                job.append(&after[..end], 0.0, code.clone());
-                rest = after.get(end + 1..).unwrap_or("");
-            }
-            _ => {
-                job.append(rest, 0.0, fmt);
-                rest = "";
-            }
-        }
-    }
-    job
+/// An update's changes in a temporary Markdown file named after it, under
+/// a heading with the versions.
+fn changelog_file(update: &crate::update::Update, text: &str) -> Result<PathBuf, String> {
+    let name = update.name();
+    let version = &update.release.version;
+    let title = if update.new { format!("# {name} {version}") } else { format!("# {name} {} → {version}", update.current) };
+    // a file name of the name, without what Windows forbids in one
+    let safe: String = format!("{name} {version} changelog").chars().map(|c| if "\\/:*?\"<>|".contains(c) || c.is_control() { '-' } else { c }).collect();
+    let dir = plugins::temp_dir("changelog").map_err(|e| e.to_string())?;
+    let file = dir.join(format!("{safe}.md"));
+    std::fs::write(&file, format!("{title}\n\n{text}\n")).map_err(|e| format!("{}: {e}", display_path(&file)))?;
+    Ok(file)
 }
 
 /// A progress bar with square corners.
@@ -10366,9 +10336,7 @@ mod tests {
             let mut rows = vec![UpdateRow::new(program.clone()), UpdateRow::new(plugin.clone())];
             rows[0].install = state.map(|p| Arc::new(Mutex::new(p)));
             rows[1].install = plugin_state.map(|p| Arc::new(Mutex::new(p)));
-            rows[1].show_log = true;
-            rows[1].changelog = Some(Arc::new(Mutex::new(Some(Ok(log.to_owned())))));
-            assert_eq!(rows[0].how(), crate::update::How::NewFolder { own: true }, "a new folder, own plugins along, unless chosen otherwise");
+            assert_eq!(rows[0].how(), crate::update::How::InPlace, "in its folder, unless chosen otherwise");
             ui.app.dialog = Dialog::Update { rows };
             ui.frames(4);
             assert!(matches!(ui.app.dialog, Dialog::Update { .. }), "{name}: open");
@@ -10427,10 +10395,12 @@ mod tests {
         assert_eq!(ui.app.cfg.declined_plugins, ["ftp"]);
         assert!(update_offer(&ui.app.cfg, false).is_none_or(|o| o.declined == ["ftp"]));
         assert!(update_offer(&ui.app.cfg, true).is_none_or(|o| o.declined.is_empty()), "a check from the menu shows it");
-        // the changelog's text, as laid out
-        let job = inline_markdown(&egui::Ui::new(ui.ctx.clone(), egui::LayerId::background(), egui::Id::new("t"), egui::UiBuilder::new()), "a **b** `c` d");
-        let parts: Vec<&str> = job.sections.iter().map(|s| &job.text[s.byte_range.clone()]).collect();
-        assert_eq!(parts, ["a ", "b", " ", "c", " d"]);
+        // the changelog goes to the viewer as a Markdown file named after the update
+        let mut ftp = plugin.clone();
+        ftp.target = Target::Plugin { id: "ftp".into(), name: "FTP / SFTP".into(), dir: t.path().join("plugins").join("ftp") };
+        let file = changelog_file(&ftp, log).unwrap();
+        assert_eq!(file.file_name().unwrap(), "FTP - SFTP 0.6.0-alpha changelog.md");
+        assert_eq!(fs::read_to_string(&file).unwrap(), format!("# FTP / SFTP 0.5.0-alpha → 0.6.0-alpha\n\n{log}\n"));
     }
 
     #[cfg(windows)]
