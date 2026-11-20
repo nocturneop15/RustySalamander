@@ -6,6 +6,7 @@
 mod doc;
 mod find;
 mod highlight;
+mod select;
 #[cfg(test)]
 mod snapshot;
 mod window;

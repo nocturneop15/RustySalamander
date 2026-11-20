@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.7.2-alpha (2026-11-20)
+
+- **Selecting and copying text:** in the Text view, drag the mouse over the text (past the window's edge it scrolls along), Shift+click to extend, double-click for a word. **Shift** with the arrows, Home/End and Page Up/Down selects from where you clicked, or from the first line shown; with **Ctrl**, ←/→ go by words and Home/End to the start and the end of the file. **Ctrl+A** selects all, **Ctrl+C** or Ctrl+Insert copies (lines end with CR LF). The keys without Shift scroll as before; while the find box has the keyboard, they are its. Works with RustySalamander 0.9.4-beta and later.
+
 ## 0.7.1-alpha (2026-11-18)
 
 - **Scrolls with the keyboard:** ↑ and ↓ move the text a line, Page Up and Page Down a screen, Home and End (also with Ctrl) to the start and the end, ← and → sideways; in the Text and the Hex view alike. While the find box has the keyboard, the keys are its. When following a file, going up stops at what you read; End follows again. Works with RustySalamander 0.9.4-beta and later.

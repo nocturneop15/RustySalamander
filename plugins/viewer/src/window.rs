@@ -12,6 +12,7 @@ use sal_window::Content;
 use crate::doc::{Colors, Doc};
 use crate::find::{self, Hit, Query};
 use crate::highlight::{self, Span};
+use crate::select::{Move, Selection, TextPos};
 
 /// A viewer window's content: a file as text or hex.
 pub struct ViewerWin {
@@ -25,6 +26,30 @@ pub struct ViewerWin {
     polled: Option<Instant>,
     /// Go to the end of the text (next frame).
     to_end: bool,
+    /// Selected text (Text view).
+    sel: TextSel,
+}
+
+/// Selecting text with the mouse and Shift+keys, copying it with Ctrl+C.
+#[derive(Default)]
+struct TextSel {
+    sel: Selection,
+    /// The caret was put somewhere (a click, a key); before, Shift+keys
+    /// start at the first line shown.
+    placed: bool,
+    /// Bring the caret into view (it moved by a key).
+    reveal: bool,
+    /// The lines shown last, and the view's height.
+    shown: std::ops::Range<usize>,
+    view_h: f32,
+}
+
+/// A line drawn in the Text view: its line, where it is, and its layout.
+struct Drawn {
+    line: usize,
+    rect: egui::Rect,
+    pos: egui::Pos2,
+    galley: std::sync::Arc<egui::Galley>,
 }
 
 /// How often a followed file is looked at for more.
@@ -100,7 +125,7 @@ impl FindBar {
 
 impl ViewerWin {
     pub fn new(doc: Doc) -> ViewerWin {
-        ViewerWin { doc, find: FindBar::default(), top_line: 0, following: false, polled: None, to_end: false }
+        ViewerWin { doc, find: FindBar::default(), top_line: 0, following: false, polled: None, to_end: false, sel: TextSel::default() }
     }
 
     /// Play: follow the file from its end; Pause: stop.
@@ -305,6 +330,11 @@ impl Content for ViewerWin {
         }
         let keys = Keys::read(ctx);
         let top_line = &mut self.top_line;
+        let ts = &mut self.sel;
+        ts.sel.clamp(&doc.lines);
+        if !doc.hex && doc.error.is_none() {
+            ts.keys(ctx, &doc.lines, *top_line);
+        }
         egui::CentralPanel::default().frame(sal_ui::layout::content_frame(&ctx.style())).show(ctx, |ui| {
             if let Some(e) = &doc.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
@@ -315,6 +345,8 @@ impl Content for ViewerWin {
             let marks = Marks::new(ui, &find.hits, find.current);
             let pitch = row_h + ui.spacing().item_spacing.y;
             let page = (ui.available_height() - pitch).max(pitch);
+            ts.view_h = ui.available_height();
+            let sel_color = ui.visuals().selection.bg_fill;
             let scroll = |area: egui::ScrollArea| keys.jump(area, following && !keys.leaves_end());
             if doc.hex {
                 let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
@@ -336,16 +368,30 @@ impl Content for ViewerWin {
                     area = area.vertical_scroll_offset(TO_END);
                 }
                 area = scroll(area);
+                area = area.drag_to_scroll(false);
                 area.show(ui, |ui| {
                     keys.scroll(ui, pitch, page);
+                    let clip = ui.clip_rect();
+                    let mut drawn = Vec::new();
                     for (i, l) in doc.lines.iter().enumerate() {
-                        let mut job = line_job(ui, l, doc.line_spans(i), &marks.on_line(i));
+                        let (m, eol) = ts.marks(i, l.len(), sel_color, &marks);
+                        let mut job = line_job(ui, l, doc.line_spans(i), &m, eol);
                         job.wrap.max_width = ui.available_width();
-                        let r = ui.add(egui::Label::new(job).wrap());
+                        let d = draw_line(ui, i, egui::Label::new(job).wrap());
                         if reveal == Some(i) {
-                            r.scroll_to_me(Some(egui::Align::Center));
+                            ui.scroll_to_rect(d.rect, Some(egui::Align::Center));
+                        }
+                        // only what is in sight takes the mouse
+                        if d.rect.max.y >= clip.min.y && d.rect.min.y <= clip.max.y {
+                            ts.reveal_in(ui, &d, &doc.lines);
+                            drawn.push(d);
                         }
                     }
+                    if let Some(first) = drawn.first() {
+                        *top_line = first.line;
+                        ts.shown = first.line..drawn.last().map_or(first.line, |d| d.line) + 1;
+                    }
+                    ts.mouse(ui, &drawn, &doc.lines, pitch);
                 });
             } else {
                 let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
@@ -365,13 +411,27 @@ impl Content for ViewerWin {
                     area = area.vertical_scroll_offset(y).horizontal_scroll_offset(x);
                 }
                 area = scroll(area);
+                // the caret's line far off: there first, into view when drawn
+                if ts.reveal && !ts.shown.contains(&ts.sel.caret.line) {
+                    let line = ts.sel.caret.line as f32;
+                    let y = if ts.sel.caret.line < ts.shown.start { line * pitch } else { (line + 1.0) * pitch - ts.view_h + pitch };
+                    area = area.vertical_scroll_offset(y.max(0.0));
+                }
+                area = area.drag_to_scroll(false);
                 area.show_rows(ui, row_h, doc.lines.len(), |ui, range| {
                     keys.scroll(ui, pitch, page);
                     *top_line = range.start;
+                    ts.shown = range.clone();
+                    let mut drawn = Vec::with_capacity(range.len());
                     for i in range {
-                        let job = line_job(ui, &doc.lines[i], doc.line_spans(i), &marks.on_line(i));
-                        ui.add(egui::Label::new(job).extend());
+                        let l = &doc.lines[i];
+                        let (m, eol) = ts.marks(i, l.len(), sel_color, &marks);
+                        let job = line_job(ui, l, doc.line_spans(i), &m, eol);
+                        let d = draw_line(ui, i, egui::Label::new(job).extend());
+                        ts.reveal_in(ui, &d, &doc.lines);
+                        drawn.push(d);
                     }
+                    ts.mouse(ui, &drawn, &doc.lines, pitch);
                 });
             }
         });
@@ -383,9 +443,156 @@ impl Content for ViewerWin {
     }
 }
 
+impl TextSel {
+    /// Ctrl+A selects all, Ctrl+C (Ctrl+Insert) copies, Shift with the
+    /// arrows, Home/End and Page Up/Down selects (with Ctrl by words, to the
+    /// start / the end). Not while a text field has the keyboard.
+    fn keys(&mut self, ctx: &egui::Context, lines: &[String], top_line: usize) {
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        // the style first: the fonts lock the context, as the style does
+        let style = ctx.style();
+        let font = egui::TextStyle::Monospace.resolve(&style);
+        let pitch = style.spacing.item_spacing.y + ctx.fonts(|f| f.row_height(&font));
+        let page = ((self.view_h / pitch) as usize).saturating_sub(1).max(1);
+        let (moves, all, copy) = ctx.input(|i| {
+            let (mut moves, mut all, mut copy) = (Vec::new(), false, false);
+            for ev in &i.events {
+                match ev {
+                    egui::Event::Copy => copy = true,
+                    &egui::Event::Key { key, pressed: true, modifiers: m, .. } if !m.alt => {
+                        use egui::Key::*;
+                        if m.command && !m.shift && key == A {
+                            all = true;
+                        } else if m.command && matches!(key, C | Insert) {
+                            copy = true;
+                        } else if m.shift {
+                            let to = match (key, m.command) {
+                                (ArrowLeft, false) => Move::Left,
+                                (ArrowRight, false) => Move::Right,
+                                (ArrowLeft, true) => Move::WordLeft,
+                                (ArrowRight, true) => Move::WordRight,
+                                (ArrowUp, _) => Move::Up,
+                                (ArrowDown, _) => Move::Down,
+                                (PageUp, _) => Move::PageUp(page),
+                                (PageDown, _) => Move::PageDown(page),
+                                (Home, false) => Move::LineStart,
+                                (End, false) => Move::LineEnd,
+                                (Home, true) => Move::DocStart,
+                                (End, true) => Move::DocEnd,
+                                _ => continue,
+                            };
+                            moves.push(to);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (moves, all, copy)
+        });
+        if all {
+            self.sel = Selection::all(lines);
+            self.placed = true;
+        }
+        if !moves.is_empty() && !self.placed {
+            self.sel = Selection::at(TextPos::new(top_line, 0));
+            self.placed = true;
+        }
+        for to in &moves {
+            self.sel.go(lines, *to, true);
+            self.reveal = true;
+        }
+        if copy && !self.sel.is_empty() {
+            ctx.copy_text(self.sel.text(lines, "\r\n"));
+        }
+    }
+
+    /// Line `line`'s marks: the selection first, then the found text; and
+    /// the color of its line break when that is selected too.
+    fn marks(&self, line: usize, len: usize, color: Color32, found: &Marks) -> (Vec<(usize, usize, Color32)>, Option<Color32>) {
+        let mut m = Vec::new();
+        let mut eol = None;
+        if let Some((a, b, on)) = self.sel.on_line(line, len) {
+            if a < b {
+                m.push((a, b, color));
+            }
+            eol = on.then_some(color);
+        }
+        m.extend(found.on_line(line));
+        (m, eol)
+    }
+
+    /// When the caret moved by a key and its line is drawn: the caret into view.
+    fn reveal_in(&mut self, ui: &egui::Ui, d: &Drawn, lines: &[String]) {
+        if !self.reveal || d.line != self.sel.caret.line {
+            return;
+        }
+        self.reveal = false;
+        let n = lines[d.line][..self.sel.caret.col].chars().count();
+        let at = d.galley.pos_from_ccursor(egui::text::CCursor::new(n)).translate(d.pos.to_vec2());
+        // a little room beside it
+        let room = egui::vec2(ui.fonts(|f| f.glyph_width(&egui::TextStyle::Monospace.resolve(ui.style()), '0')) * 4.0, 0.0);
+        ui.scroll_to_rect(at.expand2(room), None);
+    }
+
+    /// A press puts the caret (Shift+click extends), dragging selects, a
+    /// double-click takes a word; dragging past the edge scrolls.
+    fn mouse(&mut self, ui: &mut egui::Ui, drawn: &[Drawn], lines: &[String], pitch: f32) {
+        let clip = ui.clip_rect();
+        let resp = ui.interact(clip, ui.id().with("select"), egui::Sense::click_and_drag());
+        if resp.hovered() || resp.is_pointer_button_down_on() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+        // a double-click comes with the release: the pointer is where it is
+        if resp.double_clicked() {
+            if let Some(at) = resp.interact_pointer_pos().or(resp.hover_pos()).and_then(|p| pos_at(drawn, lines, p)) {
+                self.sel = Selection::word_at(lines, at);
+                self.placed = true;
+            }
+            return;
+        }
+        let Some(p) = resp.interact_pointer_pos() else { return };
+        let Some(at) = pos_at(drawn, lines, p) else { return };
+        let (pressed, shift) = ui.input(|i| (i.pointer.primary_pressed(), i.modifiers.shift));
+        if resp.is_pointer_button_down_on() {
+            self.sel.put(at, !pressed || shift);
+            self.placed = true;
+            // past the edge: the text comes along
+            let past = |v: f32, lo: f32, hi: f32| if v < lo { lo - v } else if v > hi { hi - v } else { 0.0 };
+            let delta = egui::vec2(past(p.x, clip.min.x, clip.max.x), past(p.y, clip.min.y, clip.max.y)).clamp(egui::Vec2::splat(-3.0 * pitch), egui::Vec2::splat(3.0 * pitch));
+            if delta != egui::Vec2::ZERO {
+                ui.scroll_with_delta_animation(delta, egui::style::ScrollAnimation::none());
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+}
+
+/// Draw a line of the Text view (without egui's own selecting).
+fn draw_line(ui: &mut egui::Ui, line: usize, label: egui::Label) -> Drawn {
+    let (pos, galley, resp) = label.selectable(false).layout_in_ui(ui);
+    if ui.is_rect_visible(resp.rect) {
+        ui.painter().galley(pos, galley.clone(), ui.visuals().text_color());
+    }
+    Drawn { line, rect: resp.rect, pos, galley }
+}
+
+/// The place in the text at the screen point `p`: in the line drawn there,
+/// or the nearest one.
+fn pos_at(drawn: &[Drawn], lines: &[String], p: egui::Pos2) -> Option<TextPos> {
+    let gap = |i: usize| drawn.get(i + 1).map_or(0.0, |n| (n.rect.min.y - drawn[i].rect.max.y) / 2.0);
+    let i = (0..drawn.len()).find(|&i| p.y < drawn[i].rect.max.y + gap(i)).unwrap_or(drawn.len().checked_sub(1)?);
+    let d = &drawn[i];
+    let n = d.galley.cursor_from_pos(p - d.pos).ccursor.index;
+    let l = lines.get(d.line)?;
+    Some(TextPos::new(d.line, l.char_indices().nth(n).map_or(l.len(), |(b, _)| b)))
+}
+
 /// Scrolling by the keyboard: arrows a line (or a few characters), Page
 /// Up/Down a screen, Ctrl+Home/End (or Home/End) to the start / the end.
-/// Not while a text field (the find bar) has the keyboard.
+/// Not while a text field (the find bar) has the keyboard, nor with Shift
+/// (which selects).
 #[derive(Default, Clone, Copy)]
 struct Keys {
     /// Lines down (negative: up).
@@ -405,8 +612,7 @@ impl Keys {
         }
         ctx.input(|i| {
             let n = |k: egui::Key| i.num_presses(k) as f32;
-            let alt = i.modifiers.alt;
-            if alt {
+            if i.modifiers.alt || i.modifiers.shift {
                 return Keys::default();
             }
             use egui::Key::*;
@@ -485,14 +691,16 @@ impl<'a> Marks<'a> {
 }
 
 /// A line of text in the monospace font, colored by `spans` when there are
-/// any, with `marks` (byte ranges: found text) on their background.
-fn line_job(ui: &egui::Ui, text: &str, spans: Option<&[Span]>, marks: &[(usize, usize, Color32)]) -> egui::text::LayoutJob {
+/// any, with `marks` (byte ranges: selected or found text, the first that
+/// covers a piece counts) on their background; `eol`: the line break is
+/// selected, a space in that color after the text.
+fn line_job(ui: &egui::Ui, text: &str, spans: Option<&[Span]>, marks: &[(usize, usize, Color32)], eol: Option<Color32>) -> egui::text::LayoutJob {
     use egui::text::{LayoutJob, TextFormat};
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let plain = TextFormat { font_id: font.clone(), color: ui.visuals().text_color(), ..Default::default() };
     let mut job = LayoutJob::default();
     if text.is_empty() {
-        job.append(" ", 0.0, plain);
+        job.append(" ", 0.0, TextFormat { background: eol.unwrap_or_default(), ..plain });
         return job;
     }
     // the spans' byte ranges
@@ -529,6 +737,9 @@ fn line_job(ui: &egui::Ui, text: &str, spans: Option<&[Span]>, marks: &[(usize, 
         }
         job.append(&text[a..b], 0.0, format);
     }
+    if let Some(color) = eol {
+        job.append(" ", 0.0, TextFormat { background: color, ..plain });
+    }
     job
 }
 
@@ -544,13 +755,13 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let red = Span { len: 3, rgb: [200, 0, 0], italic: true, underline: false };
                 let blue = Span { len: 2, rgb: [0, 0, 200], italic: false, underline: false };
-                let job = line_job(ui, "abcdeřest", Some(&[red, blue]), &[]);
+                let job = line_job(ui, "abcdeřest", Some(&[red, blue]), &[], None);
                 let parts: Vec<(&str, egui::Color32, bool)> = job.sections.iter().map(|s| (&job.text[s.byte_range.clone()], s.format.color, s.format.italics)).collect();
                 assert_eq!(parts[0], ("abc", egui::Color32::from_rgb(200, 0, 0), true));
                 assert_eq!(parts[1], ("de", egui::Color32::from_rgb(0, 0, 200), false));
                 assert_eq!((parts[2].0, parts[2].1), ("řest", ui.visuals().text_color()));
-                assert_eq!(line_job(ui, "", None, &[]).text, " ", "an empty line keeps its height");
-                assert_eq!(line_job(ui, "plain", None, &[]).sections.len(), 1);
+                assert_eq!(line_job(ui, "", None, &[], None).text, " ", "an empty line keeps its height");
+                assert_eq!(line_job(ui, "plain", None, &[], None).sections.len(), 1);
             });
         });
     }
@@ -564,7 +775,7 @@ mod tests {
                 let red = Span { len: 3, rgb: [200, 0, 0], italic: false, underline: false };
                 let mark = Color32::from_rgba_unmultiplied(255, 220, 0, 150);
                 // "cdeř" is found: it starts inside the red span and ends in plain text
-                let job = line_job(ui, "abcdeřest", Some(&[red]), &[(2, 7, mark)]);
+                let job = line_job(ui, "abcdeřest", Some(&[red]), &[(2, 7, mark)], None);
                 let parts: Vec<(&str, Color32, Color32)> =
                     job.sections.iter().map(|s| (&job.text[s.byte_range.clone()], s.format.color, s.format.background)).collect();
                 let plain = ui.visuals().text_color();
@@ -588,6 +799,9 @@ mod tests {
             let mut w = ViewerWin::new(Doc::open(&file));
             w.find.open = true;
             w.find.query.text = "kůň".into();
+            // a selection from the middle of a line over two line breaks
+            w.sel.sel = Selection::at(TextPos::new(1, 5));
+            w.sel.sel.put(TextPos::new(3, 12), true);
             let ctx = egui::Context::default();
             ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
             sal_ui::fonts::install(&ctx, "", "");
@@ -707,6 +921,85 @@ mod tests {
         w.find.focus = true;
         frame(&mut w, None);
         assert_eq!(frame(&mut w, Some(egui::Key::PageDown)), 0, "the find field has the keyboard");
+    }
+
+    /// Shift+arrows select from the first line shown, Ctrl+C copies, Ctrl+A
+    /// takes all; dragging the mouse selects; without Shift the arrows
+    /// still scroll; the find field keeps its own keys.
+    #[test]
+    fn selecting_and_copying() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("a.txt");
+        std::fs::write(&file, "první řádek\ndruhý\ntřetí\n").unwrap();
+        let mut w = ViewerWin::new(Doc::open(&file));
+        let ctx = egui::Context::default();
+        let screen = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0)));
+        let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let frame = |w: &mut ViewerWin, events: Vec<egui::Event>, modifiers: egui::Modifiers| {
+            let out = ctx.run(egui::RawInput { screen_rect: screen, events, modifiers, ..Default::default() }, |ctx| {
+                w.show(ctx);
+            });
+            out.platform_output.copied_text
+        };
+        let (shift, ctrl) = (egui::Modifiers::SHIFT, egui::Modifiers::COMMAND);
+        frame(&mut w, vec![], egui::Modifiers::NONE);
+        frame(&mut w, vec![key(egui::Key::ArrowDown, shift), key(egui::Key::ArrowRight, shift)], shift);
+        assert_eq!(frame(&mut w, vec![egui::Event::Copy], ctrl), "první řádek\r\nd");
+        frame(&mut w, vec![key(egui::Key::End, shift)], shift);
+        assert_eq!(frame(&mut w, vec![key(egui::Key::Insert, ctrl)], ctrl), "první řádek\r\ndruhý", "Ctrl+Insert copies too");
+        frame(&mut w, vec![key(egui::Key::A, ctrl)], ctrl);
+        assert_eq!(frame(&mut w, vec![egui::Event::Copy], ctrl), "první řádek\r\ndruhý\r\ntřetí");
+        // a drag from the start of the first line to the middle of the second
+        assert_eq!(w.sel.shown.start, 0);
+        let pointer = |p: egui::Pos2, down: Option<bool>| {
+            let mut ev = vec![egui::Event::PointerMoved(p)];
+            if let Some(pressed) = down {
+                ev.push(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            }
+            ev
+        };
+        // the text starts below the toolbar: the first point below it that
+        // a click puts the caret at
+        w.sel = TextSel::default();
+        let top = (0..400).map(|y| egui::pos2(30.0, y as f32)).find(|&p| {
+            frame(&mut w, pointer(p, Some(true)), egui::Modifiers::NONE);
+            frame(&mut w, pointer(p, Some(false)), egui::Modifiers::NONE);
+            // above a line's text is its start; on it, where it is pointed at
+            w.sel.placed && w.sel.sel.caret.col > 0
+        });
+        let top = top.expect("a point on the first line");
+        let start = w.sel.sel.caret;
+        assert!(start.line == 0 && start.col > 0 && w.sel.sel.is_empty(), "a click puts the caret, selecting nothing: {start:?}");
+        let font = egui::TextStyle::Monospace.resolve(&ctx.style());
+        let (line_h, col) = ctx.fonts(|f| (f.row_height(&font), f.glyph_width(&font, '0')));
+        // press there, drag down a line and right, release
+        frame(&mut w, pointer(top, Some(true)), egui::Modifiers::NONE);
+        let to = top + egui::vec2(col * 2.0, line_h * 1.5);
+        frame(&mut w, pointer(top + egui::vec2(col, 10.0), None), egui::Modifiers::NONE);
+        frame(&mut w, pointer(to, None), egui::Modifiers::NONE);
+        frame(&mut w, pointer(to, Some(false)), egui::Modifiers::NONE);
+        let end = w.sel.sel.caret;
+        assert!(end.line == 1 && end.col > start.col, "dragged across the line break: {end:?}");
+        let l = &w.doc.lines;
+        let dragged = format!("{}\r\n{}", &l[0][start.col..], &l[1][..end.col]);
+        assert_eq!(frame(&mut w, vec![egui::Event::Copy], ctrl), dragged);
+        // the arrows without Shift scroll, and leave the selection
+        frame(&mut w, vec![key(egui::Key::ArrowDown, egui::Modifiers::NONE)], egui::Modifiers::NONE);
+        assert_eq!(frame(&mut w, vec![egui::Event::Copy], ctrl), dragged);
+        // a double-click takes a word (a while after the clicks before: not a triple-click)
+        let _ = ctx.run(egui::RawInput { screen_rect: screen, time: Some(100.0), ..Default::default() }, |ctx| {
+            w.show(ctx);
+        });
+        for pressed in [true, false, true, false] {
+            frame(&mut w, pointer(top, Some(pressed)), egui::Modifiers::NONE);
+        }
+        assert_eq!(frame(&mut w, vec![egui::Event::Copy], ctrl), "první");
+        // the find field has the keyboard: Ctrl+A is the field's
+        w.find.open = true;
+        w.find.focus = true;
+        frame(&mut w, vec![], egui::Modifiers::NONE);
+        frame(&mut w, vec![key(egui::Key::A, ctrl)], ctrl);
+        assert_eq!(w.sel.sel.text(&w.doc.lines, "\n"), "první");
     }
 
     /// Ctrl+T plays: lines written to the file show up (after a while);

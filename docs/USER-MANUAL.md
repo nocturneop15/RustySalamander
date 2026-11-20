@@ -335,6 +335,7 @@ F3 opens the file in RustySalamander's own viewer, in a window of its own (the V
   - **Wildcards:** `*` stands for any characters and `?` for one, within a line: `file*.txt` finds `file1.txt` and `file22.txt`, `a?b` finds `axb`. Without it, `*` and `?` are found as they are.
   - The search is in the text; a match found while the Hex view is shown is shown in the Text view.
   - **Esc** closes the find bar; a second Esc closes the window.
+- **Selecting and copying text** (Text view): drag the mouse over the text, or click and **Shift+click** where the selection should end; a double-click takes a word. **Shift** with the arrows, Home/End and Page Up/Down selects from where you clicked (or from the first line shown), **Ctrl+Shift+←/→** by words, **Ctrl+Shift+Home/End** to the start / the end of the file. **Ctrl+A** selects all, **Ctrl+C** (or Ctrl+Insert) copies. Without Shift the keys scroll, as before.
 - **Esc** or **F10** closes the window. Several viewer windows can be open at once.
 
 ### The editor (F4)
@@ -677,7 +678,7 @@ These are the default keys. Everything in the first three tables can be changed 
 
 ### In the viewer
 
-F4 text/hex · Ctrl+W wrap · Ctrl+F find · F3 / Shift+F3 (or Enter / Shift+Enter in the find bar) next / previous match · Esc close the find bar, then the window · F10 close.
+F4 text/hex · Ctrl+W wrap · Ctrl+F find · F3 / Shift+F3 (or Enter / Shift+Enter in the find bar) next / previous match · Ctrl+T follow the file (Play/Pause) · arrows, Page Up/Down, Home/End scroll · Shift+arrows / Home / End / Page Up/Down select (Ctrl+Shift+←/→ by words, Ctrl+Shift+Home/End to the start / the end) · Ctrl+A select all · Ctrl+C or Ctrl+Insert copy · Esc close the find bar, then the window · F10 close.
 
 ### In the file comparison window
 
