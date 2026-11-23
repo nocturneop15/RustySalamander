@@ -223,14 +223,29 @@ impl Plugins {
     /// ones; plugin updates downloaded last time are put in place first.
     pub fn load(disabled: &[String]) -> Plugins {
         let dir = plugins_dir();
-        // updates finished, undone or put in place before anything is loaded
         let app = sal_core::config::app_dir();
-        let s = crate::update::at_start(app.as_deref(), dir.as_deref());
+        Plugins::load_with(disabled, || crate::update::at_start(app.as_deref(), dir.as_deref()), |skip| Plugins::scan_skipping(dir.as_deref(), skip))
+    }
+
+    /// [`Plugins::load`]: `at_start` puts the updates in place (and returns
+    /// the update lock, held until the plugins are loaded: no other running
+    /// copy of the program changes them meanwhile), `scan` finds the
+    /// plugins but those it is given. When the updates say plugins are to
+    /// wait, none is looked for nor started.
+    fn load_with(disabled: &[String], at_start: impl FnOnce() -> (crate::update::Started, Option<crate::update::UpdateLock>), scan: impl FnOnce(&[String]) -> Plugins) -> Plugins {
+        let (s, update_lock) = at_start();
         if s != crate::update::Started::default() {
-            crate::debuglog::write(format!("startup: plugins updated {:?}, not updated {:?}, not loaded {:?}", s.updated, s.failed, s.skip));
+            crate::debuglog::write(format!("startup: plugins updated {:?}, not updated {:?}, not loaded {:?}, all waiting {}", s.updated, s.failed, s.skip, s.defer_plugins));
         }
-        let mut p = Plugins::scan_skipping(dir.as_deref(), &s.skip);
-        p.start(disabled);
+        let mut p = if s.defer_plugins {
+            // another running copy is changing files: not even looked for
+            Plugins::default()
+        } else {
+            let mut p = scan(&s.skip);
+            p.start(disabled);
+            p
+        };
+        drop(update_lock);
         p.updated = s.updated;
         p.update_failed = s.failed;
         p
@@ -257,6 +272,8 @@ impl Plugins {
                     if let Ok(sub) = fs::read_dir(&p) {
                         files.extend(sub.flatten().map(|e| e.path()).filter(|p| is_plugin(p)));
                     }
+                } else if is_plugin(&p) && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| skip.iter().any(|s| s == n)) {
+                    broken.push((p, tr("its update is half done; it is finished or undone when RustySalamander starts next time").to_owned()));
                 } else if is_plugin(&p) {
                     files.push(p);
                 }
@@ -410,6 +427,50 @@ pub fn cleanup_temp() {
                 let _ = fs::remove_dir_all(e.path());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod load_tests {
+    use super::*;
+
+    /// While another running copy changes files, the start looks for no
+    /// plugin at all: one it puts in place after the start learnt that would
+    /// otherwise be found (and loaded half there).
+    #[test]
+    fn plugins_wait_for_another_copys_update() {
+        let t = tempfile::tempdir().unwrap();
+        let plugins = t.path().join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        let scanned = std::cell::Cell::new(false);
+        let p = Plugins::load_with(
+            &[],
+            || {
+                let s = crate::update::Started { failed: vec!["another running RustySalamander is updating".into()], defer_plugins: true, ..Default::default() };
+                // the other copy puts a plugin in place right after
+                fs::create_dir_all(plugins.join("new")).unwrap();
+                fs::write(plugins.join("new").join("new.spl"), "half").unwrap();
+                (s, None)
+            },
+            |skip| {
+                scanned.set(true);
+                Plugins::scan_skipping(Some(&plugins), skip)
+            },
+        );
+        assert!(!scanned.get(), "not looked for");
+        assert!(p.found.is_empty() && p.active.is_empty() && p.broken.is_empty());
+        assert!(p.update_failed[0].contains("another running RustySalamander"), "why");
+        // otherwise looked for
+        let p = Plugins::load_with(
+            &[],
+            || (crate::update::Started::default(), None),
+            |skip| {
+                scanned.set(true);
+                Plugins::scan_skipping(Some(&plugins), skip)
+            },
+        );
+        assert!(scanned.get());
+        assert_eq!(p.broken.len(), 1, "the half plugin found (and refused: not a DLL)");
     }
 }
 

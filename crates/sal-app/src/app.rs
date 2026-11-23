@@ -944,9 +944,10 @@ impl App {
     /// panel's path, and its connection shown there, with the values.
     fn run_plugin_command(&mut self, ctx: &egui::Context, plugin: Arc<dyn FolderPlugin>, command: String, mut values: plugins::Values) {
         if crate::debuglog::full() {
-            // what was typed, but no passwords
-            let shown: Vec<String> = values.iter().map(|(k, v)| if is_secret(k) { format!("{k}=(hidden)") } else { format!("{k}={v:?}") }).collect();
-            crate::debuglog::did(format_args!("plugin {} command {command:?} {}", plugin.id(), shown.join(" ")));
+            // which fields were sent, never what was in them: a password
+            // field can have any name
+            let fields: Vec<&str> = values.keys().map(String::as_str).collect();
+            crate::debuglog::did(format_args!("plugin {} command {command:?} with {}", plugin.id(), fields.join(", ")));
         }
         // one command at a time for a plugin; other plugins aren't held up
         if self.plugin_tasks.iter().any(|t| t.plugin.id() == plugin.id()) {
@@ -1417,7 +1418,7 @@ impl App {
     fn open_for(&self, kind: OpenKind, p: &Path, temporary: bool) -> Result<(), String> {
         let err = |e: std::io::Error| format!("{}: {e}", display_path(p));
         match self.open_with_for(kind, p) {
-            OpenWith::Program { command } if !command.trim().is_empty() => return sal_core::shell::open_with_program(&command, p).map_err(err),
+            OpenWith::Program { command, shell } if !command.trim().is_empty() => return sal_core::shell::open_with_program(&command, p, shell).map_err(err),
             OpenWith::Notepad => return sal_core::shell::edit(p, None).map_err(err),
             OpenWith::Plugin { plugin, opener } => {
                 let chosen = self.plugins.active.iter().find(|x| x.id() == plugin && x.openers().iter().any(|o| o.id == opener && o.kind == kind));
@@ -2115,7 +2116,7 @@ impl App {
             }
             MenuAction::Terminal => {
                 let dir = single.filter(is_dir).unwrap_or_else(|| menu.dir.clone());
-                sal_core::shell::open_terminal(self.cfg.terminal, &self.cfg.terminal_custom, &dir).map_err(|e| e.to_string())
+                sal_core::shell::open_terminal(self.cfg.terminal, &self.cfg.terminal_custom, self.cfg.terminal_shell, &dir).map_err(|e| e.to_string())
             }
             MenuAction::Properties => {
                 let targets = if items.is_empty() { vec![menu.dir.clone()] } else { items };
@@ -2189,17 +2190,17 @@ impl App {
         match target {
             Browse::Editor => {
                 self.cfg.editor = program.clone();
-                self.cfg.edit_with = OpenWith::Program { command: program };
+                self.cfg.edit_with = OpenWith::Program { command: program, shell: false };
             }
             Browse::Viewer => {
                 self.cfg.viewer = program.clone();
-                self.cfg.view_with = OpenWith::Program { command: program };
+                self.cfg.view_with = OpenWith::Program { command: program, shell: false };
             }
             Browse::RuleViewer | Browse::RuleEditor => {
                 if let Some(form) = &mut self.suffix_edit {
                     let (slot, typed) = if target == Browse::RuleViewer { (&mut form.rule.view, &mut form.view_program) } else { (&mut form.rule.edit, &mut form.edit_program) };
                     *typed = program.clone();
-                    *slot = Some(OpenWith::Program { command: program });
+                    *slot = Some(OpenWith::Program { command: program, shell: false });
                 }
             }
             Browse::Terminal => {
@@ -2523,7 +2524,7 @@ impl App {
                     Some(a) => a.file.parent().map(Path::to_path_buf).unwrap_or_default(),
                     None => self.act().path().to_path_buf(),
                 };
-                sal_core::shell::open_terminal(self.cfg.terminal, &self.cfg.terminal_custom, &p).map_err(|e| e.to_string())
+                sal_core::shell::open_terminal(self.cfg.terminal, &self.cfg.terminal_custom, self.cfg.terminal_shell, &p).map_err(|e| e.to_string())
             }
             Cmd::CopyPaths => {
                 // a plugin's items: the file on disk each stands for, if any
@@ -2836,12 +2837,15 @@ impl App {
             egui::Frame::none().fill(bg).inner_margin(layout::PATH_MARGIN).rounding(3.0f32).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if let Some(edit) = &mut self.path_edit[idx] {
+                    let before = edit.text.clone();
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut edit.text)
+                            .char_limit(layout::limit::PATH + 1)
                             .desired_width(f32::INFINITY)
                             .hint_text(r"C:\folder, \\server\share, D:, %USERPROFILE%, ..")
                             .id_salt(("path_edit", idx)),
                     );
+                    layout::refuse_over(ui, &r, &mut edit.text, before, layout::limit::PATH, &too_long(layout::limit::PATH));
                     if edit.fresh || !r.has_focus() && !r.lost_focus() {
                         r.request_focus();
                     }
@@ -3577,8 +3581,10 @@ impl App {
         let mut outcome = 0u8;
         // Settings asked for the multi-user question (opened once it closes)
         let mut ask_multi_user = false;
-        let text_field = |ui: &mut egui::Ui, s: &mut String| {
-            let r = ui.add(layout::text_field(s).desired_width(f32::INFINITY));
+        let text_field = |ui: &mut egui::Ui, s: &mut String, limit: usize| {
+            let before = s.clone();
+            let r = ui.add(layout::text_field(s).char_limit(limit + 1).desired_width(f32::INFINITY));
+            layout::refuse_over(ui, &r, s, before, limit, &too_long(limit));
             // a new window's first frame is an invisible sizing pass that drops
             // focus requests, so keep claiming focus while nothing holds it
             if focus || ui.memory(|m| m.focused().is_none()) {
@@ -3610,7 +3616,7 @@ impl App {
                 let busy = self.jobs.running.len() + self.jobs.queue.len();
                 dw.modal().show(ctx, &mut self.dialog_places, "transfer", verb, 560.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(if *kind == OpKind::Copy { trf("Copy {what} to:", &[("what", &describe(sources))]) } else { trf("Move {what} to:", &[("what", &describe(sources))]) });
-                    text_field(ui, target);
+                    text_field(ui, target, layout::limit::PATH);
                     ui.small(tr("Target can be a directory, a new name, or a mask such as *.bak"));
                     ui.add_space(layout::GAP);
                     transfer_options(ui, *kind, opts);
@@ -3636,7 +3642,7 @@ impl App {
             Dialog::MkDir { name } => {
                 dw.modal().show(ctx, &mut self.dialog_places, "mkdir", tr("Create Directory"), 440.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(tr("Directory name (nested folders: /foo1/foo2/foo3):"));
-                    text_field(ui, name);
+                    text_field(ui, name, layout::limit::PATH);
                     outcome = buttons(ui, tr("Create"));
                 });
             }
@@ -3644,7 +3650,7 @@ impl App {
                 let old = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 dw.modal().show(ctx, &mut self.dialog_places, "rename", tr("Rename"), 440.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(trf("Rename \"{old}\" to:", &[("old", &old)]));
-                    text_field(ui, name);
+                    text_field(ui, name, layout::limit::NAME);
                     outcome = buttons(ui, tr("Rename"));
                 });
             }
@@ -3667,7 +3673,7 @@ impl App {
             Dialog::SelectMask { select, mask, error } => {
                 dw.modal().show(ctx, &mut self.dialog_places, "mask", if *select { tr("Select") } else { tr("Unselect") }, 440.0, &mut enter, &mut escape, &mut |ui| {
                     ui.label(tr("Mask (e.g. *.txt;*.doc or *.h*|*.html):"));
-                    text_field(ui, mask);
+                    text_field(ui, mask, layout::limit::MASK);
                     if let Some(e) = error {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
@@ -4392,15 +4398,14 @@ impl App {
                                         }
                                         ui.horizontal(|ui| {
                                             ui.radio_value(&mut cfg.terminal, TerminalKind::Custom, tr("Custom:"));
-                                            ui.add_enabled(
-                                                cfg.terminal == TerminalKind::Custom,
-                                                egui::TextEdit::singleline(&mut cfg.terminal_custom).hint_text(r#"alacritty.exe --working-directory "{dir}""#).desired_width(250.0),
-                                            )
-                                            .on_hover_text(tr("Program and arguments. {dir} is replaced by the panel's directory,\nwhich is also the working directory."));
+                                            command_field(ui, &mut cfg.terminal_custom, cfg.terminal == TerminalKind::Custom, r#"alacritty.exe --working-directory "{dir}""#)
+                                                .0
+                                                .on_hover_text(tr("Program and arguments. {dir} is replaced by the panel's directory,\nwhich is also the working directory."));
                                             if ui.button(tr("Browse…")).clicked() {
                                                 browse = Some(Browse::Terminal);
                                             }
                                         });
+                                        ui.add_enabled(cfg.terminal == TerminalKind::Custom, egui::Checkbox::new(&mut cfg.terminal_shell, tr("Run through a shell"))).on_hover_text(tr(SHELL_TIP));
                                     });
                                     ui.end_row();
                                 });
@@ -4508,7 +4513,9 @@ impl App {
                                             ui.label(RichText::new(if form.index.is_some() { tr("Edit the suffix") } else { tr("A new suffix") }).strong());
                                             layout::form_grid("suffix_form").show(ui, |ui| {
                                                 ui.label(tr("Suffix"));
-                                                ui.add(egui::TextEdit::singleline(&mut form.rule.suffix).hint_text("txt, tar.gz").desired_width(160.0));
+                                                let before = form.rule.suffix.clone();
+                                                let r = ui.add(egui::TextEdit::singleline(&mut form.rule.suffix).char_limit(layout::limit::SHORT + 1).hint_text("txt, tar.gz").desired_width(160.0));
+                                                layout::refuse_over(ui, &r, &mut form.rule.suffix, before, layout::limit::SHORT, &too_long(layout::limit::SHORT));
                                                 ui.end_row();
                                                 ui.label(tr("Viewer (F3)"));
                                                 if open_with_picker(ui, "rule_view", &mut form.rule.view, true, &view_choices, &mut form.view_program) {
@@ -4825,7 +4832,10 @@ impl App {
         }
         // a plugin form's Browse… button: the Windows "Open" dialog
         if let (Some(id), Dialog::PluginForm { values, form, .. }) = (browse_field, &mut dialog) {
-            let current = values.get(&id).map(PathBuf::from);
+            // the picker looks at where it starts: only a place on this
+            // computer (a value the plugin put there could name a server, or
+            // a device)
+            let current = values.get(&id).and_then(|v| form_place(v).ok().flatten()).filter(|p| fileops::validate_location(p).is_ok_and(|k| k == fileops::PlaceKind::Local));
             let folder = form.fields.iter().any(|f| f.id == id && f.kind == plugins::FieldKind::Folder);
             let picked = if folder {
                 shellmenu::pick_folder(self.hwnd, tr("Choose a folder"), current.as_deref())
@@ -4857,10 +4867,28 @@ impl App {
         crate::debuglog::did(format_args!("confirmed: {}", dialog.summary()));
         let hidden = self.vis();
         match dialog {
-            Dialog::PluginForm { plugin, form, values } => match self.plugins.get(&plugin).cloned() {
-                Some(p) => self.run_plugin_command(ctx, p, form.command, values),
-                None => self.error(tr("The plugin for this file is not enabled.")),
-            },
+            Dialog::PluginForm { plugin, form, values } => {
+                // a file or folder the plugin will open: checked first
+                let enabled = sal_plugin_api::ui::enabled_fields(&form.fields, &values);
+                let bad = form.fields.iter().filter(|f| matches!(f.kind, plugins::FieldKind::File | plugins::FieldKind::Folder) && enabled.get(&f.id).copied().unwrap_or(true)).find_map(|f| {
+                    let value = values.get(&f.id).map(String::as_str).unwrap_or(&f.value);
+                    form_place(value).err().map(|e| (f.label.trim_end_matches(':').to_owned(), e))
+                });
+                if let Some((label, e)) = bad {
+                    // the form again, what was typed kept, why at its top (as a
+                    // plugin tells what is wrong)
+                    let mut form = form;
+                    form.fields.retain(|f| f.id != FORM_ERROR);
+                    let note = trf("{field}: {error}", &[("field", &label), ("error", &e)]);
+                    form.fields.insert(0, sal_plugin_api::Field { id: FORM_ERROR.into(), label: note, kind: plugins::FieldKind::Note, ..Default::default() });
+                    self.open_dialog(Dialog::PluginForm { plugin, form, values });
+                    return;
+                }
+                match self.plugins.get(&plugin).cloned() {
+                    Some(p) => self.run_plugin_command(ctx, p, form.command, values),
+                    None => self.error(tr("The plugin for this file is not enabled.")),
+                }
+            }
             Dialog::Transfer { kind, sources, target, opts } => {
                 let base = self.panels[self.active].path().to_path_buf();
                 let t = location::parse_url(target.trim()).unwrap_or_else(|| PathBuf::from(target.trim()));
@@ -4868,8 +4896,10 @@ impl App {
                 if target.as_os_str().is_empty() {
                     target = base;
                 }
-                // never a device (NUL, \\.\PhysicalDrive0…), a forbidden name or a stream
-                if let Err(e) = fileops::validate_target(&target, self.archive_folder(&target).is_some()) {
+                // never a device (NUL, \\.\PhysicalDrive0…), a forbidden name or a
+                // stream; checked before the plugins are asked whether it is in
+                // an archive (that looks at the folders above it)
+                if let Err(e) = fileops::validate_location(&target).and_then(|_| fileops::validate_target(&target, self.archive_folder(&target).is_some())) {
                     self.error(trf("Cannot copy or move there: {error}", &[("error", &e)]));
                     return;
                 }
@@ -5765,7 +5795,9 @@ fn plugin_form(ui: &mut egui::Ui, form: &plugins::Form, values: &mut plugins::Va
                 // a text field's margin is outside its desired width
                 let field_w = w - 2.0 * layout::FIELD_MARGIN.x;
                 let mut text = |ui: &mut egui::Ui, value: &mut String, password: bool, width: f32| {
-                    let r = ui.add(layout::text_field(value).password(password).desired_width(width).id_salt(("plugin-field", &f.id)));
+                    let before = value.clone();
+                    let r = ui.add(layout::text_field(value).char_limit(layout::limit::FORM + 1).password(password).desired_width(width).id_salt(("plugin-field", &f.id)));
+                    layout::refuse_over(ui, &r, value, before, layout::limit::FORM, &too_long(layout::limit::FORM));
                     if focus_next && enabled && (focus || ui.memory(|m| m.focused().is_none())) {
                         r.request_focus();
                     }
@@ -6387,13 +6419,17 @@ fn opener_choices(plugins: &Plugins, kind: OpenKind) -> Vec<OpenerChoice> {
     out
 }
 
+/// What "Run through a shell" means, on the box.
+const SHELL_TIP: &str = n_("The command line goes to the program as typed, and the program may be a command interpreter (cmd, PowerShell, a script host). Such a program may read a file's or folder's name as commands of its own: tick it only for a command made to run through one. Without it, the name is one argument of its own, and an interpreter isn't started.");
+
 /// How a viewer or editor choice reads in Settings; `None` is a suffix's
 /// "Default".
 fn open_with_label(w: Option<&OpenWith>, choices: &[OpenerChoice]) -> String {
     match w {
         None => tr("Default").into(),
         Some(OpenWith::Notepad) => tr("Notepad").into(),
-        Some(OpenWith::Program { command }) => trf("Program: {command}", &[("command", command)]),
+        Some(OpenWith::Program { command, shell: false }) => trf("Program: {command}", &[("command", command)]),
+        Some(OpenWith::Program { command, shell: true }) => trf("Program (through a shell): {command}", &[("command", command)]),
         Some(OpenWith::Plugin { plugin, opener }) => choices
             .iter()
             .find(|(p, o, _)| p == plugin && o == opener)
@@ -6431,15 +6467,28 @@ fn open_with_picker(ui: &mut egui::Ui, id: &str, value: &mut Option<OpenWith>, a
             ui.horizontal(|ui| {
                 let on = matches!(value, Some(OpenWith::Program { .. }));
                 if ui.radio(on, tr("Program:")).clicked() && !on {
-                    *value = Some(OpenWith::Program { command: program.clone() });
+                    *value = Some(OpenWith::Program { command: program.clone(), shell: false });
                 }
                 let tip = tr("Program and optional arguments. {file} is replaced by the file;\nwithout it the file is added at the end.");
-                let field = egui::TextEdit::singleline(program).hint_text(r#""C:\Program Files\Notepad++\notepad++.exe""#).desired_width(250.0);
-                if ui.add_enabled(on, field).on_hover_text(tip).changed() {
-                    *value = Some(OpenWith::Program { command: program.clone() });
+                let shell = match value {
+                    Some(OpenWith::Program { shell, .. }) => *shell,
+                    _ => false,
+                };
+                let (r, refused) = command_field(ui, program, on, r#""C:\Program Files\Notepad++\notepad++.exe""#);
+                let r = r.on_hover_text(tip);
+                if r.changed() && !refused {
+                    *value = Some(OpenWith::Program { command: program.clone(), shell });
                 }
                 if ui.button(tr("Browse…")).clicked() {
                     browse = true;
+                }
+            });
+            // a command interpreter only when asked for, per command
+            ui.add_enabled_ui(matches!(value, Some(OpenWith::Program { .. })), |ui| {
+                if let Some(OpenWith::Program { shell, .. }) = value {
+                    ui.checkbox(shell, tr("Run through a shell")).on_hover_text(tr(SHELL_TIP));
+                } else {
+                    let _ = ui.checkbox(&mut false, tr("Run through a shell"));
                 }
             });
         });
@@ -6463,7 +6512,7 @@ impl SuffixEdit {
     /// program command lines start from the ones typed last.
     fn of(index: Option<usize>, rule: SuffixRule, viewer: &str, editor: &str) -> SuffixEdit {
         let program = |w: &Option<OpenWith>, last: &str| match w {
-            Some(OpenWith::Program { command }) => command.clone(),
+            Some(OpenWith::Program { command, .. }) => command.clone(),
             _ => last.to_owned(),
         };
         SuffixEdit { index, view_program: program(&rule.view, viewer), edit_program: program(&rule.edit, editor), rule, error: None }
@@ -6507,7 +6556,7 @@ fn font_picker(ui: &mut egui::Ui, id: &str, value: &mut String, default: &str, f
     }
     egui::popup_below_widget(ui, popup, &button, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
         ui.set_min_width(300.0);
-        let search = ui.add(egui::TextEdit::singleline(filter).hint_text(tr("Search fonts…")).desired_width(f32::INFINITY));
+        let search = ui.add(egui::TextEdit::singleline(filter).char_limit(layout::limit::SHORT).hint_text(tr("Search fonts…")).desired_width(f32::INFINITY));
         if opening {
             search.request_focus();
         }
@@ -6713,10 +6762,40 @@ impl App {
     }
 }
 
-/// A form value not to be written to the debug log.
-fn is_secret(name: &str) -> bool {
-    let n = name.to_lowercase();
-    ["pass", "secret", "token", "pin"].iter().any(|s| n.contains(s))
+/// A field for a command line (a program and its arguments), enabled or
+/// not: what would make it longer than a command line can be is refused,
+/// not cut (cut, it could start something else). The field, and whether
+/// this frame's input was refused.
+fn command_field(ui: &mut egui::Ui, command: &mut String, enabled: bool, hint: &str) -> (egui::Response, bool) {
+    let before = command.clone();
+    let r = ui.add_enabled(enabled, egui::TextEdit::singleline(command).char_limit(layout::limit::COMMAND + 1).hint_text(hint).desired_width(250.0));
+    let refused = layout::refuse_over(ui, &r, command, before, layout::limit::COMMAND, &too_long(layout::limit::COMMAND));
+    (r, refused)
+}
+
+/// What a field says when what was typed or pasted would make it longer
+/// than it may be ([`layout::refuse_over`]).
+fn too_long(limit: usize) -> String {
+    trf("At most {n} characters: what was pasted or typed wasn't taken", &[("n", &sal_core::encoding::format_thousands(limit as u64))])
+}
+
+/// The note the program puts at the top of a plugin's form it sends back.
+const FORM_ERROR: &str = "_program_error";
+
+/// The value of a plugin form's file or folder field, as a place:
+/// `Ok(None)` for an empty one, an error for one that may not be looked at
+/// ([`fileops::validate_location`]) or a plugin's connection (not a file).
+fn form_place(value: &str) -> Result<Option<PathBuf>, String> {
+    let value = value.trim().trim_matches('"').trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let p = PathBuf::from(value);
+    match fileops::validate_location(&p) {
+        Err(e) => Err(e.to_string()),
+        Ok(fileops::PlaceKind::Mounted) => Err(trf("{path} is not on a disk", &[("path", &value)])),
+        Ok(_) => Ok(Some(p)),
+    }
 }
 
 impl Dialog {
@@ -8584,8 +8663,12 @@ mod tests {
         opts.background = true;
         opts.show_result = true;
         ui.key(Key::Enter);
-        assert!(ui.app.jobs.hidden, "in the background");
-        for _ in 0..300 {
+        // in the background, unless it asks already (then its window is back)
+        assert!(ui.app.jobs.hidden || ui.app.jobs.running.first().is_some_and(|j| j.prompt.is_some()), "in the background");
+        // by the clock, not frames: with every test running at once, the
+        // job's thread may take seconds to get to the question
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < until {
             ui.frames(1);
             if ui.app.jobs.running.first().is_some_and(|j| j.prompt.is_some()) {
                 break;
@@ -9227,6 +9310,168 @@ mod tests {
         assert_eq!(JobKind::Transfer(OpKind::Move).group(), "Moving");
         assert_eq!(JobKind::Archive(FolderOp::Transfer(OpKind::Copy)).group(), "Copying");
         assert_eq!(JobKind::Archive(FolderOp::Rename).group(), "Renaming");
+    }
+
+    /// A plugin form's file and folder fields are checked before the plugin
+    /// gets them: a device, a stream or a connection sends the form back
+    /// with why, what was typed kept; a file on this computer goes through.
+    #[test]
+    fn plugin_form_paths_are_checked() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let form = plugins::Form {
+            title: "Connect".into(),
+            fields: vec![
+                sal_plugin_api::Field { id: "key".into(), label: "Key file:".into(), kind: plugins::FieldKind::File, ..Default::default() },
+                sal_plugin_api::Field { id: "secret".into(), label: "Secret:".into(), kind: plugins::FieldKind::Password, ..Default::default() },
+            ],
+            ok: "OK".into(),
+            command: "connect".into(),
+        };
+        for bad in [r"\\.\pipe\x", r"C:\x\CON", "id_rsa:stream", r"\\?\scp\me@host\key"] {
+            let values: plugins::Values = [("key".to_owned(), bad.to_owned()), ("secret".to_owned(), "hunter2".to_owned())].into();
+            ui.app.open_dialog(Dialog::PluginForm { plugin: "recorder".into(), form: form.clone(), values });
+            ui.frames(1);
+            ui.key(Key::Enter);
+            let Dialog::PluginForm { form: back, values, .. } = &ui.app.dialog else { panic!("{bad}: the form isn't back") };
+            assert_eq!(values["key"], bad, "kept");
+            assert_eq!(back.fields[0].kind, plugins::FieldKind::Note);
+            assert!(back.fields[0].label.starts_with("Key file"), "{}", back.fields[0].label);
+            assert_eq!(back.fields.iter().filter(|f| f.id == FORM_ERROR).count(), 1);
+            ui.key(Key::Escape);
+        }
+        assert!(form_place(&t.path().join("id_rsa").display().to_string()).unwrap().is_some());
+        assert_eq!(form_place("  ").unwrap(), None);
+    }
+
+    /// All the text the last frame drew.
+    fn shown_text(ui: &Ui) -> String {
+        fn walk(s: &egui::Shape, out: &mut String) {
+            match s {
+                egui::Shape::Text(t) => {
+                    out.push_str(t.galley.text());
+                    out.push('\n');
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = String::new();
+        for c in &ui.last.as_ref().expect("a frame").shapes {
+            walk(&c.shape, &mut out);
+        }
+        out
+    }
+
+    /// A field takes as many characters as what it holds can have (one more,
+    /// so too long is still told): a huge paste keeps the start, and Rename
+    /// still says the name is too long rather than cutting it.
+    #[test]
+    fn fields_take_what_they_hold() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a.txt"), "").unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let huge = "x".repeat(200_000);
+        ui.app.command(&ui.ctx.clone(), Cmd::ChangeDir);
+        ui.frames(2);
+        ui.run(vec![Event::Paste(huge.clone())], Modifiers::NONE);
+        ui.frames(1);
+        let before = display_path(t.path());
+        assert_eq!(ui.app.path_edit[0].as_ref().unwrap().text, before, "refused: the path as it was");
+        ui.key(Key::Escape);
+        ui.app.open_dialog(Dialog::Rename { path: t.path().join("a.txt"), name: "b.txt".into() });
+        ui.frames(2);
+        ui.run(vec![Event::Paste(huge.clone())], Modifiers::NONE);
+        ui.frames(1);
+        let Dialog::Rename { name, .. } = &ui.app.dialog else { panic!("no Rename") };
+        assert_eq!(name, "b.txt", "refused: the name as it was");
+        assert!(shown_text(&ui).contains("At most 255 characters"), "says so");
+    }
+
+    /// Too much pasted into a field whose value does something (a copy's
+    /// target, a new folder, a mask, a plugin's form, a command line) is
+    /// refused: the field keeps what it had, nothing is cut short.
+    #[test]
+    fn oversized_pastes_are_refused() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a.txt"), "").unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let huge = "y".repeat(40_000);
+        let paste = |ui: &mut Ui| {
+            ui.frames(2);
+            ui.run(vec![Event::Paste(huge.clone())], Modifiers::NONE);
+            ui.frames(1);
+        };
+        ui.app.open_dialog(Dialog::Transfer { kind: OpKind::Copy, sources: vec![t.path().join("a.txt")], target: "out".into(), opts: TransferDefaults::default() });
+        paste(&mut ui);
+        assert!(matches!(&ui.app.dialog, Dialog::Transfer { target, .. } if target == "out"));
+        ui.key(Key::Escape);
+        ui.app.open_dialog(Dialog::MkDir { name: "new".into() });
+        paste(&mut ui);
+        assert!(matches!(&ui.app.dialog, Dialog::MkDir { name } if name == "new"));
+        ui.key(Key::Escape);
+        ui.app.open_dialog(Dialog::SelectMask { select: true, mask: "*.txt".into(), error: None });
+        let mask = "*.".to_owned() + &"z".repeat(5_000);
+        ui.frames(2);
+        ui.run(vec![Event::Paste(mask)], Modifiers::NONE);
+        ui.frames(1);
+        assert!(matches!(&ui.app.dialog, Dialog::SelectMask { mask, .. } if mask == "*.txt"), "a mask over 4 096 characters");
+        ui.key(Key::Escape);
+        let form = plugins::Form {
+            title: "Connect".into(),
+            fields: vec![sal_plugin_api::Field { id: "host".into(), label: "Server:".into(), value: "example.org".into(), ..Default::default() }],
+            ok: "OK".into(),
+            command: "connect".into(),
+        };
+        ui.app.open_dialog(Dialog::PluginForm { plugin: "recorder".into(), form, values: [("host".to_owned(), "example.org".to_owned())].into() });
+        paste(&mut ui);
+        assert!(matches!(&ui.app.dialog, Dialog::PluginForm { values, .. } if values["host"] == "example.org"));
+        ui.key(Key::Escape);
+
+        // a command line (the program picker's and the terminal's field)
+        let ctx = egui::Context::default();
+        let mut command = r#"ed.exe -n1 "{file}""#.to_owned();
+        let frame = |events: Vec<Event>, focus: bool, command: &mut String| -> bool {
+            let raw = egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0))), ..Default::default() };
+            let mut refused = false;
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (r, was) = command_field(ui, command, true, "");
+                    if focus {
+                        r.request_focus();
+                    }
+                    refused |= was;
+                });
+            });
+            refused
+        };
+        frame(vec![], true, &mut command);
+        frame(vec![], false, &mut command);
+        assert!(frame(vec![Event::Paste(huge.clone())], false, &mut command), "refused");
+        assert_eq!(command, r#"ed.exe -n1 "{file}""#, "as it was");
+        assert!(!frame(vec![Event::Paste(" --x".into())], false, &mut command));
+        assert!(command.ends_with(" --x"), "a paste that fits is taken: {command}");
+    }
+
+    /// Pasting into the path bar only puts the text there: nothing is gone
+    /// to (no server contacted) until Enter, not even with a line break in
+    /// the paste, nor when the bar loses the keyboard.
+    #[test]
+    fn a_paste_alone_goes_nowhere() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        for leave in [Key::Escape, Key::Tab] {
+            ui.app.command(&ui.ctx.clone(), Cmd::ChangeDir);
+            ui.frames(2);
+            ui.run(vec![Event::Paste("\\\\attacker.example\\share\\x\r\n".into())], Modifiers::NONE);
+            ui.frames(3);
+            assert!(ui.app.path_edit[0].is_some(), "still being edited");
+            assert_eq!(ui.app.panels[0].path(), t.path());
+            ui.key(leave);
+            ui.frames(2);
+            assert_eq!(ui.app.panels[0].path(), t.path(), "{leave:?} goes nowhere");
+            assert!(ui.app.path_edit[0].is_none());
+        }
     }
 
     fn type_path(ui: &mut Ui, text: &str) {
@@ -10001,6 +10246,16 @@ mod tests {
             let _ = ui.app.go_to_input(0, s);
             ui.frames(1);
             reset(&mut ui);
+        }
+        // never looked at from the path bar: devices, streams, a drive's
+        // current folder
+        for s in [r"\\.\PhysicalDrive0", r"\\.\C:", r"\\?\GLOBALROOT\Device\HarddiskVolume1", r"\??\C:\x", "NUL", "con.txt", r"C:\x\COM1\y", "file.txt:stream", "C:x", "line\r\nbreak"] {
+            let before = ui.app.panels[0].path().to_path_buf();
+            assert!(ui.app.go_to_input(0, s).is_err(), "the path bar went to {s:?}");
+            assert_eq!(ui.app.panels[0].path(), before);
+            reset(&mut ui);
+        }
+        for s in &all {
 
             // quick search: typed into the panel
             ui.text(s);
@@ -10674,7 +10929,7 @@ mod tests {
         assert_eq!(ui.viewed().len(), 1);
         // a custom viewer is started instead (here one that doesn't exist: an error, no plugin window)
         ui.app.cfg.viewer = r#""C:\No Such Dir\viewer.exe""#.into();
-        ui.app.cfg.view_with = OpenWith::Program { command: ui.app.cfg.viewer.clone() };
+        ui.app.cfg.view_with = OpenWith::Program { command: ui.app.cfg.viewer.clone(), shell: false };
         ui.key(Key::F3);
         assert_eq!(ui.viewed().len(), 1);
         assert!(matches!(&ui.app.dialog, Dialog::Message { text, .. } if text.contains("viewer.exe")), "reports the program that failed");
@@ -10696,7 +10951,7 @@ mod tests {
         let mut ui = Ui::new(t.path(), t.path());
         let recorder = |opener: &str| OpenWith::Plugin { plugin: "recorder".into(), opener: opener.into() };
         // by default nothing opens .md specially; the default viewer is a missing program here
-        ui.app.cfg.view_with = OpenWith::Program { command: r#""C:\No Such Dir\view.exe""#.into() };
+        ui.app.cfg.view_with = OpenWith::Program { command: r#""C:\No Such Dir\view.exe""#.into(), shell: false };
         ui.app.cfg.suffix_rules = vec![SuffixRule { suffix: "md".into(), view: Some(recorder("view")), edit: Some(recorder("edit")) }];
         assert_eq!(ui.app.open_with_for(OpenKind::View, &t.path().join("Poznámky.MD")), recorder("view"));
         assert_eq!(ui.app.open_with_for(OpenKind::Edit, &t.path().join("Poznámky.MD")), recorder("edit"));
@@ -10805,10 +11060,10 @@ mod tests {
         ui.ctx.set_pixels_per_point(1.5);
         ui.screen = egui::vec2(1100.0, 1400.0);
         ui.app.cfg.editor = r#""C:\Program Files\Notepad++\notepad++.exe""#.into();
-        ui.app.cfg.edit_with = OpenWith::Program { command: ui.app.cfg.editor.clone() };
+        ui.app.cfg.edit_with = OpenWith::Program { command: ui.app.cfg.editor.clone(), shell: false };
         ui.app.cfg.view_with = OpenWith::Plugin { plugin: "recorder".into(), opener: "view".into() };
         ui.app.cfg.suffix_rules = vec![
-            SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into() }), edit: None },
+            SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into(), shell: false }), edit: None },
             SuffixRule { suffix: "ini".into(), view: None, edit: Some(OpenWith::Notepad) },
         ];
         ui.app.suffix_edit = Some(SuffixEdit::of(Some(0), ui.app.cfg.suffix_rules[0].clone(), "", ""));

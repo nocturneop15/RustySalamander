@@ -539,7 +539,7 @@ Open Settings with **Options → Settings…**. While it is open, the main windo
 
 | Setting | Choices | Default | What it does |
 |---|---|---|---|
-| Command prompt | *Default terminal*, *Command Prompt (cmd)*, *PowerShell*, *Custom:* with a command and **Browse…** | Default terminal | What *Open command prompt here* (Shift+F1) starts. *Default terminal* is the one Windows uses (usually Windows Terminal). *PowerShell* is PowerShell 7 if installed. In a custom command, `{dir}` is replaced by the panel's folder in quotes, e.g. `alacritty.exe --working-directory {dir}`, so a folder name with `&` or spaces stays one argument. |
+| Command prompt | *Default terminal*, *Command Prompt (cmd)*, *PowerShell*, *Custom:* with a command and **Browse…** | Default terminal | What *Open command prompt here* (Shift+F1) starts. *Default terminal* is the one Windows uses (usually Windows Terminal). *PowerShell* is PowerShell 7 if installed. In a custom command, `{dir}` is replaced by the panel's folder, e.g. `alacritty.exe --working-directory {dir}`; it is one argument of its own, whatever is in its name. A command interpreter (cmd, PowerShell, `wsl`, a script host…) runs only with **Run through a shell** ticked: then the command line goes as typed, the folder quoted in it, and the interpreter may read a folder's name as commands. |
 
 #### Updates
 
@@ -571,7 +571,7 @@ Your own keys take precedence over fixed keys.
 | Viewer (F3) | any viewer a plugin offers (*Viewer*), *Notepad*, or *Program:* with your own command line and **Browse…** | the Viewer plugin |
 | Editor (F4) | any editor a plugin offers, *Notepad*, or *Program:* | Notepad |
 
-In a command line, `{file}` is replaced by the file's path; without it, the path is added at the end (`code.cmd --reuse-window`).
+In a command line, `{file}` is replaced by the file's path; without it, the path is added at the end (`code.cmd --reuse-window`). The path is one argument of its own, whatever is in the file's name. A command interpreter (cmd, PowerShell, `wsl`, a script host…) runs only with **Run through a shell** ticked for that command, as it could read a file's name as commands of its own; `.bat` and `.cmd` files run without it.
 
 **By file suffix:** files ending with a suffix can have a viewer and editor of their own. **Add a suffix…** asks for the suffix (`md`, `tar.gz`, with or without the dot) and a viewer and editor for it; *Default* keeps the general one. **Edit…** changes a suffix, **Remove** gives it back to the defaults. When suffixes overlap, the longer one wins (`tar.gz` before `gz`).
 

@@ -189,6 +189,7 @@ pub fn resolve_input(input: &str, cwd: &Path) -> io::Result<Target> {
     }
     // a plugin's connection: typed as a URL, or relative inside one
     if let Some(p) = parse_url(&s) {
+        crate::fileops::validate_location(&p)?;
         return Ok(Target::Dir(p));
     }
     if let Some((scheme, authority, mut names)) = virtual_parts(cwd) {
@@ -200,7 +201,9 @@ pub fn resolve_input(input: &str, cwd: &Path) -> io::Result<Target> {
                     names.push(part.to_owned());
                 }
             }
-            return Ok(Target::Dir(virtual_path(&scheme, &authority, &names)));
+            let p = virtual_path(&scheme, &authority, &names);
+            crate::fileops::validate_location(&p)?;
+            return Ok(Target::Dir(p));
         }
     }
     if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
@@ -215,11 +218,17 @@ pub fn resolve_input(input: &str, cwd: &Path) -> io::Result<Target> {
         }
     }
     let p = PathBuf::from(&s);
-    if unc_server(&p).is_some() {
-        return Ok(Target::Dir(server_path(&unc_server(&p).unwrap())));
+    if let Some(server) = unc_server(&p) {
+        let p = server_path(&server);
+        crate::fileops::validate_location(&p)?;
+        return Ok(Target::Dir(p));
     }
     let joined = if p.is_absolute() || s.starts_with(r"\\") { p } else { cwd.join(p) };
+    // as typed (a device name turns into \\.\… on the way), then as meant:
+    // both before anything is looked at
+    crate::fileops::validate_location(&joined)?;
     let full = std::path::absolute(&joined).unwrap_or(joined);
+    crate::fileops::validate_location(&full)?;
     if full.is_file() {
         let name = full.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = full.parent().map(Path::to_path_buf).unwrap_or_else(|| cwd.to_path_buf());

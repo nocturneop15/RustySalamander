@@ -21,8 +21,15 @@ pub enum OpenWith {
     /// Notepad.
     Notepad,
     /// A program's command line; `{file}` is replaced by the file, without
-    /// it the file is added at the end.
-    Program { command: String },
+    /// it the file is added at the end. The file is an argument of its own;
+    /// `shell` ("Run through a shell") passes the command line as typed,
+    /// and only then may the program be a command interpreter
+    /// ([`crate::shell::is_interpreter`]).
+    Program {
+        command: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        shell: bool,
+    },
 }
 
 impl OpenWith {
@@ -189,6 +196,9 @@ pub struct Config {
     pub terminal: TerminalKind,
     /// Command line for [`TerminalKind::Custom`]; `{dir}` = current directory.
     pub terminal_custom: String,
+    /// The custom terminal command runs through a shell (as typed; it may be
+    /// a command interpreter): see [`crate::shell::terminal_launch`].
+    pub terminal_shell: bool,
     pub drive_buttons: DriveButtons,
     pub drive_hotkey: DriveHotkey,
     /// Changing drive returns to the last directory visited on it (as Salamander does).
@@ -298,6 +308,7 @@ impl Default for Config {
             mono_font: String::new(),
             terminal: TerminalKind::Default,
             terminal_custom: String::new(),
+            terminal_shell: false,
             drive_buttons: DriveButtons::Current,
             drive_hotkey: DriveHotkey::Shift,
             drive_remember_dir: true,
@@ -490,10 +501,10 @@ impl Config {
         }
         // before the viewer and editor could be chosen from plugins
         if !text.contains("view_with") && c.use_custom_viewer && !c.viewer.trim().is_empty() {
-            c.view_with = OpenWith::Program { command: c.viewer.clone() };
+            c.view_with = OpenWith::Program { command: c.viewer.clone(), shell: false };
         }
         if !text.contains("edit_with") && c.use_custom_editor && !c.editor.trim().is_empty() {
-            c.edit_with = OpenWith::Program { command: c.editor.clone() };
+            c.edit_with = OpenWith::Program { command: c.editor.clone(), shell: false };
         }
         // before each theme had its own accent color
         if let Some(both) = c.accent_color.take() {
@@ -581,15 +592,15 @@ mod tests {
         assert_eq!((c.view_with.clone(), c.edit_with.clone()), (OpenWith::viewer_plugin(), OpenWith::Notepad));
         // older configs: a set editor or viewer keeps being used
         let old = Config::parse("editor = 'C:/Tools/ed.exe'");
-        assert_eq!(old.edit_with, OpenWith::Program { command: "C:/Tools/ed.exe".into() });
+        assert_eq!(old.edit_with, OpenWith::Program { command: "C:/Tools/ed.exe".into(), shell: false });
         let off = Config::parse("editor = 'C:/Tools/ed.exe'\nuse_custom_editor = false");
         assert_eq!(off.edit_with, OpenWith::Notepad);
         let viewer = Config::parse("viewer = 'v.exe {file}'\nuse_custom_viewer = true");
-        assert_eq!(viewer.view_with, OpenWith::Program { command: "v.exe {file}".into() });
+        assert_eq!(viewer.view_with, OpenWith::Program { command: "v.exe {file}".into(), shell: false }, "an older command: not through a shell");
         // and the new settings survive saving
         let c2 = Config {
             suffix_rules: vec![
-                SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into() }), edit: None },
+                SuffixRule { suffix: "md".into(), view: Some(OpenWith::Program { command: "typora.exe".into(), shell: true }), edit: None },
                 SuffixRule { suffix: "tar.gz".into(), view: None, edit: Some(OpenWith::Notepad) },
             ],
             edit_with: OpenWith::Plugin { plugin: "x".into(), opener: "ini".into() },

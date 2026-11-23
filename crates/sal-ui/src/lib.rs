@@ -5,6 +5,7 @@
 pub mod fonts;
 pub mod icon;
 pub mod layout;
+pub mod latest;
 pub mod mdi;
 pub mod native;
 

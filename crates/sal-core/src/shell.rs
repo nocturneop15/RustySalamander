@@ -53,10 +53,10 @@ pub fn open(path: &Path) -> io::Result<()> {
 }
 
 /// Open a file in an editor (F4): `editor` is a custom command line (see
-/// [`open_with_program`]); `None` uses Notepad.
+/// [`open_with_program`], not through a shell); `None` uses Notepad.
 pub fn edit(path: &Path, editor: Option<&str>) -> io::Result<()> {
     match editor.filter(|e| !e.trim().is_empty()) {
-        Some(cmd) => open_with_program(cmd, path),
+        Some(cmd) => open_with_program(cmd, path, false),
         #[cfg(windows)]
         None => std::process::Command::new("notepad.exe").arg(path).spawn().map(|_| ()),
         #[cfg(not(windows))]
@@ -92,20 +92,104 @@ pub fn program_command(command: &str, file: &Path) -> io::Result<(String, String
     Ok((program, args))
 }
 
-/// Run a user-chosen program (custom editor or viewer) on `file`.
-pub fn open_with_program(command: &str, file: &Path) -> io::Result<()> {
-    let (program, args) = program_command(command, file)?;
-    let mut cmd = std::process::Command::new(&program);
+/// Whether `program` reads its own command line as commands (a command
+/// interpreter, a script host): a file's or folder's name given to it could
+/// be read as commands too (`%PATH%`, `$(…)`, `;`), however it is quoted.
+/// Such a program runs only with the command's "Run through a shell".
+/// (`.bat` and `.cmd` files are fine: Windows' argument rules for them are
+/// kept by the launcher, which refuses what it can't pass safely.)
+pub fn is_interpreter(program: &str) -> bool {
+    let name = program.trim().trim_matches('"').rsplit(['\\', '/']).next().unwrap_or_default().to_ascii_lowercase();
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(stem, "cmd" | "powershell" | "powershell_ise" | "pwsh" | "wscript" | "cscript" | "mshta" | "bash" | "sh" | "wsl" | "conhost" | "rundll32" | "msiexec" | "regsvr32")
+}
+
+/// Split arguments as a command line is typed: by spaces, but not inside
+/// double quotes, which are taken away.
+pub fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (mut cur, mut quoted, mut any) = (String::new(), false, false);
+    for c in s.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                any = false;
+            }
+            c => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The arguments of `rest` with `placeholder` (`{file}`, `{dir}`) in each
+/// replaced by `path`, each one argument of its own whatever is in the
+/// path; without the placeholder, `path` is added as the last argument
+/// (when `append`). Windows Terminal reads `;` as "another command": there
+/// it is escaped.
+fn arguments(program: &str, rest: &str, placeholder: &str, path: &str, append: bool) -> Vec<String> {
+    let wt = program.trim().trim_matches('"').rsplit(['\\', '/']).next().is_some_and(|n| n.eq_ignore_ascii_case("wt") || n.eq_ignore_ascii_case("wt.exe"));
+    let path = if wt { path.replace(';', "\\;") } else { path.to_owned() };
+    let mut args = split_args(rest);
+    let mut used = false;
+    for a in &mut args {
+        if a.contains(placeholder) {
+            *a = a.replace(placeholder, &path);
+            used = true;
+        }
+    }
+    if !used && append {
+        args.push(path);
+    }
+    args
+}
+
+/// The error of a command interpreter run without "Run through a shell".
+fn needs_shell(program: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("\"{program}\" is a command interpreter: it could read a file's or folder's name as commands. Tick \"Run through a shell\" for this command if it is meant to run through one."),
+    )
+}
+
+/// Run a user-chosen program (custom editor or viewer) on `file`. The
+/// file is one argument of its own, as the program's arguments are; only
+/// with `shell` is the command line passed as typed (see
+/// [`program_command`]), and only then may the program be a command
+/// interpreter ([`is_interpreter`]).
+pub fn open_with_program(command: &str, file: &Path, shell: bool) -> io::Result<()> {
+    let mut cmd = if shell {
+        let (program, args) = program_command(command, file)?;
+        let mut cmd = std::process::Command::new(&program);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.raw_arg(&args);
+        }
+        #[cfg(not(windows))]
+        cmd.args(args.split_whitespace().map(|a| a.trim_matches('"')));
+        cmd
+    } else {
+        let (program, rest) = split_command(command).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no program is set"))?;
+        if is_interpreter(&program) {
+            return Err(needs_shell(&program));
+        }
+        let mut cmd = std::process::Command::new(&program);
+        cmd.args(arguments(&program, &rest, "{file}", &crate::encoding::display_path(file), true));
+        cmd
+    };
     if let Some(dir) = file.parent() {
         cmd.current_dir(dir);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.raw_arg(&args);
-    }
-    #[cfg(not(windows))]
-    cmd.args(args.split_whitespace().map(|a| a.trim_matches('"')));
+    let program = cmd.get_program().to_string_lossy().into_owned();
     cmd.spawn().map(|_| ()).map_err(|e| io::Error::new(e.kind(), format!("cannot start \"{program}\": {e}")))
 }
 
@@ -189,13 +273,23 @@ fn default_terminal_is_conhost() -> bool {
     String::from_utf16_lossy(&buf[..n]).eq_ignore_ascii_case(CONHOST)
 }
 
-/// Work out what to start for `kind` in `dir` without starting it.
-pub fn terminal_launch(kind: TerminalKind, custom: &str, dir: &Path) -> io::Result<Launch> {
+/// Work out what to start for `kind` in `dir` without starting it. A
+/// custom command gets the folder as an argument of its own, unless `shell`
+/// (its "Run through a shell"): then the command line goes as typed, the
+/// folder quoted in it, and only then may it be a command interpreter.
+pub fn terminal_launch(kind: TerminalKind, custom: &str, shell: bool, dir: &Path) -> io::Result<Launch> {
     let launch = |program: &str, args: Vec<String>| Launch { program: program.to_owned(), args, raw_args: None, dir: dir.to_path_buf() };
     let dir_str = crate::encoding::display_path(dir);
     match kind {
         TerminalKind::Custom => {
             let (program, rest) = split_command(custom).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no custom terminal command is set (Options > Terminal)"))?;
+            if !shell {
+                if is_interpreter(&program) {
+                    return Err(needs_shell(&program));
+                }
+                // the folder is its working directory; {dir} where it is asked for
+                return Ok(Launch { program: program.clone(), args: arguments(&program, &rest, "{dir}", &dir_str, false), raw_args: None, dir: dir.to_path_buf() });
+            }
             // quoted, so a folder named "x & calc" can't run calc
             let quoted = quote_path(&dir_str);
             let raw = rest.replace("\"{dir}\"", &quoted).replace("{dir}", &quoted);
@@ -223,8 +317,8 @@ pub fn terminal_launch(kind: TerminalKind, custom: &str, dir: &Path) -> io::Resu
 }
 
 /// Open a terminal in `dir` ("Open command prompt here").
-pub fn open_terminal(kind: TerminalKind, custom: &str, dir: &Path) -> io::Result<()> {
-    let l = terminal_launch(kind, custom, dir)?;
+pub fn open_terminal(kind: TerminalKind, custom: &str, shell: bool, dir: &Path) -> io::Result<()> {
+    let l = terminal_launch(kind, custom, shell, dir)?;
     let mut cmd = std::process::Command::new(&l.program);
     cmd.args(&l.args).current_dir(&l.dir);
     #[cfg(windows)]
@@ -286,16 +380,46 @@ pub fn recycle(_paths: &[PathBuf]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// A folder or file name with `&`, `|`, `%`… stays one quoted argument:
-    /// it can't start another command (cmd.exe would run `& calc`).
+    /// Without "Run through a shell", a folder or file name is one argument
+    /// of its own, whatever is in it, and a command interpreter isn't run.
+    #[test]
+    fn names_are_arguments_of_their_own() {
+        let hostile = Path::new(r"C:\a & calc | b ^ %PATH% $(x) ;wt");
+        let l = terminal_launch(TerminalKind::Custom, r#"alacritty.exe --working-directory "{dir}" -e x"#, false, hostile).unwrap();
+        assert_eq!((l.args.as_slice(), l.raw_args.as_deref()), (&["--working-directory".to_owned(), hostile.display().to_string(), "-e".into(), "x".into()][..], None));
+        // Windows Terminal's command separator is escaped
+        let l = terminal_launch(TerminalKind::Custom, "wt.exe -d {dir}", false, Path::new(r"C:\a;b")).unwrap();
+        assert_eq!(l.args, ["-d", r"C:\a\;b"]);
+        // the folder is the working directory: not added unasked
+        let l = terminal_launch(TerminalKind::Custom, "nu.exe", false, hostile).unwrap();
+        assert!(l.args.is_empty() && l.dir == hostile);
+        for interpreter in ["cmd.exe /k cd /d {dir}", r#""C:\Windows\System32\cmd.exe" /k"#, "powershell -NoExit", "pwsh.exe", "wsl.exe", "mshta x", "WScript.exe a.vbs"] {
+            let e = terminal_launch(TerminalKind::Custom, interpreter, false, hostile).unwrap_err();
+            assert!(e.to_string().contains("Run through a shell"), "{interpreter}: {e}");
+            assert!(open_with_program(interpreter, Path::new(r"C:\x.txt"), false).unwrap_err().to_string().contains("Run through a shell"), "{interpreter}");
+        }
+        assert!(!is_interpreter("code.cmd") && !is_interpreter("notepad++.exe") && !is_interpreter(r"C:\Tools\cmder.exe"));
+        assert_eq!(arguments("ed.exe", "-n1 {file}", "{file}", r"C:\x\a & del b.txt", true), ["-n1", r"C:\x\a & del b.txt"]);
+        assert_eq!(arguments("ed.exe", "", "{file}", r"C:\x\$(calc).txt", true), [r"C:\x\$(calc).txt"]);
+        assert_eq!(arguments("ed.exe", "--file={file} \"two words\"", "{file}", r"C:\a b", true), [r"--file=C:\a b", "two words"]);
+        assert_eq!(split_args(r#"a "b c" "" d"#), ["a", "b c", "", "d"]);
+        for s in crate::hostile::inputs() {
+            let _ = terminal_launch(TerminalKind::Custom, &s, false, Path::new(&s));
+            let _ = split_args(&s);
+        }
+    }
+
+    /// With "Run through a shell", the command line goes as typed: a folder
+    /// or file name with `&`, `|`… is one quoted argument in it, so it can't
+    /// start another command (cmd.exe would run `& calc`).
     #[test]
     fn names_are_quoted_in_commands() {
-        let l = terminal_launch(TerminalKind::Custom, "cmd.exe /k cd /d {dir}", Path::new(r"C:\x & calc")).unwrap();
+        let l = terminal_launch(TerminalKind::Custom, "cmd.exe /k cd /d {dir}", true, Path::new(r"C:\x & calc")).unwrap();
         assert_eq!(l.raw_args.as_deref(), Some(r#"/k cd /d "C:\x & calc""#));
-        let l = terminal_launch(TerminalKind::Custom, r#"wt.exe -d "{dir}""#, Path::new(r"C:\a | b ^ %PATH%")).unwrap();
+        let l = terminal_launch(TerminalKind::Custom, r#"wt.exe -d "{dir}""#, true, Path::new(r"C:\a | b ^ %PATH%")).unwrap();
         assert_eq!(l.raw_args.as_deref(), Some(r#"-d "C:\a | b ^ %PATH%""#));
         // a drive root's trailing backslash doesn't escape the closing quote
-        let l = terminal_launch(TerminalKind::Custom, "x.exe {dir} --next", Path::new(r"C:\")).unwrap();
+        let l = terminal_launch(TerminalKind::Custom, "x.exe {dir} --next", true, Path::new(r"C:\")).unwrap();
         assert_eq!(l.raw_args.as_deref(), Some(r#""C:\\" --next"#));
         let (p, a) = program_command("notepad++.exe -n1 {file}", Path::new(r"C:\x\a & del b.txt")).unwrap();
         assert_eq!((p.as_str(), a.as_str()), ("notepad++.exe", r#"-n1 "C:\x\a & del b.txt""#));
@@ -303,7 +427,7 @@ mod tests {
         assert_eq!(a, r#""C:\x\$(calc)`calc`.txt""#);
         assert_eq!(quote_path("a\"b"), "\"ab\"", "a quote can't close the argument");
         for s in crate::hostile::inputs() {
-            let _ = terminal_launch(TerminalKind::Custom, &s, Path::new(&s));
+            let _ = terminal_launch(TerminalKind::Custom, &s, true, Path::new(&s));
             let _ = program_command(&s, Path::new(&s));
         }
     }
@@ -311,13 +435,15 @@ mod tests {
     #[test]
     fn custom_command_parsing() {
         let dir = Path::new(r"C:\Data\složka 🦎");
-        let l = terminal_launch(TerminalKind::Custom, r#""C:\Program Files\Alacritty\alacritty.exe" --working-directory "{dir}""#, dir).unwrap();
+        let l = terminal_launch(TerminalKind::Custom, r#""C:\Program Files\Alacritty\alacritty.exe" --working-directory "{dir}""#, true, dir).unwrap();
         assert_eq!(l.program, r"C:\Program Files\Alacritty\alacritty.exe");
         assert_eq!(l.raw_args.as_deref(), Some(r#"--working-directory "C:\Data\složka 🦎""#));
-        let l = terminal_launch(TerminalKind::Custom, "nu.exe", dir).unwrap();
+        let l = terminal_launch(TerminalKind::Custom, r#""C:\Program Files\Alacritty\alacritty.exe" --working-directory "{dir}""#, false, dir).unwrap();
+        assert_eq!((l.program.as_str(), l.args.as_slice()), (r"C:\Program Files\Alacritty\alacritty.exe", &["--working-directory".to_owned(), dir.display().to_string()][..]));
+        let l = terminal_launch(TerminalKind::Custom, "nu.exe", true, dir).unwrap();
         assert_eq!((l.program.as_str(), l.raw_args), ("nu.exe", None));
         assert_eq!(l.dir, dir);
-        assert!(terminal_launch(TerminalKind::Custom, "   ", dir).is_err());
+        assert!(terminal_launch(TerminalKind::Custom, "   ", false, dir).is_err());
     }
 
     #[test]
@@ -335,10 +461,10 @@ mod tests {
     #[test]
     fn builtin_terminals() {
         let dir = Path::new(r"C:\a;b");
-        assert_eq!(terminal_launch(TerminalKind::Cmd, "", dir).unwrap().program, "cmd.exe");
-        let ps = terminal_launch(TerminalKind::PowerShell, "", dir).unwrap();
+        assert_eq!(terminal_launch(TerminalKind::Cmd, "", false, dir).unwrap().program, "cmd.exe");
+        let ps = terminal_launch(TerminalKind::PowerShell, "", false, dir).unwrap();
         assert!(ps.program == "pwsh.exe" || ps.program == "powershell.exe");
-        let d = terminal_launch(TerminalKind::Default, "", dir).unwrap();
+        let d = terminal_launch(TerminalKind::Default, "", false, dir).unwrap();
         if d.program == "wt.exe" {
             assert_eq!(d.args, ["-d", r"C:\a\;b"]);
         } else {

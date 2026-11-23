@@ -89,6 +89,32 @@ fn archive_listing(view: &ArchiveView, vis: Visibility, sort: SortSpec) -> Listi
 /// cursor on, or `None` when nothing could be read.
 type Loaded = Option<(Listing, Option<String>)>;
 
+/// Where a folder is read from.
+enum Source {
+    /// A plugin's archive or connection: the plugin, its file (or root), the
+    /// folder inside.
+    Plugin(Arc<dyn FolderPlugin>, PathBuf, String),
+    /// The disk.
+    Disk,
+    /// A connection's path (`\\?\<scheme>\…`) no plugin has open: never
+    /// the disk's (Windows would take it for a device's).
+    Unconnected,
+}
+
+/// Where `path` is read from: the plugin that has it, the disk, or nowhere.
+fn source(plugins: &[Arc<dyn FolderPlugin>], path: &Path) -> Source {
+    match plugins::split(plugins, path) {
+        Some((plugin, file, inner)) => Source::Plugin(plugin, file, inner),
+        None if sal_core::location::virtual_parts(path).is_some() => Source::Unconnected,
+        None => Source::Disk,
+    }
+}
+
+/// The error of a connection's path no plugin has open.
+fn unconnected(path: &Path) -> String {
+    format!("{}: {}", display_path(path), crate::i18n::tr("not connected (the connection was closed, or its plugin is off)"))
+}
+
 /// The folder a panel shows when its own can't be read.
 fn fallback_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
@@ -116,6 +142,8 @@ impl Panel {
             archive: None,
         };
         let start = if path.is_empty() { fallback_dir() } else { PathBuf::from(path) };
+        // a connection no plugin has open (now): its folders are nowhere
+        let start = if matches!(source(&p.plugins, &start), Source::Unconnected) { fallback_dir() } else { start };
         // a network folder can take seconds to read (or to time out): read it
         // in the background, so the window is usable at once
         if drives::is_remote(&start) && plugins::split(&p.plugins, &start).is_none() {
@@ -175,17 +203,20 @@ impl Panel {
     /// Read a folder: a directory, or a folder inside an archive when the
     /// path goes through a file a folder plugin handles.
     fn read(&mut self, path: &Path, vis: Visibility) -> Result<(Listing, Option<ArchiveView>), String> {
-        if let Some((plugin, file, inner)) = plugins::split(&self.plugins, path) {
-            {
+        match source(&self.plugins, path) {
+            Source::Plugin(plugin, file, inner) => {
                 let view = self.archive_view(&plugin, &file, inner)?;
                 if view.index.complete && !view.index.is_dir(&view.inner) {
                     return Err(format!("{}: {}", display_path(path), crate::i18n::tr("not found in the archive")));
                 }
-                return Ok((archive_listing(&view, vis, self.sort), Some(view)));
+                Ok((archive_listing(&view, vis, self.sort), Some(view)))
+            }
+            Source::Unconnected => Err(unconnected(path)),
+            Source::Disk => {
+                let listing = listing::read_dir(path, vis, self.sort).map_err(|e| format!("{}: {e}", display_path(path)))?;
+                Ok((listing, None))
             }
         }
-        let listing = listing::read_dir(path, vis, self.sort).map_err(|e| format!("{}: {e}", display_path(path)))?;
-        Ok((listing, None))
     }
 
     /// The plugin's index for `inner`: an archive's is read again only when
@@ -279,10 +310,15 @@ impl Panel {
         let mut target = path.clone();
         // directory vanished: climb to the nearest existing ancestor (inside
         // an archive: the nearest folder the archive still has)
-        let exists = |p: &Path, me: &mut Self| match plugins::split(&me.plugins, p) {
-            Some((plugin, file, inner)) => me.archive_view(&plugin, &file, inner.clone()).is_ok_and(|v| !v.index.complete || v.index.is_dir(&inner)),
-            None => p.is_dir(),
+        let exists = |p: &Path, me: &mut Self| match source(&me.plugins, p) {
+            Source::Plugin(plugin, file, inner) => me.archive_view(&plugin, &file, inner.clone()).is_ok_and(|v| !v.index.complete || v.index.is_dir(&inner)),
+            Source::Disk => p.is_dir(),
+            // nothing of it is anywhere now
+            Source::Unconnected => false,
         };
+        if matches!(source(&self.plugins, &target), Source::Unconnected) {
+            target = fallback_dir();
+        }
         while !exists(&target, self) {
             match target.parent() {
                 Some(p) => target = p.to_path_buf(),
@@ -552,5 +588,33 @@ impl Panel {
         if let Some(i) = quicksearch::find(|i| entries[i].name.as_str(), n, start, &mask, forward, anywhere) {
             self.set_cursor(i);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A connection's path no plugin has open is never read from the disk
+    /// (Windows would take `\\?\scp\…` for a device): loading it is an
+    /// error, a panel started on it or reloading it goes to a folder on disk.
+    #[test]
+    fn an_unconnected_path_is_never_read_from_disk() {
+        let mounted = Path::new(r"\\?\scp\me@host\home\me");
+        // no plugin, or none that has it open: nowhere
+        assert!(matches!(source(&[], mounted), Source::Unconnected));
+        assert!(matches!(source(&[], Path::new(r"\\?\ftp\host")), Source::Unconnected));
+        assert!(matches!(source(&[], Path::new(r"C:\Windows")), Source::Disk));
+        assert!(matches!(source(&[], Path::new(r"\\?\C:\Windows")), Source::Disk));
+        let vis = Visibility::ALL;
+        let mut p = Panel::new(&mounted.display().to_string(), SortSpec::default(), vis, Vec::new());
+        assert_eq!(p.path(), fallback_dir(), "started on a folder on disk");
+        let e = p.load(mounted, vis, None).unwrap_err();
+        assert!(e.contains("not connected"), "{e}");
+        assert_eq!(p.path(), fallback_dir(), "stays");
+        // shown while connected, then the connection went
+        p.listing.path = mounted.to_path_buf();
+        p.reload(vis);
+        assert_eq!(p.path(), fallback_dir());
     }
 }

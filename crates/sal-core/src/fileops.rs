@@ -222,6 +222,58 @@ struct Ctx<'a> {
     verify: Verify,
     /// With [`Verify::Checksum`]: each file checked, (original, copy, SHA-256).
     sums: Vec<(PathBuf, PathBuf, [u8; 32])>,
+    /// A target a move already asked about, and the file that was there
+    /// then: its copy across volumes overwrites that file without asking
+    /// again (another one there by then is asked about).
+    preapproved: Option<(PathBuf, Option<FileId>)>,
+    /// While a move copies across volumes: each original copied, as it was
+    /// when its copy began ([`Copied`]). Only those are deleted after, and
+    /// only while they are still those, unchanged.
+    copied_ids: Option<std::collections::HashMap<PathBuf, Copied>>,
+    /// Reads a file's [`FileStamp`]: [`file_stamp`] (in tests, one that
+    /// fails on cue).
+    stamp_of: fn(&Path) -> Option<FileStamp>,
+}
+
+/// An original a move across volumes copied, as it was then: what its
+/// deletion after is checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Copied {
+    /// A folder, by its identity only (its times change as what is in it
+    /// goes; what is in it is checked one by one).
+    Folder(FileId),
+    /// A file, by its identity and its size and times (only one whose
+    /// stamp could be read is recorded: one that couldn't isn't deleted).
+    File(FileId, FileStamp),
+}
+
+/// What [`file_id`] tells a file by.
+type FileId = (u64, u128);
+
+/// What may be where a file is put: nothing (`None`), or the file the user
+/// agreed to overwrite, as it was when asked (`Some`; its identity, `None`
+/// inside when that couldn't be read).
+type Approved = Option<Option<FileId>>;
+
+/// The error of a target that another operation put there meanwhile: asked
+/// about, then tried again.
+const APPEARED: &str = "another file was put there meanwhile";
+
+fn appeared() -> io::Error {
+    io::Error::new(io::ErrorKind::AlreadyExists, APPEARED)
+}
+
+fn is_appeared(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::AlreadyExists && e.to_string() == APPEARED
+}
+
+/// `e`, or [`appeared`] when it says the target is there.
+fn appeared_if_exists(e: io::Error) -> io::Error {
+    if e.kind() == io::ErrorKind::AlreadyExists {
+        appeared()
+    } else {
+        e
+    }
 }
 
 /// Internal outcome of a step: `Err(())` means cancelled.
@@ -266,11 +318,11 @@ impl Ctx<'_> {
         }
     }
 
-    /// Decide what to do when `dst` exists. Ok(true) = proceed (overwrite).
-    fn resolve_conflict(&mut self, src: &Path, dst: &Path) -> Step {
-        if fs::symlink_metadata(dst).is_err() {
-            return Ok(true);
-        }
+    /// Ask whether `dst`, which is there, may be overwritten (unless Overwrite
+    /// All or Skip All answered it). Ok(true) = overwrite. Whatever happens
+    /// to `dst` meanwhile, the answer is for the file that was there: the
+    /// caller tells it by its identity ([`Approved`]).
+    fn ask_overwrite(&mut self, src: &Path, dst: &Path) -> Step {
         if self.overwrite_all {
             return Ok(true);
         }
@@ -310,28 +362,59 @@ impl Ctx<'_> {
         }
     }
 
-    /// Copy one file, after asking about an existing target.
+    /// Copy one file, after asking about an existing target. A target that
+    /// appears meanwhile (another operation made it) is asked about too,
+    /// never overwritten unasked.
     fn copy_file(&mut self, src: &Path, dst: &Path) -> Step {
-        // the same file by another name (a case alias, a short name, a hard
-        // link, another drive letter): overwriting it would destroy it
-        if fs::symlink_metadata(dst).is_ok() && same_file(src, dst, true) {
-            return self.refuse(src, io::Error::new(io::ErrorKind::InvalidInput, "cannot copy a file onto itself"));
-        }
-        if !self.resolve_conflict(src, dst)? {
-            self.summary.skipped += 1;
-            if let Ok(md) = fs::metadata(src) {
-                self.progress.bytes_done += md.len() * self.passes();
+        let done = loop {
+            let exists = fs::symlink_metadata(dst).is_ok();
+            // the same file by another name (a case alias, a short name, a
+            // hard link, another drive letter): overwriting it would destroy it
+            if exists && same_file(src, dst, true) {
+                return self.refuse(src, io::Error::new(io::ErrorKind::InvalidInput, "cannot copy a file onto itself"));
             }
-            self.progress.files_done += 1;
-            return Ok(false);
-        }
-        self.progress.current = src.to_path_buf();
-        self.report(true)?;
-        let start_bytes = self.progress.bytes_done;
-        let done = self.attempt(src, |ctx| {
-            ctx.progress.bytes_done = start_bytes;
-            ctx.copy_file_data(src, dst)
-        })?;
+            let approved: Approved = if exists {
+                // the file as it is now is what the answer is about
+                let id = file_id(dst, false);
+                let pre = self.preapproved.take().is_some_and(|(p, i)| p == dst && i == id);
+                if !pre && !self.ask_overwrite(src, dst)? {
+                    self.summary.skipped += 1;
+                    if let Ok(md) = fs::metadata(src) {
+                        self.progress.bytes_done += md.len() * self.passes();
+                    }
+                    self.progress.files_done += 1;
+                    return Ok(false);
+                }
+                Some(id)
+            } else {
+                None
+            };
+            self.progress.current = src.to_path_buf();
+            self.report(true)?;
+            let start_bytes = self.progress.bytes_done;
+            // the original as it is when its copy begins (a move deletes it
+            // only while it is still this file, unchanged; one whose stamp
+            // can't be read is copied, never deleted)
+            let src_id = file_id(src, false).zip((self.stamp_of)(src));
+            let done = self.attempt(src, |ctx| {
+                ctx.progress.bytes_done = start_bytes;
+                match ctx.copy_file_data(src, dst, approved) {
+                    // another file there now, nobody said it may be overwritten: ask
+                    Err(e) if is_appeared(&e) => Ok(None),
+                    r => r.map(Some),
+                }
+            })?;
+            match done {
+                Some(None) => self.progress.bytes_done = start_bytes,
+                Some(Some(done)) => {
+                    if let (Some(ids), Some((id, stamp))) = (&mut self.copied_ids, src_id) {
+                        ids.insert(src.to_path_buf(), Copied::File(id, stamp));
+                    }
+                    break Some(done);
+                }
+                None => break None,
+            }
+        };
         self.progress.files_done += 1;
         match done {
             Some((n, sum)) => {
@@ -396,20 +479,28 @@ impl Ctx<'_> {
     /// progress, and check the copy as asked: the bytes copied and, with
     /// [`Verify::Checksum`], the SHA-256 both have.
     ///
-    /// An existing `dst` stays until its replacement is complete and checked:
-    /// the copy goes into a file beside it first ([`partial_name`]), renamed
-    /// over it at the end. A cancelled, failed or bad copy leaves it as it was.
-    fn copy_file_data(&mut self, src: &Path, dst: &Path) -> io::Result<(u64, Option<[u8; 32]>)> {
+    /// Over a file the user agreed to overwrite (`approved`), that file
+    /// stays until its replacement is complete and checked: the copy goes
+    /// into a file beside it first ([`partial_name`]), renamed over it at the
+    /// end ([`commit_rename`]: only over that file). A cancelled, failed or
+    /// bad copy leaves it as it was. Otherwise `dst` is made new. Either
+    /// way, a file someone else put there meanwhile is an [`appeared`] error.
+    fn copy_file_data(&mut self, src: &Path, dst: &Path, approved: Approved) -> io::Result<(u64, Option<[u8; 32]>)> {
         let md = fs::metadata(src)?;
         self.progress.verifying = false;
-        let Ok(dmd) = fs::symlink_metadata(dst) else { return self.copy_data_to(src, dst, &md) };
-        if dmd.is_dir() {
+        if approved.is_none() {
+            return self.copy_data_to(src, dst, &md).map_err(appeared_if_exists);
+        }
+        if fs::symlink_metadata(dst).is_ok_and(|m| m.is_dir()) {
             // found before copying it all for nothing
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a folder of this name is there already"));
         }
+        if approved == Some(None) {
+            return Err(unknown_identity(dst));
+        }
         let partial = partial_name(dst);
         let done = self.copy_data_to(src, &partial, &md)?;
-        if let Err(e) = replace_file(&partial, dst) {
+        if let Err(e) = commit_rename(&partial, dst, approved) {
             remove_file_forced(&partial);
             return Err(e);
         }
@@ -591,6 +682,12 @@ impl Ctx<'_> {
         if self.attempt(dst, |_| fs::create_dir_all(dst))?.is_none() {
             return Ok(false);
         }
+        // a move deletes this folder after only while it is still this one
+        // (what turns up in it after its list was read stays, and so it)
+        // (by identity only: its times change as what is in it goes)
+        if let (Some(ids), Some(id)) = (&mut self.copied_ids, file_id(src, false)) {
+            ids.insert(src.to_path_buf(), Copied::Folder(id));
+        }
         let children = match self.attempt(src, |_| fs::read_dir(src)?.map(|e| e.map(|e| e.path())).collect::<io::Result<Vec<_>>>())? {
             Some(c) => c,
             None => return Ok(false),
@@ -609,51 +706,56 @@ impl Ctx<'_> {
     }
 
     /// Move `src` to `dst`: a rename on the same volume, else a copy and a
-    /// delete.
+    /// delete. A target that appears meanwhile (another operation made it)
+    /// is asked about too, never replaced unasked.
     fn move_item(&mut self, src: &Path, dst: &Path) -> Step {
         if src == dst {
             return Ok(true);
         }
-        // `dst` the item itself by another name (a case alias, a short name,
-        // another drive letter): nothing to overwrite. Only a change of the
-        // name's case (or a hard link's name) is left to do, by the rename.
-        let exists = fs::symlink_metadata(dst).is_ok();
-        let itself = exists && same_file(src, dst, false);
-        if itself && src.file_name() == dst.file_name() {
-            return Ok(true);
-        }
-        let mut made_writable = false;
-        if exists && !itself {
-            let is_dir = src.is_dir();
-            if is_dir && dst.is_dir() {
-                // merge directories: move children one by one (each renamed
-                // when it can be, so nothing is copied on the same volume)
-                return self.merge_dirs(src, dst);
+        let (renamed, approved) = loop {
+            // `dst` the item itself by another name (a case alias, a short
+            // name, another drive letter): nothing to overwrite. Only a change
+            // of the name's case (or a hard link's name) is left to do.
+            let exists = fs::symlink_metadata(dst).is_ok();
+            let itself = exists && same_file(src, dst, false);
+            if itself && src.file_name() == dst.file_name() {
+                return Ok(true);
             }
-            if !self.resolve_conflict(src, dst)? {
-                self.summary.skipped += 1;
-                return Ok(false);
+            let approved: Approved = if exists && !itself {
+                if src.is_dir() && dst.is_dir() {
+                    // merge directories: move children one by one (each renamed
+                    // when it can be, so nothing is copied on the same volume)
+                    return self.merge_dirs(src, dst);
+                }
+                // the file as it is now is what the answer is about
+                let id = file_id(dst, false);
+                if !self.ask_overwrite(src, dst)? {
+                    self.summary.skipped += 1;
+                    return Ok(false);
+                }
+                Some(id)
+            } else {
+                None
+            };
+            // fast path: rename within a volume; over a file only when that
+            // was asked about, and only over that file
+            self.progress.current = src.to_path_buf();
+            let renamed = self.report(true).and_then(|()| {
+                self.attempt(src, |_| match if itself { rename_itself(src, dst) } else { commit_rename(src, dst, approved) } {
+                    Ok(()) => Ok(Some(true)),
+                    Err(e) if rename_needs_copy(&e) => Ok(Some(false)),
+                    Err(e) if is_appeared(&e) => Ok(None),
+                    Err(e) => Err(e),
+                })
+            });
+            match renamed? {
+                // another file there now: ask about it
+                Some(None) => continue,
+                Some(Some(r)) => break (Some(r), approved),
+                None => break (None, None),
             }
-            // the rename replaces a file (`dst` stays if it fails); a
-            // read-only one has to be made writable for that
-            if !is_dir {
-                made_writable = clear_readonly(dst);
-            }
-        }
-        // fast path: rename within a volume
-        self.progress.current = src.to_path_buf();
-        let renamed = self.report(true).and_then(|()| {
-            self.attempt(src, |_| match fs::rename(src, dst) {
-                Ok(()) => Ok(true),
-                Err(e) if rename_needs_copy(&e) => Ok(false),
-                Err(e) => Err(e),
-            })
-        });
-        if made_writable && renamed != Ok(Some(true)) {
-            // not replaced here: as it was (a copy replaces it whole)
-            set_readonly(dst);
-        }
-        match renamed? {
+        };
+        match renamed {
             Some(true) => {
                 let (f, b) = measure(&[dst.to_path_buf()]);
                 self.progress.files_done += f;
@@ -667,7 +769,7 @@ impl Ctx<'_> {
                 }
                 Ok(true)
             }
-            Some(false) => self.move_by_copy(src, dst),
+            Some(false) => self.move_by_copy(src, dst, approved),
             None => {
                 // skipped after the error: done with, for the progress
                 let (f, b) = measure(&[src.to_path_buf()]);
@@ -738,28 +840,52 @@ impl Ctx<'_> {
     }
 
     /// Move across volumes: copy, then delete the source only when all of it
-    /// was copied.
-    fn move_by_copy(&mut self, src: &Path, dst: &Path) -> Step {
+    /// was copied. `approved`: the file at `dst` the user agreed to overwrite.
+    fn move_by_copy(&mut self, src: &Path, dst: &Path, approved: Approved) -> Step {
         // copy_tree resolves conflicts itself; deleting the source only when
-        // everything below it was copied keeps skipped files safe
-        // a single file whose conflict move_item already resolved: overwrite
-        // it without asking again, then forget that (it was this file only).
-        // A merged directory keeps what the user chose inside it, so an
-        // Overwrite All there holds for the rest of the operation.
-        let forced = !self.overwrite_all && fs::symlink_metadata(dst).is_ok() && !src.is_dir();
-        if forced {
-            self.overwrite_all = true;
+        // everything below it was copied keeps skipped files safe.
+        // A single file whose conflict move_item already resolved: that file
+        // is overwritten without asking again (another one there by then is
+        // asked about)
+        if let (Some(id), false) = (approved, src.is_dir()) {
+            self.preapproved = Some((dst.to_path_buf(), id));
         }
+        self.copied_ids = Some(Default::default());
         let ok = self.copy_tree(src, dst);
-        if forced {
-            self.overwrite_all = false;
+        self.preapproved = None;
+        let r = match ok {
+            // only what was copied goes, and only while it is what was copied:
+            // a file another operation put in its place meanwhile stays (and
+            // so does its folder): a move only in part
+            Ok(true) => self.delete_tree(src, false),
+            other => other,
+        };
+        self.copied_ids = None;
+        r
+    }
+
+    /// Whether `p` may be deleted as the original of a move: always, but in
+    /// a move across volumes only while it is still the file or folder that
+    /// was copied ([`Ctx::copied_ids`]).
+    fn was_copied(&self, p: &Path) -> bool {
+        let Some(ids) = &self.copied_ids else { return true };
+        let Some(now) = file_id(p, false) else { return false };
+        match ids.get(p) {
+            Some(Copied::Folder(id)) => *id == now,
+            // a file also unchanged: written to since (appended, rewritten),
+            // it has more than its copy; its stamp unreadable now, that
+            // can't be told
+            Some(Copied::File(id, stamp)) => *id == now && (self.stamp_of)(p) == Some(*stamp),
+            None => false,
         }
-        if ok? {
-            self.delete_tree(src, false)?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+    }
+
+    /// Keep `p`, the original of a move that another file or folder took
+    /// the place of while it was copied (or that turned up in a folder
+    /// copied): listed, not deleted.
+    fn keep_uncopied(&mut self, p: &Path) {
+        self.summary.skipped += 1;
+        self.summary.problem(p, "not moved: it changed or turned up while it was copied (or that couldn't be checked), so it was kept".into());
     }
 
     /// Delete `p` with everything below it; `count` adds it to the progress.
@@ -770,17 +896,22 @@ impl Ctx<'_> {
         };
         self.progress.current = p.to_path_buf();
         self.report(false)?;
-        let clear_ro = |p: &Path| {
-            if let Ok(md) = fs::symlink_metadata(p) {
-                let mut perms = md.permissions();
-                if perms.readonly() {
-                    #[allow(clippy::permissions_set_readonly_false)]
-                    perms.set_readonly(false);
-                    let _ = fs::set_permissions(p, perms);
-                }
+        // made writable only to be deleted at once (as it was again when
+        // that fails)
+        let remove = |p: &Path, dir: bool| {
+            let was_readonly = clear_readonly(p);
+            let r = if dir { fs::remove_dir(p) } else { fs::remove_file(p) };
+            if r.is_err() && was_readonly {
+                set_readonly(p);
             }
+            r
         };
         if md.is_dir() {
+            // the original of a move: only the folder that was copied
+            if !self.was_copied(p) {
+                self.keep_uncopied(p);
+                return Ok(false);
+            }
             let children = match self.attempt(p, |_| fs::read_dir(p)?.map(|e| e.map(|e| e.path())).collect::<io::Result<Vec<_>>>())? {
                 Some(c) => c,
                 None => return Ok(false),
@@ -792,12 +923,38 @@ impl Ctx<'_> {
             if !all_ok {
                 return Ok(false);
             }
-            clear_ro(p);
-            Ok(self.attempt(p, |_| fs::remove_dir(p))?.is_some())
+            let r = self.attempt(p, |ctx| {
+                let _lock = entry_lock(&[p])?;
+                if !ctx.was_copied(p) {
+                    return Ok(false);
+                }
+                remove(p, true).map(|()| true)
+            })?;
+            Ok(match r {
+                Some(false) => {
+                    self.keep_uncopied(p);
+                    false
+                }
+                r => r.is_some(),
+            })
         } else {
             let is_link_dir = md.file_type().is_symlink() && p.is_dir();
-            clear_ro(p);
-            let r = self.attempt(p, |_| if is_link_dir { fs::remove_dir(p) } else { fs::remove_file(p) })?;
+            let r = self.attempt(p, |ctx| {
+                // not while another operation relies on it being there
+                let _lock = entry_lock(&[p])?;
+                // the original of a move: only the file that was copied
+                if !ctx.was_copied(p) {
+                    return Ok(false);
+                }
+                remove(p, is_link_dir).map(|()| true)
+            })?;
+            let r = match r {
+                Some(false) => {
+                    self.keep_uncopied(p);
+                    None
+                }
+                r => r,
+            };
             if count {
                 self.progress.files_done += 1;
                 self.progress.bytes_done += md.len();
@@ -825,6 +982,9 @@ fn new_ctx<'a>(obs: &'a mut dyn OpObserver, sources: &[PathBuf]) -> Ctx<'a> {
         buf: vec![0; 1 << 20],
         verify: Verify::None,
         sums: Vec::new(),
+        preapproved: None,
+        copied_ids: None,
+        stamp_of: file_stamp,
     }
 }
 
@@ -845,6 +1005,30 @@ fn long_wide(p: &Path) -> io::Result<Vec<u16>> {
     };
     out.push(0);
     Ok(out)
+}
+
+/// Rename `from` to `to`, failing (`AlreadyExists`) when something is
+/// there, in one step: nothing appearing meanwhile is replaced.
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let (f, t) = (long_wide(from)?, long_wide(to)?);
+        // no MOVEFILE_REPLACE_EXISTING, no MOVEFILE_COPY_ALLOWED: another
+        // volume fails as a rename does (`rename_needs_copy`)
+        // SAFETY: both names end in a NUL
+        if unsafe { MoveFileExW(f.as_ptr(), t.as_ptr(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        if fs::symlink_metadata(to).is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "the target is there"));
+        }
+        fs::rename(from, to)
+    }
 }
 
 /// Whether a failed rename means the target is on another volume (or a file
@@ -897,6 +1081,51 @@ fn file_id(p: &Path, follow: bool) -> Option<(u64, u128)> {
     use std::os::unix::fs::MetadataExt;
     let md = if follow { fs::metadata(p) } else { fs::symlink_metadata(p) }.ok()?;
     Some((md.dev(), md.ino() as u128))
+}
+
+/// What tells whether a file was written to: its size, and when it was last
+/// written and last changed (Windows sets that one itself, on any change).
+type FileStamp = (u64, i64, i64);
+
+/// `p`'s [`FileStamp`] (not following a link), `None` when it can't be read.
+#[cfg(windows)]
+fn file_stamp(p: &Path) -> Option<FileStamp> {
+    use std::ffi::c_void;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileBasicInfo, FileStandardInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    };
+    // only its attributes read: works on files others hold open without sharing
+    let f = fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(p)
+        .ok()?;
+    let h = f.as_raw_handle();
+    // SAFETY: plain-data structs filled by the calls, sized as passed
+    let mut basic: FILE_BASIC_INFO = unsafe { std::mem::zeroed() };
+    let mut standard: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(h, FileBasicInfo, &mut basic as *mut FILE_BASIC_INFO as *mut c_void, std::mem::size_of::<FILE_BASIC_INFO>() as u32) != 0
+            && GetFileInformationByHandleEx(h, FileStandardInfo, &mut standard as *mut FILE_STANDARD_INFO as *mut c_void, std::mem::size_of::<FILE_STANDARD_INFO>() as u32) != 0
+    };
+    ok.then_some((standard.EndOfFile as u64, basic.LastWriteTime, basic.ChangeTime))
+}
+
+#[cfg(not(windows))]
+fn file_stamp(p: &Path) -> Option<FileStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let md = fs::symlink_metadata(p).ok()?;
+    Some((md.len(), md.mtime() * 1_000_000_000 + md.mtime_nsec(), md.ctime() * 1_000_000_000 + md.ctime_nsec()))
+}
+
+/// Whether `a` and `b` are one and the same file (or folder, or link):
+/// another name of it, or a hard link ([`same_file`], links not followed).
+pub fn is_same_file(a: &Path, b: &Path) -> bool {
+    same_file(a, b, false)
 }
 
 /// Whether `a` and `b` are one and the same file or folder: the same path
@@ -970,6 +1199,149 @@ fn partial_name(dst: &Path) -> PathBuf {
     path
 }
 
+/// The error of overwriting a file whose identity can't be read: then it
+/// can't be told whether it is still the one the user agreed to overwrite.
+fn unknown_identity(to: &Path) -> io::Error {
+    io::Error::other(format!("{}: which file this is can't be read, so it isn't overwritten", to.display()))
+}
+
+/// Rename `from` to `to` in one step: over the file there only when it is
+/// the one the user agreed to overwrite (`approved`, told by its identity),
+/// else only where nothing is. Another file there is an [`appeared`] error,
+/// and stays as it is. The check and the rename happen under
+/// [`entry_lock`], so no other operation of this program (nor of another
+/// running copy) removes the file there in between, and so puts another one
+/// there; another program could.
+fn commit_rename(from: &Path, to: &Path, approved: Approved) -> io::Result<()> {
+    match approved {
+        Some(None) => Err(unknown_identity(to)),
+        Some(Some(id)) => {
+            let _lock = entry_lock(&[from, to])?;
+            if fs::symlink_metadata(to).is_err() {
+                // what was there is gone: only where nothing is
+                return rename_no_replace(from, to).map_err(appeared_if_exists);
+            }
+            if file_id(to, false) != Some(id) {
+                return Err(appeared());
+            }
+            replace_file(from, to)
+        }
+        None => {
+            // `from` leaves its place: not while another operation relies on it
+            let _lock = entry_lock(&[from, to])?;
+            rename_no_replace(from, to).map_err(appeared_if_exists)
+        }
+    }
+}
+
+/// Rename `from` to `to` when they are one file by two names (a change of
+/// the name's letter case, or a hard link's other name): checked again
+/// right before, under [`entry_lock`]; another file there now is an
+/// [`appeared`] error. A change of case renames without replacing.
+fn rename_itself(from: &Path, to: &Path) -> io::Result<()> {
+    let _lock = entry_lock(&[from, to])?;
+    if !same_file(from, to, false) {
+        return Err(appeared());
+    }
+    let case_only = match (from.file_name().and_then(|n| n.to_str()), to.file_name().and_then(|n| n.to_str())) {
+        (Some(a), Some(b)) => a.to_lowercase() == b.to_lowercase(),
+        _ => false,
+    };
+    if case_only {
+        rename_no_replace(from, to).map_err(appeared_if_exists)
+    } else {
+        fs::rename(from, to)
+    }
+}
+
+/// Held while an operation removes the entry of a file or folder (deletes
+/// it, renames it away, or puts another file in its place): one operation
+/// at a time per place, of this program and its other running copies (a
+/// named mutex per place, in this Windows session). A file is only put
+/// where one is by replacing it under this lock; making a new one fails
+/// where one is. So a file another operation checked under the lock stays
+/// there until it lets go.
+pub struct EntryLock {
+    #[cfg(windows)]
+    handles: Vec<windows_sys::Win32::Foundation::HANDLE>,
+    #[cfg(not(windows))]
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// How long [`entry_lock`] waits for another operation.
+const ENTRY_WAIT_MS: u32 = 60_000;
+
+/// The name of the place of `p` for [`entry_lock`]: its folder by identity
+/// and its name in any case, so every path to it (letter case, short names,
+/// drive letters) is one.
+#[cfg(windows)]
+fn entry_key(p: &Path) -> String {
+    let parent = p.parent().unwrap_or(Path::new(""));
+    let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let key = match file_id(parent, true) {
+        Some((volume, id)) => format!("{volume:x}:{id:x}\\{name}"),
+        None => std::path::absolute(p).map(|p| p.to_string_lossy().to_lowercase()).unwrap_or(name),
+    };
+    format!("Local\\RustySalamander-entry-{}", hex(&Sha256::digest(key.as_bytes())[..16]))
+}
+
+/// Take the locks of the places `paths` ([`EntryLock`]), always in the same
+/// order (so two operations never wait for each other).
+pub fn entry_lock(paths: &[&Path]) -> io::Result<EntryLock> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        let mut keys: Vec<String> = paths.iter().map(|p| entry_key(p)).collect();
+        keys.sort();
+        keys.dedup();
+        // taken so far: let go again (by the drop) when one isn't to be had
+        let mut lock = EntryLock { handles: Vec::with_capacity(keys.len()) };
+        for key in &keys {
+            let wide: Vec<u16> = key.encode_utf16().chain([0]).collect();
+            // SAFETY: a NUL-terminated name; the handle is closed by the lock
+            let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: a mutex handle of ours
+            match unsafe { WaitForSingleObject(handle, ENTRY_WAIT_MS) } {
+                // abandoned: its holder ended without letting go, ours now
+                WAIT_OBJECT_0 | WAIT_ABANDONED => lock.handles.push(handle),
+                _ => {
+                    // SAFETY: as above
+                    unsafe { CloseHandle(handle) };
+                    let what = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, format!("{what}: another operation is still changing it")));
+                }
+            }
+        }
+        Ok(lock)
+    }
+    #[cfg(not(windows))]
+    {
+        // one lock for every place (no named mutexes), in this program
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _ = (paths, ENTRY_WAIT_MS);
+        Ok(EntryLock { _guard: LOCK.lock().unwrap_or_else(|e| e.into_inner()) })
+    }
+}
+
+#[cfg(windows)]
+impl Drop for EntryLock {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::ReleaseMutex;
+        for &handle in self.handles.iter().rev() {
+            // SAFETY: the mutex is ours (waited for above) until here
+            unsafe {
+                ReleaseMutex(handle);
+                CloseHandle(handle);
+            }
+        }
+    }
+}
+
 /// Put the complete copy `from` in place of the file `to`, in one rename:
 /// `to` stays as it was when that fails.
 fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
@@ -1016,17 +1388,28 @@ fn write_checksums(dir: &Path, name: &str, lines: &[String]) -> io::Result<PathB
 }
 
 /// Where `src` goes in `dest_dir`: its own name, or the one `mask` makes
-/// (F2-style `*.bak`, or a new name for a single item).
-fn target_for(src: &Path, dest_dir: &Path, mask: &Option<String>) -> PathBuf {
+/// (F2-style `*.bak`, or a new name for a single item). A name made is
+/// checked before anything is done with it: a mask can make an empty name
+/// (`*` of `.txt` cut at the dot), a device's (`nul.txt` by `*`), one with a
+/// trailing dot (`*.` of `a`)…
+fn target_for(src: &Path, dest_dir: &Path, mask: &Option<String>) -> io::Result<PathBuf> {
     let name = src.file_name().unwrap_or_default();
     match mask {
         // a new name for a single item
-        Some(m) if m.is_empty() => dest_dir.to_path_buf(),
+        Some(m) if m.is_empty() => {
+            let new = dest_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            check_component(&new, false).map_err(|e| invalid(format!("\"{new}\" can't be the new name: {e}")))?;
+            Ok(dest_dir.to_path_buf())
+        }
         Some(m) => match name.to_str() {
-            Some(n) => dest_dir.join(masks::mask_name(n, m)),
-            None => dest_dir.join(name),
+            Some(n) => {
+                let new = masks::mask_name(n, m);
+                check_component(&new, false).map_err(|e| invalid(format!("the mask {m} makes \"{new}\" of \"{n}\": {e}")))?;
+                Ok(dest_dir.join(new))
+            }
+            None => Ok(dest_dir.join(name)),
         },
-        None => dest_dir.join(name),
+        None => Ok(dest_dir.join(name)),
     }
 }
 
@@ -1065,7 +1448,17 @@ pub fn transfer_with(kind: OpKind, sources: &[PathBuf], target: &Path, options: 
         }
     }
     for src in sources {
-        let dst = target_for(src, &dest, &mask);
+        let dst = match target_for(src, &dest, &mask) {
+            Ok(dst) => dst,
+            // a name no item may get: this one is skipped, the others go
+            Err(e) => {
+                if ctx.refuse(src, e).is_err() {
+                    cancelled = true;
+                    break;
+                }
+                continue;
+            }
+        };
         // a folder into itself by another path (letter case, short name,
         // drive letter, junction): it would copy itself without end. A move
         // onto itself is only a rename (move_item).
@@ -1147,14 +1540,20 @@ pub fn make_dir(parent: &Path, name: &str) -> io::Result<PathBuf> {
 }
 
 /// Rename in place (F2 / Shift+F6). Allows changing only the case of a name.
+/// Never over another file, not even one put there meanwhile.
 pub fn rename(src: &Path, new_name: &str) -> io::Result<PathBuf> {
     validate_name(new_name, false)?;
     let dst = src.with_file_name(new_name);
-    let same_ignoring_case = src.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_lowercase() == new_name.to_lowercase());
-    if dst.exists() && !same_ignoring_case {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a file or directory with this name already exists"));
-    }
-    fs::rename(src, &dst)?;
+    let _lock = entry_lock(&[src, &dst])?;
+    // a change of case only: the name is the file's own (renames itself);
+    // anything else there is refused in the same step as the rename
+    rename_no_replace(src, &dst).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            io::Error::new(io::ErrorKind::AlreadyExists, "a file or directory with this name already exists")
+        } else {
+            e
+        }
+    })?;
     Ok(dst)
 }
 
@@ -1238,6 +1637,7 @@ pub fn validate_target(target: &Path, in_plugin: bool) -> io::Result<()> {
     if s.chars().any(|c| (c as u32) < 32 || c == '\u{7f}') {
         return Err(invalid("the target must not contain control characters".into()));
     }
+    validate_location(target)?;
     if in_plugin {
         return Ok(());
     }
@@ -1261,9 +1661,125 @@ pub fn validate_target(target: &Path, in_plugin: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// What kind of place a path is ([`validate_location`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceKind {
+    /// On a drive of this computer (`C:\…`, `\\?\C:\…`).
+    Local,
+    /// On a server: `\\server`, `\\server\share\…` (`\\?\UNC\…`).
+    Unc,
+    /// Inside a plugin's connection, `\\?\<scheme>\<authority>\…`.
+    Mounted,
+}
+
+/// Whether `p` may be looked at at all: checked before anything asks the
+/// file system or a plugin about it (whether it is a file, a folder, an
+/// archive), which for some paths already opens something. Refused:
+/// control characters; device paths (`\\.\…`, `\\?\` but for `\\?\C:\` and
+/// `\\?\UNC\`, `\??\`); a drive without its root (`C:x`, its current folder
+/// there); a device name (`CON`, `NUL`, `COM1`, `nul.txt`…) as any name in
+/// it, since looking at a folder above it looks at the device; a stream
+/// (`name:stream`); a server whose name can't be one. In a plugin's
+/// connection, the plugin checks names, but `.` and `..` aren't names.
+/// Says which kind of place it is: the rules for names differ.
+pub fn validate_location(p: &Path) -> io::Result<PlaceKind> {
+    use std::path::{Component, Prefix};
+    let s = p.to_string_lossy();
+    if s.chars().any(|c| (c as u32) < 32 || c == '\u{7f}') {
+        return Err(invalid("a path must not contain control characters (line breaks, tabs…)".into()));
+    }
+    if let Some((_, _, names)) = crate::location::virtual_parts(p) {
+        // as typed: the path's own parsing leaves "." and ".." out of its names
+        if names.iter().any(|n| n.is_empty()) || s.split(['\\', '/']).skip(3).any(|n| n == "." || n == "..") {
+            return Err(invalid(format!("{s}: \".\" and \"..\" aren't names of folders on a server")));
+        }
+        return Ok(PlaceKind::Mounted);
+    }
+    // \\?\C:\… and \\?\UNC\… are ordinary paths; anything else there is a device
+    let device = |rest: &[u8]| !(rest.len() >= 3 && rest[0].is_ascii_alphabetic() && rest[1..3] == *b":\\" || rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"UNC\\"));
+    let b = s.as_bytes();
+    if b.starts_with(br"\\.\") || b.starts_with(br"//./") || b.starts_with(br"\\?\") && device(&b[4..]) || b.starts_with(br"//?/") || b.starts_with(br"\??\") {
+        return Err(invalid(format!("{s} is a device, not a folder")));
+    }
+    // a server: its name, and only that
+    let server_ok = |name: &str| !name.is_empty() && !name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\'));
+    let mut kind = PlaceKind::Local;
+    match p.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::UNC(server, _) | Prefix::VerbatimUNC(server, _) => {
+                if !server_ok(&server.to_string_lossy()) {
+                    return Err(invalid(format!("{s}: not a name of a server")));
+                }
+                kind = PlaceKind::Unc;
+            }
+            // "a:b" is drive A:'s current folder, then b: never what is meant
+            Prefix::Disk(_) if !p.has_root() => {
+                let drive = s.chars().take(2).collect::<String>();
+                return Err(invalid(format!("{s} has no folder after the drive; type {drive}\\ and the folder")));
+            }
+            _ => {}
+        },
+        _ => {
+            if let Some(server) = crate::location::unc_server(p) {
+                if !server_ok(&server) {
+                    return Err(invalid(format!("{s}: not a name of a server")));
+                }
+                return Ok(PlaceKind::Unc);
+            }
+        }
+    }
+    for c in p.components() {
+        if let Component::Normal(n) = c {
+            let n = n.to_string_lossy();
+            if is_device_name(&n) {
+                return Err(invalid(format!("\"{n}\" is a name Windows keeps for a device")));
+            }
+            if n.contains(':') {
+                return Err(invalid(format!("\"{n}\": a name must not contain : (that names a stream of a file)")));
+            }
+        }
+    }
+    Ok(kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What may be looked at, and what is refused before anything is.
+    #[test]
+    fn places_safe_to_look_at() {
+        for (p, kind) in [
+            (r"C:\Users\me", PlaceKind::Local),
+            (r"\\?\C:\very\long", PlaceKind::Local),
+            (r"\\server", PlaceKind::Unc),
+            (r"\\server\share\dir", PlaceKind::Unc),
+            (r"\\?\UNC\server\share", PlaceKind::Unc),
+            (r"\\?\scp\me@host\home", PlaceKind::Mounted),
+            (r"C:\nul_\console\com10", PlaceKind::Local),
+        ] {
+            assert_eq!(validate_location(Path::new(p)).unwrap(), kind, "{p}");
+        }
+        for p in [
+            r"\\.\PhysicalDrive0",
+            r"\\.\pipe\x",
+            "//./C:",
+            r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"\??\C:\x",
+            "C:x",
+            r"C:\a\NUL\b",
+            r"C:\a\con.txt",
+            r"C:\a\COM1\x.zip\in",
+            r"\\server\share\AUX",
+            r"C:\a\b:stream",
+            r"\\?\scp\me@host\..\etc",
+            "C:\\a\nb",
+            r"\\se<r\share",
+            r"\\a*b",
+        ] {
+            assert!(validate_location(Path::new(p)).is_err(), "{p:?} wasn't refused");
+        }
+    }
 
     struct Auto(ConflictAction);
     impl OpObserver for Auto {
@@ -1539,6 +2055,44 @@ mod tests {
         assert_eq!(s.files, 2);
         assert!(out.join("zpráva.bak").exists());
         assert!(out.join("日記.bak").exists());
+    }
+
+    /// A name a mask makes is checked before anything is done with it: one
+    /// that can't be (empty, a device's, a trailing dot) skips that item with
+    /// the reason; the others are copied or moved.
+    #[test]
+    fn names_masks_make_are_checked() {
+        let t = tempfile::tempdir().unwrap();
+        for f in ["nul.txt", "a.txt", "b.log"] {
+            fs::write(t.path().join(f), f).unwrap();
+        }
+        let out = t.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let sources: Vec<PathBuf> = ["nul.txt", "a.txt", "b.log"].iter().map(|f| t.path().join(f)).collect();
+        // "*" of nul.txt is NUL
+        for (kind, mask) in [(OpKind::Copy, "*"), (OpKind::Move, "*")] {
+            let mut obs = Noted::new(ConflictAction::Cancel);
+            let s = transfer(kind, &sources, &out.join(mask), &mut obs);
+            assert_eq!(s.skipped, 1, "{kind:?}");
+            assert!(obs.errors[0].contains("nul") && obs.errors[0].contains("device"), "{:?}", obs.errors);
+            assert!(t.path().join("nul.txt").exists(), "the original stays");
+            let _ = fs::remove_dir_all(&out);
+            fs::create_dir(&out).unwrap();
+            if kind == OpKind::Move {
+                assert!(!t.path().join("a.txt").exists());
+            }
+        }
+        // "* " of b.log: "b.log " (Windows would drop the space)
+        fs::write(t.path().join("b.log"), "b").unwrap();
+        let mut obs = Noted::new(ConflictAction::Cancel);
+        let s = transfer(OpKind::Copy, &[t.path().join("b.log")], &out.join("* "), &mut obs);
+        assert_eq!((s.files, s.skipped), (0, 1));
+        assert!(names(&out).is_empty(), "nothing made: {:?}", names(&out));
+        // a single item to a new name that can't be one
+        let mut obs = Noted::new(ConflictAction::Cancel);
+        let s = transfer(OpKind::Copy, &[t.path().join("b.log")], &out.join("con.txt"), &mut obs);
+        assert_eq!((s.files, s.skipped), (0, 1));
+        assert!(names(&out).is_empty());
     }
 
     #[test]
@@ -1907,7 +2461,7 @@ mod tests {
             let mut ctx = new_ctx(&mut obs, &[]);
             ctx.verify = verify;
             ctx.last_report = long_ago();
-            let e = ctx.copy_file_data(&src, &dst).unwrap_err();
+            let e = ctx.copy_file_data(&src, &dst, Some(file_id(&dst, false))).unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::Interrupted, "{verify:?}: {e}");
             assert_eq!(fs::read_to_string(&dst).unwrap(), "old", "{verify:?}");
             no_partial(&out);
@@ -1917,7 +2471,7 @@ mod tests {
                 let mut ctx = new_ctx(&mut obs, &[]);
                 ctx.verify = verify;
                 ctx.last_report = long_ago();
-                let e = ctx.copy_file_data(&src, &dst).unwrap_err();
+                let e = ctx.copy_file_data(&src, &dst, Some(file_id(&dst, false))).unwrap_err();
                 assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
                 assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
                 no_partial(&out);
@@ -1971,5 +2525,338 @@ mod tests {
         assert_eq!(partial_name(&dst), t.path().join("a.txt.rsal-partial2"));
         let long = t.path().join("n".repeat(250));
         assert_eq!(partial_name(&long), t.path().join(".rsal-partial"));
+    }
+
+    /// A file whose identity couldn't be read when it was asked about isn't
+    /// overwritten (it couldn't be told from another one put there since).
+    #[test]
+    fn an_unknown_file_isnt_overwritten() {
+        let t = tempfile::tempdir().unwrap();
+        let (from, to) = (t.path().join("new.txt"), t.path().join("a.txt"));
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "old").unwrap();
+        assert!(commit_rename(&from, &to, Some(None)).unwrap_err().to_string().contains("can't be read"));
+        assert_eq!(fs::read_to_string(&to).unwrap(), "old");
+        // its identity known: replaced
+        commit_rename(&from, &to, Some(file_id(&to, false))).unwrap();
+        assert_eq!(fs::read_to_string(&to).unwrap(), "new");
+    }
+
+    /// Putting a file over another waits while another operation (here a
+    /// thread) is putting one at the same place, by whatever path.
+    #[cfg(windows)]
+    #[test]
+    fn one_rename_at_a_time_per_target() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("dir");
+        fs::create_dir(&dir).unwrap();
+        let (from, to) = (dir.join("new.txt"), dir.join("a.txt"));
+        fs::write(&from, "new").unwrap();
+        fs::write(&to, "old").unwrap();
+        let id = file_id(&to, false);
+        // held under another spelling of the same target
+        let held = entry_lock(&[&t.path().join("DIR").join("A.TXT")]).unwrap();
+        let worker = std::thread::spawn(move || commit_rename(&from, &to, Some(id)));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "old", "waits");
+        drop(held);
+        worker.join().unwrap().unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "new");
+        // another target isn't held up by it
+        let _held = entry_lock(&[&dir.join("a.txt")]).unwrap();
+        fs::write(dir.join("b.new"), "b").unwrap();
+        fs::write(dir.join("b.txt"), "old b").unwrap();
+        let (bn, bt) = (dir.join("b.new"), dir.join("b.txt"));
+        let id = file_id(&bt, false);
+        std::thread::spawn(move || commit_rename(&bn, &bt, Some(id))).join().unwrap().unwrap();
+        assert_eq!(fs::read_to_string(dir.join("b.txt")).unwrap(), "b");
+    }
+
+    /// A move across volumes deletes an original only while it is the file
+    /// it copied: one another operation put in its place meanwhile stays,
+    /// and the move is reported as done in part.
+    #[test]
+    fn a_move_deletes_only_what_it_copied() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::create_dir_all(src.join("empty")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join("sub").join("b.txt"), "b").unwrap();
+        let dst = t.path().join("dst");
+        // as the copy across volumes does it, here on one
+        let mut obs = Noted::new(ConflictAction::Cancel);
+        let mut ctx = new_ctx(&mut obs, &[]);
+        assert_eq!(ctx.move_by_copy(&src, &dst, None), Ok(true));
+        assert!(!src.exists());
+        assert_eq!(fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(), "b");
+        // the same, but b.txt replaced after it was copied
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join("sub").join("b.txt"), "b").unwrap();
+        let dst = t.path().join("dst2");
+        let mut obs = Noted::new(ConflictAction::Cancel);
+        let mut ctx = new_ctx(&mut obs, &[]);
+        ctx.copied_ids = Some(Default::default());
+        assert_eq!(ctx.copy_tree(&src, &dst), Ok(true));
+        let other = src.join("sub").join("other");
+        fs::write(&other, "someone else's").unwrap();
+        fs::rename(&other, src.join("sub").join("b.txt")).unwrap();
+        assert_eq!(ctx.delete_tree(&src, false), Ok(false), "in part");
+        assert_eq!(fs::read_to_string(src.join("sub").join("b.txt")).unwrap(), "someone else's", "kept");
+        assert!(!src.join("a.txt").exists(), "what was copied went");
+        assert!(ctx.summary.problems[0].1.contains("changed or turned up while it was copied"), "{:?}", ctx.summary.problems);
+    }
+
+    /// An original written to after it was copied (appended to, rewritten:
+    /// still the same file) has what its copy hasn't: a move keeps it.
+    #[test]
+    fn a_move_keeps_an_original_changed_after_it_was_copied() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        for f in ["appended.txt", "rewritten.txt", "untouched.txt"] {
+            fs::write(src.join(f), "copied").unwrap();
+        }
+        let mut obs = Noted::new(ConflictAction::Cancel);
+        let mut ctx = new_ctx(&mut obs, &[]);
+        ctx.copied_ids = Some(Default::default());
+        assert_eq!(ctx.copy_tree(&src, &t.path().join("dst")), Ok(true));
+        let id = file_id(&src.join("rewritten.txt"), false);
+        fs::OpenOptions::new().append(true).open(src.join("appended.txt")).unwrap().write_all(b" and more").unwrap();
+        // the same size, in place
+        fs::OpenOptions::new().write(true).open(src.join("rewritten.txt")).unwrap().write_all(b"edited").unwrap();
+        assert_eq!(file_id(&src.join("rewritten.txt"), false), id, "still the same file");
+        assert_eq!(ctx.delete_tree(&src, false), Ok(false), "in part");
+        assert_eq!(fs::read_to_string(src.join("appended.txt")).unwrap(), "copied and more");
+        assert_eq!(fs::read_to_string(src.join("rewritten.txt")).unwrap(), "edited");
+        assert!(!src.join("untouched.txt").exists(), "what is as copied went");
+        assert_eq!(ctx.summary.problems.len(), 2, "{:?}", ctx.summary.problems);
+    }
+
+    /// A file whose size and times can't be read, when its copy begins or
+    /// when the move would delete it, can't be told unchanged: copied, and
+    /// kept (read-only still, if it was); the move is done in part.
+    #[test]
+    fn a_move_keeps_an_original_it_cant_check() {
+        fn unreadable(_: &Path) -> Option<FileStamp> {
+            None
+        }
+        for at_start in [true, false] {
+            let t = tempfile::tempdir().unwrap();
+            let src = t.path().join("src");
+            fs::create_dir_all(&src).unwrap();
+            let file = src.join("a.txt");
+            fs::write(&file, "a").unwrap();
+            set_readonly(&file);
+            let dst = t.path().join("dst");
+            let mut obs = Noted::new(ConflictAction::Cancel);
+            let mut ctx = new_ctx(&mut obs, &[]);
+            ctx.copied_ids = Some(Default::default());
+            if at_start {
+                ctx.stamp_of = unreadable;
+            }
+            assert_eq!(ctx.copy_tree(&src, &dst), Ok(true));
+            assert!(file_id(&file, false).is_some(), "its identity is known");
+            ctx.stamp_of = if at_start { file_stamp } else { unreadable };
+            assert_eq!(ctx.delete_tree(&src, false), Ok(false), "in part");
+            assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "a", "copied");
+            assert_eq!(fs::read_to_string(&file).unwrap(), "a", "kept");
+            assert!(fs::metadata(&file).unwrap().permissions().readonly(), "still read-only");
+            assert_eq!(ctx.summary.problems.len(), 1, "{:?}", ctx.summary.problems);
+            let mut perms = fs::metadata(&file).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            fs::set_permissions(&file, perms).unwrap();
+        }
+    }
+
+    /// Folders likewise: one that turns up in a folder after it was copied,
+    /// or takes the place of one copied, stays, and so do the folders it is
+    /// in; what was copied goes.
+    #[test]
+    fn a_move_deletes_only_the_folders_it_copied() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        for d in ["kept/empty", "gone/empty"] {
+            fs::create_dir_all(src.join(d)).unwrap();
+        }
+        fs::write(src.join("gone").join("a.txt"), "a").unwrap();
+        let mut obs = Noted::new(ConflictAction::Cancel);
+        let mut ctx = new_ctx(&mut obs, &[]);
+        ctx.copied_ids = Some(Default::default());
+        assert_eq!(ctx.copy_tree(&src, &t.path().join("dst")), Ok(true));
+        // after the copy: a new empty folder, and one copied replaced by another
+        fs::create_dir(src.join("kept").join("new")).unwrap();
+        fs::remove_dir(src.join("kept").join("empty")).unwrap();
+        fs::create_dir(src.join("kept").join("empty")).unwrap();
+        assert_eq!(ctx.delete_tree(&src, false), Ok(false), "in part");
+        assert!(src.join("kept").join("new").is_dir() && src.join("kept").join("empty").is_dir(), "kept");
+        assert!(!src.join("gone").exists(), "what was copied went");
+        assert_eq!(ctx.summary.problems.len(), 2, "{:?}", ctx.summary.problems);
+    }
+
+    /// While an operation holds a place (it checked the file there and is
+    /// about to replace it), another one deletes it, renames it or moves it
+    /// away only after it let go.
+    #[cfg(windows)]
+    #[test]
+    fn removing_waits_for_the_place() {
+        let t = tempfile::tempdir().unwrap();
+        let out = t.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let held = out.join("a.txt");
+        type Job = Box<dyn FnOnce(&Path, &Path) + Send>;
+        let jobs: Vec<(&str, Job)> = vec![
+            (
+                "delete",
+                Box::new(|f, _| {
+                    delete(&[f.to_path_buf()], &mut Auto(ConflictAction::Cancel));
+                }),
+            ),
+            (
+                "F2",
+                Box::new(|f, _| {
+                    rename(f, "b.txt").unwrap();
+                }),
+            ),
+            (
+                "move",
+                Box::new(|f, other| {
+                    transfer(OpKind::Move, &[f.to_path_buf()], other, &mut Auto(ConflictAction::Cancel));
+                }),
+            ),
+        ];
+        for (what, job) in jobs {
+            fs::write(&held, "checked").unwrap();
+            let other = t.path().join(format!("other-{what}"));
+            fs::create_dir(&other).unwrap();
+            let lock = entry_lock(&[&t.path().join("OUT").join("A.TXT")]).unwrap();
+            let (f, o) = (held.clone(), other.clone());
+            let worker = std::thread::spawn(move || job(&f, &o));
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert_eq!(fs::read_to_string(&held).unwrap(), "checked", "{what} waits");
+            drop(lock);
+            worker.join().unwrap();
+            assert!(!held.exists(), "{what} done after");
+            let _ = fs::remove_file(out.join("b.txt"));
+        }
+    }
+
+    /// F2 never renames over another file; a change of case renames.
+    #[test]
+    fn f2_never_replaces() {
+        let t = tempfile::tempdir().unwrap();
+        fs::write(t.path().join("a.txt"), "a").unwrap();
+        fs::write(t.path().join("b.txt"), "b").unwrap();
+        assert_eq!(rename(&t.path().join("a.txt"), "b.txt").unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(t.path().join("b.txt")).unwrap(), "b");
+        rename(&t.path().join("a.txt"), "A.TXT").unwrap();
+        assert_eq!(names(t.path()), ["A.TXT", "b.txt"]);
+    }
+
+    /// A target replaced by another file while the user is asked about it
+    /// (or right after): the answer was about the file that was there, so
+    /// the new one is asked about again, not overwritten.
+    #[test]
+    fn an_answer_is_for_the_file_asked_about() {
+        /// Swaps the target for another file while answering Overwrite;
+        /// then answers Skip.
+        struct Swap {
+            target: PathBuf,
+            asked: u32,
+        }
+        impl OpObserver for Swap {
+            fn progress(&mut self, _: &Progress) -> bool {
+                true
+            }
+            fn conflict(&mut self, _: &Path, _: &Path) -> ConflictAction {
+                self.asked += 1;
+                if self.asked > 1 {
+                    return ConflictAction::Skip;
+                }
+                let other = self.target.with_extension("other");
+                fs::write(&other, "other").unwrap();
+                fs::rename(&other, &self.target).unwrap();
+                ConflictAction::Overwrite
+            }
+            fn error(&mut self, p: &Path, e: &io::Error) -> ErrorAction {
+                panic!("unexpected error on {}: {e}", p.display())
+            }
+        }
+        for kind in [OpKind::Copy, OpKind::Move] {
+            for verify in [Verify::None, Verify::Checksum] {
+                let t = tempfile::tempdir().unwrap();
+                let src = t.path().join("a.txt");
+                fs::write(&src, "mine").unwrap();
+                let out = t.path().join("out");
+                fs::create_dir(&out).unwrap();
+                let target = out.join("a.txt");
+                fs::write(&target, "old").unwrap();
+                let mut obs = Swap { target: target.clone(), asked: 0 };
+                let options = TransferOptions { verify, ..Default::default() };
+                let s = transfer_with(kind, std::slice::from_ref(&src), &out, &options, &mut obs);
+                let case = format!("{kind:?} {verify:?}");
+                assert_eq!(obs.asked, 2, "{case}: asked again about the other file");
+                assert_eq!((s.files, s.skipped), (0, 1), "{case}");
+                assert_eq!(fs::read_to_string(&target).unwrap(), "other", "{case}");
+                assert!(src.exists(), "{case}");
+                assert!(names(&out).iter().all(|n| !n.contains("rsal-partial")), "{case}: {:?}", names(&out));
+            }
+        }
+    }
+
+    /// A target that another operation makes while this one is under way
+    /// (after the check whether it is there) is asked about, not replaced.
+    #[test]
+    fn a_target_made_meanwhile_is_asked_about() {
+        /// Makes the target when the copy reports its first progress.
+        struct Meanwhile {
+            target: PathBuf,
+            answer: ConflictAction,
+            asked: u32,
+        }
+        impl OpObserver for Meanwhile {
+            fn progress(&mut self, _: &Progress) -> bool {
+                if self.asked == 0 && !self.target.exists() {
+                    fs::write(&self.target, "theirs").unwrap();
+                }
+                true
+            }
+            fn conflict(&mut self, _: &Path, _: &Path) -> ConflictAction {
+                self.asked += 1;
+                self.answer
+            }
+            fn error(&mut self, p: &Path, e: &io::Error) -> ErrorAction {
+                panic!("unexpected error on {}: {e}", p.display())
+            }
+        }
+        for kind in [OpKind::Copy, OpKind::Move] {
+            for verify in [Verify::None, Verify::Checksum] {
+                for answer in [ConflictAction::Skip, ConflictAction::Overwrite] {
+                    let t = tempfile::tempdir().unwrap();
+                    let src = t.path().join("a.txt");
+                    fs::write(&src, "mine").unwrap();
+                    let out = t.path().join("out");
+                    fs::create_dir(&out).unwrap();
+                    let target = out.join("a.txt");
+                    let mut obs = Meanwhile { target: target.clone(), answer, asked: 0 };
+                    let options = TransferOptions { verify, ..Default::default() };
+                    let s = transfer_with(kind, std::slice::from_ref(&src), &out, &options, &mut obs);
+                    let case = format!("{kind:?} {verify:?} {answer:?}");
+                    assert_eq!(obs.asked, 1, "{case}");
+                    if answer == ConflictAction::Skip {
+                        assert_eq!((s.files, s.skipped), (0, 1), "{case}");
+                        assert_eq!(fs::read_to_string(&target).unwrap(), "theirs", "{case}");
+                        assert!(src.exists(), "{case}");
+                    } else {
+                        assert_eq!(s.files, 1, "{case}");
+                        assert_eq!(fs::read_to_string(&target).unwrap(), "mine", "{case}");
+                        assert_eq!(src.exists(), kind == OpKind::Copy, "{case}");
+                    }
+                    assert!(names(&out).iter().all(|n| !n.contains("rsal-partial")), "{case}: {:?}", names(&out));
+                }
+            }
+        }
     }
 }

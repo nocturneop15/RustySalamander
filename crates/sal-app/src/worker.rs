@@ -336,7 +336,14 @@ impl Job {
             let result = match kind {
                 JobKind::Transfer(k) => Ok(fileops::transfer_with(k, &sources, &target, &options, &mut obs)),
                 JobKind::Delete => Ok(fileops::delete(&sources, &mut obs)),
-                JobKind::Recycle => sal_core::shell::recycle(&sources).map(|_| OpSummary { files: sources.len() as u64, ..Default::default() }).map_err(|e| e.to_string()),
+                JobKind::Recycle => {
+                    // not while another operation relies on one of them being there
+                    let held: Vec<&std::path::Path> = sources.iter().map(|p| p.as_path()).collect();
+                    fileops::entry_lock(&held)
+                        .and_then(|_lock| sal_core::shell::recycle(&sources))
+                        .map(|_| OpSummary { files: sources.len() as u64, ..Default::default() })
+                        .map_err(|e| e.to_string())
+                }
                 JobKind::Archive(op) => match &plugin {
                     Some(p) => ops::run(&p.0, op, &sources, &target, &mut obs),
                     None => Err(ops::missing_plugin()),

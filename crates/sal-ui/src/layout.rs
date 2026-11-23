@@ -114,9 +114,59 @@ pub fn controls(ui: &mut Ui) {
     s.interact_size.y = s.interact_size.y.max(CONTROL_HEIGHT);
 }
 
-/// A single-line text field with the common inner margin.
+/// A single-line text field with the common inner margin. Give it the
+/// [`limit`] of what it holds.
 pub fn text_field(text: &mut dyn egui::TextBuffer) -> egui::TextEdit<'_> {
     egui::TextEdit::singleline(text).margin(FIELD_MARGIN)
+}
+
+/// How many characters a field takes, by what it holds, so what is laid
+/// out, checked or searched for stays bounded. A field whose value does
+/// something (a path, a command, a mask, a plugin's form) refuses more
+/// ([`refuse_over`]: cut, it could mean something else); one that only
+/// finds or filters keeps the start.
+pub mod limit {
+    /// A path: Windows' longest is 32 767 characters.
+    pub const PATH: usize = 32_767;
+    /// A command line: Windows' longest is 32 767 characters.
+    pub const COMMAND: usize = 32_767;
+    /// A name: 255 characters at most.
+    pub const NAME: usize = 255;
+    /// Masks to select by (`*.txt;*.log`).
+    pub const MASK: usize = 4_096;
+    /// What Find looks for.
+    pub const FIND: usize = 1_000;
+    /// A short entry: a suffix, a filter of a list.
+    pub const SHORT: usize = 256;
+    /// A field of a plugin's form (a server, a user, a password…).
+    pub const FORM: usize = 8_192;
+}
+
+/// After a field of at most `limit` characters was drawn (given
+/// `.char_limit(limit + 1)`, so a huge paste is cheap): when it now holds
+/// more, what was typed or pasted is refused, `text` is `before` again, and
+/// `refused` shows under the field for a few seconds. Returns whether it
+/// was refused.
+pub fn refuse_over(ui: &Ui, field: &egui::Response, text: &mut String, before: String, limit: usize, refused: &str) -> bool {
+    let id = field.id.with("refused");
+    let now = ui.input(|i| i.time);
+    let over = text.chars().count() > limit;
+    if over {
+        *text = before;
+        ui.data_mut(|d| d.insert_temp(id, now));
+    }
+    if let Some(at) = ui.data(|d| d.get_temp::<f64>(id)) {
+        if now - at < 4.0 {
+            let below = field.rect.left_bottom() + egui::vec2(0.0, 4.0);
+            egui::containers::show_tooltip_at(ui.ctx(), ui.layer_id(), id, below, |ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, refused);
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        } else {
+            ui.data_mut(|d| d.remove::<f64>(id));
+        }
+    }
+    over
 }
 
 /// The frame of a dialog window's content.
