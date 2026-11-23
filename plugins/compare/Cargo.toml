@@ -2,7 +2,7 @@
 name = "sal-plugin-compare"
 description = "RustySalamander plugin: compares two files side by side, or two folders in the two panels"
 # the plugin's own version, apart from the program's
-version = "0.1.5-alpha"
+version = "0.1.6-alpha"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,6 +19,7 @@ sal-core = { path = "../../crates/sal-core" }
 sal-ui = { path = "../../crates/sal-ui" }
 sal-window = { path = "../../crates/sal-window" }
 similar = "2"
+regex = "1"
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_Shell"] }

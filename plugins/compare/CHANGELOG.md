@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.6-alpha (2026-11-23)
+
+- **Finds text:** **Ctrl+F**, or the magnifier in the toolbar, opens a find bar, as in the viewer: every match in both files is marked, the current one in orange; **F3** and **Shift+F3** (or Enter and Shift+Enter in the box, or the arrows) go to the next and the previous match, round the end, scrolling it into view. **Match case** and **Wildcards** (`*` for any characters, `?` for one) as in the viewer; Esc closes the bar, a second Esc the window. Works with RustySalamander 0.9.4-beta and later.
+
 ## 0.1.5-alpha (2026-11-07)
 
 - **Drawn by the program:** the comparison window is shown and drawn by RustySalamander (plugin interface 9), so the plugin no longer carries a graphics library of its own and is much smaller, and the window draws wherever the program's does: also on the processor over Remote Desktop and on Windows 8.1 / Server 2012 R2. Needs RustySalamander 0.9.4-beta or later.

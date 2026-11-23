@@ -16,6 +16,7 @@
 //! the two cursors; else the two panels' folders.
 
 mod diff;
+mod find;
 mod tree;
 mod window;
 
