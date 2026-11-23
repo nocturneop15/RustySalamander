@@ -211,7 +211,7 @@ Options below the target. The dialog opens with the defaults from Settings → G
   - **Compare sizes:** the copy must have as many bytes as the original.
   - **SHA-256 checksums:** the copy is read back and its SHA-256 checksum compared with the original's. This takes about as long again as the copy. The checksums of all files are also written to a file named `RustySalamander <date> <time>.sha256`, one in the target folder and one in the source folder, in the format `sha256sum -c` checks (`<checksum> *<path>`).
 
-  A copy that fails the check is removed and you are asked to **Retry**, **Skip** or **Cancel**. A safe move deletes an original only after its copy passed the check; the checksum file in the source folder stays as a record. A move within the same drive only renames, so no data is copied: its files are listed in the checksum files but there is nothing to compare. A safe copy always shows the *Operation result* window when it ends. Inside archives and on servers (plugins) nothing is checked.
+  A copy that fails the check is removed and you are asked to **Retry**, **Skip** or **Cancel**. A file that is overwritten stays as it was until its replacement is complete (and checked): the copy is written beside it as `<name>.rsal-partial` and takes its place only at the end, so cancelling or a failed check never loses the old file. Copying a file onto itself (the same file under another path: other letter case, a short name, a hard link) is refused; moving it onto itself changes only the letter case of its name, if that is what differs. A safe move deletes an original only after its copy passed the check; the checksum file in the source folder stays as a record. A move within the same drive only renames, so no data is copied: its files are listed in the checksum files but there is nothing to compare. A safe copy always shows the *Operation result* window when it ends. Inside archives and on servers (plugins) nothing is checked.
 
 ### Drag and drop
 
@@ -436,7 +436,7 @@ In both panel views you can copy (F5) the results elsewhere, delete them (F8, to
 
 **Compare files…** and **Compare folders…** ask for the two paths instead.
 
-**Two files** open side by side in a window, lined up line by line: changed lines amber, lines only in the left file red, only in the right file green. **Next** / **Previous** (F8 / Shift+F8, or Alt+↓ / Alt+↑) go between differences. **Ignore spaces** ignores differences only in spaces and tabs; **Compare again** rereads the files. Binary files and files over 32 MB show their sizes and where they first differ.
+**Two files** open side by side in a window, lined up line by line: changed lines amber, lines only in the left file red, only in the right file green. **Next** / **Previous** (F8 / Shift+F8, or Alt+↓ / Alt+↑) go between differences. **Ignore spaces** ignores differences only in spaces and tabs; **Compare again** rereads the files. **Ctrl+F** (or the magnifier) finds text in both files, as in the viewer: every match is marked, F3 / Shift+F3 or Enter / Shift+Enter go to the next / previous one, **Match case** and **Wildcards** (`*` any characters, `?` one) as you need, Esc closes the find bar. Binary files and files over 32 MB show their sizes and where they first differ.
 
 **Two folders** open in both panels at once, the lists lined up:
 

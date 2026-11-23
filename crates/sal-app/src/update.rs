@@ -29,8 +29,13 @@
 //!
 //! A plugin is updated in place, but its DLL is in use while the program
 //! runs: its zip is unpacked into `plugins\.updates\<folder>`, and the next
-//! start copies it over the plugin's folder before loading the plugins
-//! ([`apply_staged`]). What the plugin saved in its folder stays.
+//! start moves its files into the plugin's folder before loading the plugins
+//! ([`at_start`]). What the plugin saved in its folder stays.
+//!
+//! Files are replaced by renames only ([`replace_files`]), with a plan
+//! written first, so an update stopped half way (a crash, the power) is
+//! finished or undone at the next start; one running copy of the program
+//! updates at a time ([`lock`]).
 //!
 //! Downloads go through WinHTTP, so the system's proxy settings and
 //! certificates apply.
@@ -508,6 +513,11 @@ pub fn install(ctx: &egui::Context, update: Update, how: How) -> Install {
                 }
                 Target::Plugin { dir, .. } => staged_dir(dir).ok_or("the plugin's folder is unknown")?,
             };
+            // one running copy of the program at a time changes files
+            let _lock = match sal_core::config::app_dir() {
+                Some(app) => lock(&app)?,
+                None => None,
+            };
             let mut zip = Vec::with_capacity(release.asset_size as usize);
             let mut last = 0;
             http_get(&release.asset_url, "application/octet-stream", &mut |chunk, total| {
@@ -558,62 +568,246 @@ fn writable(dir: &Path) -> bool {
     ok
 }
 
-/// What a file replaced by an update in place is renamed to: a running
-/// program, or a plugin it has loaded, can be renamed but not overwritten.
-/// The next start deletes it ([`remove_replaced`]).
+/// What a file replaced by an update is renamed to: a running program, or a
+/// plugin it has loaded, can be renamed but not overwritten. The next start
+/// deletes it ([`remove_replaced`]).
 const REPLACED: &str = ".replaced-by-update";
 
 /// The folder an update in place is unpacked into first.
 const IN_PLACE_STAGE: &str = ".update";
 
+/// The plan of an update in place, in the program's folder while it runs
+/// ([`replace_files`]).
+const PROGRAM_PLAN: &str = ".update-plan";
+
+/// Held while an update changes files, by one running copy of the program
+/// at a time ([`lock`]).
+const LOCK: &str = ".update-lock";
+
+/// The program, put in place first: which one is there says which version
+/// a half-done update in place is finished to ([`recover`]).
+const PROGRAM: &str = "rustysalamander.exe";
+
+/// Moves a file (creating the folder it goes to): `fs::rename`, or in tests
+/// one that fails on cue.
+type Mover<'a> = &'a dyn Fn(&Path, &Path) -> io::Result<()>;
+
+fn move_file(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(dir) = to.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::rename(from, to)
+}
+
+/// One running copy of the program changing files by an update.
+pub struct UpdateLock(#[allow(dead_code)] fs::File);
+
+/// Take the update lock of the program folder `app`: an error when another
+/// running copy of the program holds it. `None` when the folder can't be
+/// written to (nothing there can be updated then either).
+pub fn lock(app: &Path) -> Result<Option<UpdateLock>, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        match fs::OpenOptions::new().write(true).create(true).truncate(false).share_mode(0).open(app.join(LOCK)) {
+            Ok(f) => Ok(Some(UpdateLock(f))),
+            // ERROR_SHARING_VIOLATION
+            Err(e) if e.raw_os_error() == Some(32) => Err("another running RustySalamander is updating; try again when it is done".into()),
+            Err(_) => Ok(None),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(fs::OpenOptions::new().write(true).create(true).truncate(false).open(app.join(LOCK)).ok().map(UpdateLock))
+    }
+}
+
+/// What [`replace_files`] does, written down before it changes anything:
+/// each file (relative to the target folder) and the name the one it
+/// replaces is renamed aside to (none for a new file).
+type Plan = Vec<(PathBuf, Option<PathBuf>)>;
+
+/// Write `plan` to `path`, on the disk before anything else happens: into
+/// another file first, so `path` is whole or not there.
+fn write_plan(path: &Path, plan: &Plan) -> io::Result<()> {
+    let mut text = String::new();
+    for (file, aside) in plan {
+        let name = |p: &Path| p.to_str().map(str::to_owned).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("not a Unicode name: {}", p.display())));
+        text.push_str(&name(file)?);
+        text.push('\t');
+        if let Some(a) = aside {
+            text.push_str(&name(a)?);
+        }
+        text.push('\n');
+    }
+    let partial = path.with_extension("partial");
+    {
+        use std::io::Write;
+        let mut f = fs::File::create(&partial)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    fs::rename(&partial, path)
+}
+
+/// The plan at `path`, if one is there.
+fn read_plan(path: &Path) -> Option<Plan> {
+    let text = fs::read_to_string(path).ok()?;
+    Some(
+        text.lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let (file, aside) = l.split_once('\t').unwrap_or((l, ""));
+                (PathBuf::from(file), (!aside.is_empty()).then(|| PathBuf::from(aside)))
+            })
+            .collect(),
+    )
+}
+
+/// Put one file of a plan in place: the old one renamed aside, the new one
+/// moved in from `stage`. Done already when it isn't in `stage` any more.
+fn step_forward(stage: &Path, target: &Path, (file, aside): &(PathBuf, Option<PathBuf>), mv: Mover) -> Result<(), String> {
+    let (staged, to) = (stage.join(file), target.join(file));
+    if !staged.exists() {
+        return Ok(());
+    }
+    if let Some(a) = aside {
+        let a = target.join(a);
+        if to.exists() && !a.exists() {
+            mv(&to, &a).map_err(|e| format!("{}: {e}", to.display()))?;
+        }
+    }
+    mv(&staged, &to).map_err(|e| format!("{}: {e}", to.display()))
+}
+
+/// Undo what [`step_forward`] did to one file, as far as it got: the new
+/// file back into `stage`, the old one back from aside.
+fn step_back(stage: &Path, target: &Path, (file, aside): &(PathBuf, Option<PathBuf>), mv: Mover) -> Result<(), String> {
+    let (staged, to) = (stage.join(file), target.join(file));
+    let err = |e: io::Error| format!("{}: {e}", to.display());
+    match aside.as_ref().map(|a| target.join(a)) {
+        Some(a) if a.exists() => {
+            let moved_in = to.exists();
+            if moved_in {
+                mv(&to, &staged).map_err(err)?;
+            }
+            if let Err(e) = mv(&a, &to) {
+                // never neither: the new one stays rather than none
+                if moved_in {
+                    let _ = mv(&staged, &to);
+                }
+                return Err(err(e));
+            }
+            Ok(())
+        }
+        // never renamed aside: what is there is the old file
+        Some(_) => Ok(()),
+        None if to.exists() && !staged.exists() => mv(&to, &staged).map_err(err),
+        None => Ok(()),
+    }
+}
+
+/// Undo a whole plan, last file first, as far as it can: an error listing
+/// the files it couldn't put back.
+fn undo(stage: &Path, target: &Path, plan: &Plan, mv: Mover) -> Result<(), String> {
+    let errors: Vec<String> = plan.iter().rev().filter_map(|e| step_back(stage, target, e, mv).err()).collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Move the files of `stage` into `target`, each file it replaces renamed
+/// aside (deleted at the next start, [`remove_replaced`]): programs first,
+/// the program itself before everything. The plan is written to
+/// `plan_path` before anything changes and removed when done; when a file
+/// can't be put in place, everything done is undone. If that fails too
+/// (or the program is stopped half way), the plan stays for [`recover`].
+/// Returns how many files were put in place.
+fn replace_files(stage: &Path, target: &Path, plan_path: &Path, mv: Mover) -> Result<usize, String> {
+    let mut files = Vec::new();
+    list_files(stage, Path::new(""), &mut files);
+    let rank = |f: &PathBuf| match f.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        _ if f.as_os_str().eq_ignore_ascii_case(PROGRAM) => 0,
+        Some("spl" | "dll" | "exe") => 1,
+        _ => 2,
+    };
+    files.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    let plan: Plan = files
+        .iter()
+        .map(|file| {
+            let to = target.join(file);
+            let aside = to.exists().then(|| free_aside(&to)).and_then(|a| a.strip_prefix(target).ok().map(Path::to_path_buf));
+            (file.clone(), aside)
+        })
+        .collect();
+    write_plan(plan_path, &plan).map_err(|e| format!("{}: {e}", plan_path.display()))?;
+    match plan.iter().try_for_each(|e| step_forward(stage, target, e, mv)) {
+        Ok(()) => {
+            let _ = fs::remove_file(plan_path);
+            Ok(files.len())
+        }
+        Err(e) => match undo(stage, target, &plan, mv) {
+            Ok(()) => {
+                let _ = fs::remove_file(plan_path);
+                Err(e)
+            }
+            Err(u) => Err(format!("{e}. Not everything could be put back ({u}); that is done when RustySalamander starts next time.")),
+        },
+    }
+}
+
+/// Finish or undo what [`replace_files`] left half done (stopped, or its
+/// undo failed), by the plan at `plan_path`; the plan is removed when that
+/// worked. An update of the program is finished when the new program is in
+/// place already (it is the one running now), else undone; any other is
+/// undone (it is tried again after). Nothing to do without a plan.
+fn recover(stage: &Path, target: &Path, plan_path: &Path, mv: Mover) -> Result<(), String> {
+    let Some(plan) = read_plan(plan_path) else { return Ok(()) };
+    let program = plan.iter().any(|(f, _)| f.as_os_str().eq_ignore_ascii_case(PROGRAM));
+    let forward = program && !stage.join(PROGRAM).exists();
+    crate::debuglog::write(format!("update: {} the interrupted update of {}", if forward { "finishing" } else { "undoing" }, target.display()));
+    let r = if forward {
+        let errors: Vec<String> = plan.iter().filter_map(|e| step_forward(stage, target, e, mv).err()).collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    } else {
+        undo(stage, target, &plan, mv)
+    };
+    if r.is_ok() {
+        let _ = fs::remove_file(plan_path);
+    }
+    r
+}
+
 /// Update the program in its folder `app` from a release zip: unpacked next
 /// to it first (a damaged download changes nothing), then each file of the
-/// release put in place, the file it replaces renamed aside. Everything
-/// else stays: settings, what plugins saved, plugins and languages the
-/// release doesn't bring. If a file can't be replaced, every file already
-/// replaced is put back. Returns how many files were replaced or added.
+/// release put in place by [`replace_files`]. Everything else stays:
+/// settings, what plugins saved, plugins and languages the release doesn't
+/// bring. If a file can't be replaced, every file already replaced is put
+/// back. Returns how many files were replaced or added.
 pub fn install_in_place(zip: &[u8], app: &Path) -> Result<usize, String> {
+    install_in_place_with(zip, app, &move_file)
+}
+
+fn install_in_place_with(zip: &[u8], app: &Path, mv: Mover) -> Result<usize, String> {
+    let plan = app.join(PROGRAM_PLAN);
+    if plan.exists() {
+        return Err("an earlier update didn't finish: start RustySalamander again (that finishes it), then update".into());
+    }
     let stage = app.join(IN_PLACE_STAGE);
     let _ = fs::remove_dir_all(&stage);
     unpack_release(zip, &stage)?;
-    let mut files = Vec::new();
-    list_files(&stage, Path::new(""), &mut files);
-    // (new file, the old one renamed aside, if there was one)
-    let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
-    let r = files.iter().try_for_each(|rel| -> Result<(), String> {
-        let to = app.join(rel);
-        if let Some(dir) = to.parent() {
-            fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        let aside = if to.exists() {
-            let aside = free_aside(&to);
-            fs::rename(&to, &aside).map_err(|e| format!("{}: {e}", to.display()))?;
-            Some(aside)
-        } else {
-            None
-        };
-        if let Err(e) = fs::rename(stage.join(rel), &to) {
-            if let Some(a) = &aside {
-                let _ = fs::rename(a, &to);
-            }
-            return Err(format!("{}: {e}", to.display()));
-        }
-        done.push((to, aside));
-        Ok(())
-    });
-    if let Err(e) = r {
-        // back as it was
-        for (new, aside) in done.into_iter().rev() {
-            let _ = fs::remove_file(&new);
-            if let Some(a) = aside {
-                let _ = fs::rename(&a, &new);
-            }
-        }
+    let r = replace_files(&stage, app, &plan, mv);
+    // a plan left needs what is staged
+    if !plan.exists() {
         let _ = fs::remove_dir_all(&stage);
-        return Err(e);
     }
-    let _ = fs::remove_dir_all(&stage);
-    Ok(files.len())
+    r
 }
 
 /// A free name to rename `file` aside to.
@@ -630,10 +824,58 @@ fn free_aside(file: &Path) -> PathBuf {
     }
 }
 
+/// What [`at_start`] did with the updates.
+#[derive(Debug, Default, PartialEq)]
+pub struct Started {
+    /// The plugin folders updated.
+    pub updated: Vec<String>,
+    /// What couldn't be updated or put back, and why.
+    pub failed: Vec<String>,
+    /// Plugin folders left half updated: not to be loaded this time.
+    pub skip: Vec<String>,
+}
+
+/// At start, before the plugins are loaded: finish or undo an update in
+/// place that an interruption left half done ([`recover`]), delete what
+/// updates renamed aside ([`remove_replaced`]), and put the plugin updates
+/// waiting in `plugins` in place ([`apply_staged`]). Under the update lock:
+/// while another running copy of the program updates, nothing is touched.
+pub fn at_start(app: Option<&Path>, plugins: Option<&Path>) -> Started {
+    at_start_with(app, plugins, &move_file)
+}
+
+fn at_start_with(app: Option<&Path>, plugins: Option<&Path>, mv: Mover) -> Started {
+    let mut started = Started::default();
+    let _lock = match app.map(lock) {
+        Some(Err(e)) => {
+            started.failed.push(e);
+            // its plugin updates may be half done: those aren't loaded
+            started.skip = plugins.map(half_updated).unwrap_or_default();
+            return started;
+        }
+        Some(Ok(lock)) => lock,
+        None => None,
+    };
+    if let Some(app) = app {
+        match recover(&app.join(IN_PLACE_STAGE), app, &app.join(PROGRAM_PLAN), mv) {
+            Ok(()) => remove_replaced(app),
+            // what is aside and staged stays: needed to try again
+            Err(e) => started.failed.push(format!("the update of the program: {e}")),
+        }
+    }
+    if let Some(plugins) = plugins {
+        let s = apply_staged_with(plugins, mv);
+        started.updated = s.updated;
+        started.failed.extend(s.failed);
+        started.skip = s.skip;
+    }
+    started
+}
+
 /// Delete what an update in place renamed aside, and a staging folder an
-/// interrupted one left (call at start, before the plugins are loaded).
-/// Files still in use (another copy of the old version runs) stay for the
-/// next time.
+/// interrupted one left (call at start, before the plugins are loaded, and
+/// only when no plan is left: [`at_start`]). Files still in use (another
+/// copy of the old version runs) stay for the next time.
 pub fn remove_replaced(app: &Path) {
     let _ = fs::remove_dir_all(app.join(IN_PLACE_STAGE));
     let _ = fs::remove_dir_all(app.join(format!(".{IN_PLACE_STAGE}.partial")));
@@ -655,43 +897,80 @@ pub fn remove_replaced(app: &Path) {
     }
 }
 
+/// Delete the files below `dir` that an update renamed aside, as far as
+/// they can be (one still in use stays for the next time).
+fn remove_aside_below(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        if e.file_type().is_ok_and(|t| t.is_dir()) {
+            remove_aside_below(&e.path());
+        } else if e.file_name().to_string_lossy().contains(REPLACED) {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Where the update of the plugin in `dir` waits: `plugins\.updates\<folder>`.
 pub fn staged_dir(dir: &Path) -> Option<PathBuf> {
     Some(dir.parent()?.join(STAGED).join(dir.file_name()?))
 }
 
-/// Copy the plugin updates waiting in `plugins\.updates` over their
-/// folders, before the plugins are loaded. A plugin's DLL goes first, so a
-/// plugin still in use elsewhere (another running copy of the program)
-/// keeps its update for the next start, unchanged. Returns what was
-/// updated, and what failed.
+/// The plan of putting the update of the plugin folder `name` in place.
+fn plugin_plan(plugins: &Path, name: &str) -> PathBuf {
+    plugins.join(STAGED).join(format!("{name}.plan"))
+}
+
+/// The plugin folders whose update is half done (a plan is there).
+fn half_updated(plugins: &Path) -> Vec<String> {
+    let Ok(rd) = fs::read_dir(plugins.join(STAGED)) else { return Vec::new() };
+    rd.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".plan").map(str::to_owned)).collect()
+}
+
+/// Put the plugin updates waiting in `plugins\.updates` in place of their
+/// files, before the plugins are loaded ([`replace_files`]: the old files
+/// renamed aside, so a plugin still in use by another running copy of the
+/// program is updated too). One left half done is undone first and tried
+/// again. Returns what was updated, and what failed.
+#[cfg(test)]
 pub fn apply_staged(plugins: &Path) -> (Vec<String>, Vec<String>) {
-    let (mut done, mut failed) = (Vec::new(), Vec::new());
-    let Ok(dirs) = fs::read_dir(plugins.join(STAGED)) else { return (done, failed) };
-    for d in dirs.flatten().filter(|d| d.path().is_dir()) {
-        let name = d.file_name().to_string_lossy().into_owned();
-        let target = plugins.join(&name);
-        let mut files = Vec::new();
-        list_files(&d.path(), Path::new(""), &mut files);
-        // programs first: the one that is in use fails before anything changed
-        files.sort_by_key(|f| !matches!(f.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("spl" | "dll" | "exe")));
-        let r = files.iter().try_for_each(|rel| {
-            let to = target.join(rel);
-            if let Some(dir) = to.parent() {
-                fs::create_dir_all(dir)?;
-            }
-            fs::copy(d.path().join(rel), &to).map(|_| ())
-        });
-        match r {
-            Ok(()) => {
-                let _ = fs::remove_dir_all(d.path());
-                done.push(name);
-            }
-            Err(e) => failed.push(format!("{name}: {e}")),
+    let s = apply_staged_with(plugins, &move_file);
+    (s.updated, s.failed)
+}
+
+fn apply_staged_with(plugins: &Path, mv: Mover) -> Started {
+    let mut s = Started::default();
+    let staged = plugins.join(STAGED);
+    for name in half_updated(plugins) {
+        if let Err(e) = recover(&staged.join(&name), &plugins.join(&name), &plugin_plan(plugins, &name), mv) {
+            s.failed.push(format!("{name}: {e}"));
+            s.skip.push(name);
         }
     }
-    let _ = fs::remove_dir(plugins.join(STAGED));
-    (done, failed)
+    let Ok(dirs) = fs::read_dir(&staged) else { return s };
+    // not a folder being unpacked (`.<name>.partial`)
+    for d in dirs.flatten().filter(|d| d.path().is_dir() && !d.file_name().to_string_lossy().starts_with('.')) {
+        let name = d.file_name().to_string_lossy().into_owned();
+        if s.skip.contains(&name) {
+            continue;
+        }
+        let plan = plugin_plan(plugins, &name);
+        match replace_files(&d.path(), &plugins.join(&name), &plan, mv) {
+            Ok(_) => {
+                let _ = fs::remove_dir_all(d.path());
+                // the old files, unless another running copy still uses them
+                remove_aside_below(&plugins.join(&name));
+                s.updated.push(name);
+            }
+            Err(e) => {
+                s.failed.push(format!("{name}: {e}"));
+                if plan.exists() {
+                    s.skip.push(name);
+                }
+            }
+        }
+    }
+    let _ = fs::remove_dir(&staged);
+    s
 }
 
 /// The files below `root\rel`, as paths relative to `root`.
@@ -1418,6 +1697,155 @@ mod tests {
         let mut files = Vec::new();
         list_files(&app, Path::new(""), &mut files);
         assert!(files.iter().all(|f| !f.to_string_lossy().contains(REPLACED)), "{files:?}");
+        assert!(!app.join(PROGRAM_PLAN).exists() && !app.join(IN_PLACE_STAGE).exists(), "undone whole: no plan left");
+    }
+
+    /// Moves files `after` times, then nothing moves any more: the power
+    /// went off (nor can what was done be undone).
+    fn stops_after(after: usize) -> impl Fn(&Path, &Path) -> io::Result<()> {
+        let n = std::cell::Cell::new(0);
+        move |from, to| {
+            if n.get() >= after {
+                return Err(io::Error::other("stopped"));
+            }
+            n.set(n.get() + 1);
+            move_file(from, to)
+        }
+    }
+
+    /// The program folder `app` is the old version (`old_version`) or the
+    /// new one (`release_zip`), wholly: which one.
+    #[cfg(windows)]
+    fn whole_version(app: &Path) -> &'static str {
+        let read = |f: &str| fs::read(app.join(f)).ok();
+        let old = [
+            read("rustysalamander.exe") == Some(b"old program".to_vec()),
+            read("README.md") == Some(b"old readme".to_vec()),
+            read("plugins/scp/scp.spl") == Some(b"old plugin".to_vec()),
+            !app.join("plugins/scp/lang/cs.toml").exists(),
+        ];
+        let new = [
+            read("rustysalamander.exe") == Some(vec![7u8; 100_000]),
+            read("README.md") == Some("čtení ".repeat(500).into_bytes()),
+            read("plugins/scp/scp.spl") == Some(b"new plugin".to_vec()),
+            read("plugins/scp/lang/cs.toml") == Some(b"x = 1".to_vec()),
+        ];
+        match (old.iter().all(|x| *x), new.iter().all(|x| *x)) {
+            (true, _) => "old",
+            (_, true) => "new",
+            _ => panic!("a mixture: old {old:?}, new {new:?}"),
+        }
+    }
+
+    /// An update in place stopped after each of its steps (and unable to
+    /// undo any): the next start finishes it when the new program is in
+    /// place already, else undoes it. Never a mixture, nothing lost.
+    #[cfg(windows)]
+    #[test]
+    fn update_in_place_survives_interruption() {
+        let t = tempfile::tempdir().unwrap();
+        let zip = release_zip(t.path(), "0.9.9");
+        let mut outcomes = Vec::new();
+        for n in 0.. {
+            let app = t.path().join(format!("app{n}"));
+            old_version(&app);
+            let r = install_in_place_with(&zip, &app, &stops_after(n));
+            if r.is_ok() {
+                assert_eq!(whole_version(&app), "new");
+                break;
+            }
+            let half_done = app.join(PROGRAM_PLAN).exists();
+            if half_done {
+                assert!(install_in_place(&zip, &app).unwrap_err().contains("didn't finish"), "no update over a half-done one");
+            }
+            let s = at_start_with(Some(&app), None, &move_file);
+            assert!(s.failed.is_empty(), "{s:?}");
+            outcomes.push(whole_version(&app));
+            assert!(!app.join(PROGRAM_PLAN).exists() && !app.join(IN_PLACE_STAGE).exists());
+            let mut files = Vec::new();
+            list_files(&app, Path::new(""), &mut files);
+            assert!(files.iter().all(|f| !f.to_string_lossy().contains(REPLACED)), "{files:?}");
+            for (file, kept) in [("config.toml", "theme = \"Dark\""), ("plugins/scp/known_hosts", "host key"), ("plugins/ltocatalog/catalog.sqlite", "tapes")] {
+                assert_eq!(fs::read_to_string(app.join(file)).unwrap(), kept, "{file} after {n} steps");
+            }
+            // and then it updates
+            install_in_place(&zip, &app).unwrap();
+            assert_eq!(whole_version(&app), "new");
+        }
+        // stopped before the program was in place: undone; after: finished
+        assert_eq!(outcomes.first(), Some(&"old"));
+        assert_eq!(outcomes.last(), Some(&"new"));
+        assert!(outcomes.len() >= 6, "{outcomes:?}");
+    }
+
+    /// A plugin's folder before an update, and the update waiting for it.
+    fn staged_plugin(plugins: &Path) {
+        let dir = plugins.join("scp");
+        fs::create_dir_all(dir.join("lang")).unwrap();
+        fs::write(dir.join("scp.spl"), "old").unwrap();
+        fs::write(dir.join("lang").join("cs.toml"), "old").unwrap();
+        fs::write(dir.join("known_hosts"), "keys").unwrap();
+        let staged = plugins.join(STAGED).join("scp");
+        fs::create_dir_all(staged.join("lang")).unwrap();
+        fs::write(staged.join("scp.spl"), "new").unwrap();
+        fs::write(staged.join("lang").join("cs.toml"), "new").unwrap();
+        fs::write(staged.join("CHANGELOG.md"), "new").unwrap();
+    }
+
+    /// A plugin update stopped after each step: the next start undoes it
+    /// and puts it in place again. One that can't be undone isn't loaded.
+    #[test]
+    fn plugin_update_survives_interruption() {
+        let t = tempfile::tempdir().unwrap();
+        for n in 0.. {
+            let plugins = t.path().join(format!("plugins{n}"));
+            staged_plugin(&plugins);
+            let s = apply_staged_with(&plugins, &stops_after(n));
+            let dir = plugins.join("scp");
+            if s.failed.is_empty() {
+                assert_eq!(s.updated, ["scp"]);
+                break;
+            }
+            let half_done = !s.skip.is_empty();
+            assert_eq!(half_done, plugin_plan(&plugins, "scp").exists(), "{s:?}");
+            if half_done {
+                // undoing fails too: still not loaded, nothing lost
+                let s = at_start_with(None, Some(&plugins), &stops_after(0));
+                assert_eq!(s.skip, ["scp"], "{s:?}");
+            }
+            let s = at_start_with(None, Some(&plugins), &move_file);
+            assert_eq!((s.updated.as_slice(), s.failed.len(), s.skip.len()), (&["scp".to_owned()][..], 0, 0), "after {n} steps: {s:?}");
+            for (file, text) in [("scp.spl", "new"), ("lang/cs.toml", "new"), ("CHANGELOG.md", "new"), ("known_hosts", "keys")] {
+                assert_eq!(fs::read_to_string(dir.join(file)).unwrap(), text, "{file} after {n} steps");
+            }
+            assert!(!plugins.join(STAGED).exists());
+            let mut files = Vec::new();
+            list_files(&dir, Path::new(""), &mut files);
+            assert_eq!(files.len(), 4, "{files:?}");
+        }
+    }
+
+    /// One running copy of the program updates at a time; another one
+    /// starting meanwhile leaves the files alone and doesn't load a plugin
+    /// being updated.
+    #[cfg(windows)]
+    #[test]
+    fn updates_take_turns() {
+        let t = tempfile::tempdir().unwrap();
+        let app = t.path().join("app");
+        let plugins = app.join("plugins");
+        staged_plugin(&plugins);
+        fs::write(plugin_plan(&plugins, "scp"), "scp.spl\tscp.spl.replaced-by-update\n").unwrap();
+        let held = lock(&app).unwrap().expect("the folder can be written to");
+        assert!(lock(&app).is_err());
+        let s = at_start_with(Some(&app), Some(&plugins), &move_file);
+        assert_eq!(s.skip, ["scp"]);
+        assert!(s.failed[0].contains("another running RustySalamander"), "{s:?}");
+        assert_eq!(fs::read_to_string(plugins.join("scp").join("scp.spl")).unwrap(), "old", "untouched");
+        drop(held);
+        let s = at_start_with(Some(&app), Some(&plugins), &move_file);
+        assert_eq!((s.updated.as_slice(), s.skip.len()), (&["scp".to_owned()][..], 0), "{s:?}");
+        assert_eq!(fs::read_to_string(plugins.join("scp").join("scp.spl")).unwrap(), "new");
     }
 
     /// Into a new folder: with `own`, the user's plugins and languages go

@@ -28,7 +28,7 @@ use sal_plugin_api::abi::{self, Descriptor, HostApi, Str, StrOut};
 use sal_plugin_api::host::{self, Info};
 pub use sal_plugin_api::{join_inner, Command, FieldKind, FolderPlugin, Form, Index, Mount, Panels, Reply, Results, Values};
 
-use crate::i18n::trf;
+use crate::i18n::{tr, trf};
 
 /// An open connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,29 +223,37 @@ impl Plugins {
     /// ones; plugin updates downloaded last time are put in place first.
     pub fn load(disabled: &[String]) -> Plugins {
         let dir = plugins_dir();
-        // what an update in place renamed aside, before anything is loaded
-        if let Some(app) = sal_core::config::app_dir() {
-            crate::update::remove_replaced(&app);
+        // updates finished, undone or put in place before anything is loaded
+        let app = sal_core::config::app_dir();
+        let s = crate::update::at_start(app.as_deref(), dir.as_deref());
+        if s != crate::update::Started::default() {
+            crate::debuglog::write(format!("startup: plugins updated {:?}, not updated {:?}, not loaded {:?}", s.updated, s.failed, s.skip));
         }
-        let (updated, failed) = dir.as_deref().map(crate::update::apply_staged).unwrap_or_default();
-        if !updated.is_empty() || !failed.is_empty() {
-            crate::debuglog::write(format!("startup: plugins updated {updated:?}, not updated {failed:?}"));
-        }
-        let mut p = Plugins::scan(dir.as_deref());
+        let mut p = Plugins::scan_skipping(dir.as_deref(), &s.skip);
         p.start(disabled);
-        p.updated = updated;
-        p.update_failed = failed;
+        p.updated = s.updated;
+        p.update_failed = s.failed;
         p
     }
 
     /// Find the plugins in `dir`: `dir\*.spl` and `dir\<folder>\*.spl`.
+    #[cfg(test)]
     pub fn scan(dir: Option<&Path>) -> Plugins {
+        Plugins::scan_skipping(dir, &[])
+    }
+
+    /// [`Plugins::scan`], leaving out the plugin folders `skip` (an update
+    /// of them is half done): listed as broken, never loaded.
+    pub fn scan_skipping(dir: Option<&Path>, skip: &[String]) -> Plugins {
         let mut files = Vec::new();
+        let mut broken = Vec::new();
         let is_plugin = |p: &Path| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(abi::EXTENSION));
         if let Some(Ok(rd)) = dir.map(fs::read_dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() {
+                if p.is_dir() && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| skip.iter().any(|s| s == n)) {
+                    broken.push((p, tr("its update is half done; it is finished or undone when RustySalamander starts next time").to_owned()));
+                } else if p.is_dir() {
                     if let Ok(sub) = fs::read_dir(&p) {
                         files.extend(sub.flatten().map(|e| e.path()).filter(|p| is_plugin(p)));
                     }
@@ -256,7 +264,6 @@ impl Plugins {
         }
         files.sort();
         let mut found: Vec<Found> = Vec::new();
-        let mut broken = Vec::new();
         for file in files {
             match load_library(&file) {
                 Ok(desc) => match unsafe { host::info(desc) } {

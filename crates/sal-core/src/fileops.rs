@@ -292,8 +292,31 @@ impl Ctx<'_> {
         }
     }
 
+    /// Skip `src` after an error the user can't retry away (a copy onto
+    /// itself): it is reported, counted and listed. `Err` when cancelled.
+    fn refuse(&mut self, src: &Path, e: io::Error) -> Step {
+        self.summary.skipped += 1;
+        self.summary.problem(src, e.to_string());
+        let (f, b) = measure(&[src.to_path_buf()]);
+        self.progress.files_done += f;
+        self.progress.bytes_done += b * self.passes();
+        let action = if self.skip_errors { ErrorAction::Skip } else { self.obs.error(src, &e) };
+        match action {
+            ErrorAction::Cancel => Err(()),
+            a => {
+                self.skip_errors |= a == ErrorAction::SkipAll;
+                Ok(false)
+            }
+        }
+    }
+
     /// Copy one file, after asking about an existing target.
     fn copy_file(&mut self, src: &Path, dst: &Path) -> Step {
+        // the same file by another name (a case alias, a short name, a hard
+        // link, another drive letter): overwriting it would destroy it
+        if fs::symlink_metadata(dst).is_ok() && same_file(src, dst, true) {
+            return self.refuse(src, io::Error::new(io::ErrorKind::InvalidInput, "cannot copy a file onto itself"));
+        }
         if !self.resolve_conflict(src, dst)? {
             self.summary.skipped += 1;
             if let Ok(md) = fs::metadata(src) {
@@ -372,28 +395,41 @@ impl Ctx<'_> {
     /// Copy the contents, times and attributes of `src` to `dst`, reporting
     /// progress, and check the copy as asked: the bytes copied and, with
     /// [`Verify::Checksum`], the SHA-256 both have.
+    ///
+    /// An existing `dst` stays until its replacement is complete and checked:
+    /// the copy goes into a file beside it first ([`partial_name`]), renamed
+    /// over it at the end. A cancelled, failed or bad copy leaves it as it was.
     fn copy_file_data(&mut self, src: &Path, dst: &Path) -> io::Result<(u64, Option<[u8; 32]>)> {
         let md = fs::metadata(src)?;
         self.progress.verifying = false;
-        // clear read-only on an existing target so it can be overwritten
-        if let Ok(dmd) = fs::metadata(dst) {
-            let mut perms = dmd.permissions();
-            if perms.readonly() {
-                #[allow(clippy::permissions_set_readonly_false)]
-                perms.set_readonly(false);
-                fs::set_permissions(dst, perms)?;
-            }
+        let Ok(dmd) = fs::symlink_metadata(dst) else { return self.copy_data_to(src, dst, &md) };
+        if dmd.is_dir() {
+            // found before copying it all for nothing
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "a folder of this name is there already"));
         }
+        let partial = partial_name(dst);
+        let done = self.copy_data_to(src, &partial, &md)?;
+        if let Err(e) = replace_file(&partial, dst) {
+            remove_file_forced(&partial);
+            return Err(e);
+        }
+        Ok(done)
+    }
+
+    /// [`Self::copy_file_data`] into `dst`, a file that isn't there yet
+    /// (removed again when the copy fails).
+    fn copy_data_to(&mut self, src: &Path, dst: &Path, md: &fs::Metadata) -> io::Result<(u64, Option<[u8; 32]>)> {
         // Windows copies it: on a network drive the server copies the data
         // itself (SMB server-side copy) instead of sending it here and back.
         // A checksum needs the bytes here anyway, so that one reads them.
         #[cfg(windows)]
         if self.verify != Verify::Checksum {
-            return self.system_copy(src, dst, &md);
+            return self.system_copy(src, dst, md);
         }
         let mut hasher = (self.verify == Verify::Checksum).then(Sha256::new);
         let mut input = fs::File::open(src)?;
-        let mut output = fs::File::create(dst)?;
+        // never over a file that is there: that one isn't this copy's to clear
+        let mut output = fs::File::options().write(true).create_new(true).open(dst)?;
         let mut total = 0u64;
         let result = (|| -> io::Result<()> {
             loop {
@@ -449,6 +485,7 @@ impl Ctx<'_> {
         // winbase.h (in windows-sys behind WindowsProgramming)
         const PROGRESS_CONTINUE: u32 = 0;
         const PROGRESS_CANCEL: u32 = 1;
+        const COPY_FILE_FAIL_IF_EXISTS: u32 = 0x1;
         const COPY_FILE_ALLOW_DECRYPTED_DESTINATION: u32 = 0x8;
 
         struct Data<'c, 'a> {
@@ -484,12 +521,25 @@ impl Ctx<'_> {
         let len = md.len();
         let mut data = Data { start: self.progress.bytes_done, len, cancelled: false, ctx: self };
         // SAFETY: both names end in a NUL; `data` outlives the call
-        let ok = unsafe { CopyFileExW(from.as_ptr(), to.as_ptr(), Some(routine), &mut data as *mut Data as *const c_void, std::ptr::null_mut(), COPY_FILE_ALLOW_DECRYPTED_DESTINATION) };
+        let ok = unsafe {
+            CopyFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                Some(routine),
+                &mut data as *mut Data as *const c_void,
+                std::ptr::null_mut(),
+                COPY_FILE_FAIL_IF_EXISTS | COPY_FILE_ALLOW_DECRYPTED_DESTINATION,
+            )
+        };
         let cancelled = data.cancelled;
         let start = data.start;
         if ok == 0 {
             let e = io::Error::last_os_error();
-            let _ = fs::remove_file(dst);
+            // a file that was there already isn't this copy's to remove
+            if !matches!(e.raw_os_error(), Some(80 | 183)) {
+                // ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS
+                let _ = fs::remove_file(dst);
+            }
             if cancelled || e.raw_os_error() == Some(ERROR_REQUEST_ABORTED as i32) {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
             }
@@ -564,7 +614,16 @@ impl Ctx<'_> {
         if src == dst {
             return Ok(true);
         }
-        if fs::symlink_metadata(dst).is_ok() {
+        // `dst` the item itself by another name (a case alias, a short name,
+        // another drive letter): nothing to overwrite. Only a change of the
+        // name's case (or a hard link's name) is left to do, by the rename.
+        let exists = fs::symlink_metadata(dst).is_ok();
+        let itself = exists && same_file(src, dst, false);
+        if itself && src.file_name() == dst.file_name() {
+            return Ok(true);
+        }
+        let mut made_writable = false;
+        if exists && !itself {
             let is_dir = src.is_dir();
             if is_dir && dst.is_dir() {
                 // merge directories: move children one by one (each renamed
@@ -575,19 +634,26 @@ impl Ctx<'_> {
                 self.summary.skipped += 1;
                 return Ok(false);
             }
+            // the rename replaces a file (`dst` stays if it fails); a
+            // read-only one has to be made writable for that
             if !is_dir {
-                let _ = fs::remove_file(dst);
+                made_writable = clear_readonly(dst);
             }
         }
         // fast path: rename within a volume
         self.progress.current = src.to_path_buf();
-        self.report(true)?;
-        let renamed = self.attempt(src, |_| match fs::rename(src, dst) {
-            Ok(()) => Ok(true),
-            Err(e) if rename_needs_copy(&e) => Ok(false),
-            Err(e) => Err(e),
-        })?;
-        match renamed {
+        let renamed = self.report(true).and_then(|()| {
+            self.attempt(src, |_| match fs::rename(src, dst) {
+                Ok(()) => Ok(true),
+                Err(e) if rename_needs_copy(&e) => Ok(false),
+                Err(e) => Err(e),
+            })
+        });
+        if made_writable && renamed != Ok(Some(true)) {
+            // not replaced here: as it was (a copy replaces it whole)
+            set_readonly(dst);
+        }
+        match renamed? {
             Some(true) => {
                 let (f, b) = measure(&[dst.to_path_buf()]);
                 self.progress.files_done += f;
@@ -797,6 +863,124 @@ fn rename_needs_copy(e: &io::Error) -> bool {
     }
 }
 
+/// What tells a file apart from every other one, whatever path names it:
+/// (volume serial number, file ID). `follow` opens what a link points to,
+/// else the link itself. `None` when it can't be opened.
+#[cfg(windows)]
+fn file_id(p: &Path, follow: bool) -> Option<(u64, u128)> {
+    use std::ffi::c_void;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    let flags = FILE_FLAG_BACKUP_SEMANTICS | if follow { 0 } else { FILE_FLAG_OPEN_REPARSE_POINT };
+    // no access asked: works on files others hold open without sharing
+    let f = fs::OpenOptions::new().access_mode(0).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).custom_flags(flags).open(p).ok()?;
+    let h = f.as_raw_handle();
+    // the 128-bit ID (ReFS needs it), else the 64-bit one (FAT has only that)
+    // SAFETY: plain-data structs filled by the calls, sized as passed
+    let mut info: FILE_ID_INFO = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandleEx(h, FileIdInfo, &mut info as *mut FILE_ID_INFO as *mut c_void, std::mem::size_of::<FILE_ID_INFO>() as u32) } != 0 {
+        return Some((info.VolumeSerialNumber, u128::from_le_bytes(info.FileId.Identifier)));
+    }
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(h, &mut info) } != 0 {
+        return Some((info.dwVolumeSerialNumber as u64, (info.nFileIndexHigh as u128) << 32 | info.nFileIndexLow as u128));
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn file_id(p: &Path, follow: bool) -> Option<(u64, u128)> {
+    use std::os::unix::fs::MetadataExt;
+    let md = if follow { fs::metadata(p) } else { fs::symlink_metadata(p) }.ok()?;
+    Some((md.dev(), md.ino() as u128))
+}
+
+/// Whether `a` and `b` are one and the same file or folder: the same path
+/// spelled otherwise (letter case, short name, another drive letter or
+/// share for it), or a hard link. Without IDs, by the paths alone.
+fn same_file(a: &Path, b: &Path, follow: bool) -> bool {
+    match (file_id(a, follow), file_id(b, follow)) {
+        (Some(x), Some(y)) => x == y,
+        _ => {
+            let abs = |p: &Path| std::path::absolute(p).map(|p| p.to_string_lossy().to_lowercase()).ok();
+            a == b || abs(a).is_some_and(|x| Some(x) == abs(b))
+        }
+    }
+}
+
+/// Whether `dst` is the directory `src` or inside it, by whatever path.
+fn within(dst: &Path, src: &Path) -> bool {
+    let Some(id) = file_id(src, true) else { return dst.starts_with(src) };
+    dst.ancestors().filter(|a| !a.as_os_str().is_empty()).any(|a| file_id(a, true) == Some(id))
+}
+
+/// Make `p` writable if it is read-only; whether it was.
+fn clear_readonly(p: &Path) -> bool {
+    let Ok(md) = fs::symlink_metadata(p) else { return false };
+    let mut perms = md.permissions();
+    if !perms.readonly() {
+        return false;
+    }
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    fs::set_permissions(p, perms).is_ok()
+}
+
+/// Make `p` read-only again (after [`clear_readonly`]).
+fn set_readonly(p: &Path) {
+    if let Ok(md) = fs::symlink_metadata(p) {
+        let mut perms = md.permissions();
+        perms.set_readonly(true);
+        let _ = fs::set_permissions(p, perms);
+    }
+}
+
+/// Delete the file `p`, read-only or not, ignoring failure.
+fn remove_file_forced(p: &Path) {
+    clear_readonly(p);
+    let _ = fs::remove_file(p);
+}
+
+/// What a copy that will replace `dst` is written as until it is complete:
+/// `<name>.rsal-partial` beside it (a number added when that is taken).
+fn partial_name(dst: &Path) -> PathBuf {
+    const SUFFIX: &str = ".rsal-partial";
+    let name = dst.file_name().unwrap_or_default();
+    let units = name.to_string_lossy().encode_utf16().count();
+    let base = if units + SUFFIX.len() + 4 <= MAX_NAME {
+        let mut n = name.to_os_string();
+        n.push(SUFFIX);
+        n
+    } else {
+        // a name that long has no room for it
+        SUFFIX.into()
+    };
+    let mut path = dst.with_file_name(&base);
+    let mut n = 2;
+    while fs::symlink_metadata(&path).is_ok() {
+        let mut numbered = base.clone();
+        numbered.push(n.to_string());
+        path = dst.with_file_name(numbered);
+        n += 1;
+    }
+    path
+}
+
+/// Put the complete copy `from` in place of the file `to`, in one rename:
+/// `to` stays as it was when that fails.
+fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    let was_readonly = clear_readonly(to);
+    fs::rename(from, to).inspect_err(|_| {
+        if was_readonly {
+            set_readonly(to);
+        }
+    })
+}
+
 /// "ba7816bf…": `bytes` as lowercase hex digits.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -861,6 +1045,13 @@ pub fn transfer_with(kind: OpKind, sources: &[PathBuf], target: &Path, options: 
     if mask.as_deref() == Some("") && sources.len() > 1 {
         mask = None;
     }
+    // one folder moved to its own name in other letter case: the target is
+    // there (it is the folder), but it is the new name, not where it goes
+    if let [src] = sources {
+        if kind == OpKind::Move && mask.is_none() && src.file_name() != dest.file_name() && same_file(src, &dest, false) {
+            mask = Some(String::new());
+        }
+    }
     let mut ctx = new_ctx(obs, sources);
     ctx.verify = options.verify;
     ctx.summary.verify = options.verify;
@@ -875,7 +1066,19 @@ pub fn transfer_with(kind: OpKind, sources: &[PathBuf], target: &Path, options: 
     }
     for src in sources {
         let dst = target_for(src, &dest, &mask);
+        // a folder into itself by another path (letter case, short name,
+        // drive letter, junction): it would copy itself without end. A move
+        // onto itself is only a rename (move_item).
+        let inside = src.is_dir()
+            && match kind {
+                OpKind::Copy => within(&dst, src),
+                _ => dst.parent().is_some_and(|p| within(p, src)),
+            };
         let r = match kind {
+            _ if inside => {
+                let what = if kind == OpKind::Copy { "cannot copy a directory into itself" } else { "cannot move a directory into itself" };
+                ctx.refuse(src, io::Error::new(io::ErrorKind::InvalidInput, what))
+            }
             OpKind::Copy => ctx.copy_tree(src, &dst),
             OpKind::Move => ctx.move_item(src, &dst),
             OpKind::Delete => unreachable!("use delete()"),
@@ -1548,5 +1751,225 @@ mod tests {
             .expect("the job's thread ran out of stack");
         assert_eq!(summary.files, 1);
         assert!(!src.exists() && !dst.join("deep").exists());
+    }
+
+    /// Answers conflicts with `answer`, skips errors and notes them.
+    struct Noted {
+        answer: ConflictAction,
+        errors: Vec<String>,
+        asked: u32,
+    }
+    impl Noted {
+        fn new(answer: ConflictAction) -> Self {
+            Noted { answer, errors: Vec::new(), asked: 0 }
+        }
+    }
+    impl OpObserver for Noted {
+        fn progress(&mut self, _: &Progress) -> bool {
+            true
+        }
+        fn conflict(&mut self, _: &Path, _: &Path) -> ConflictAction {
+            self.asked += 1;
+            self.answer
+        }
+        fn error(&mut self, _: &Path, e: &io::Error) -> ErrorAction {
+            self.errors.push(e.to_string());
+            ErrorAction::Skip
+        }
+    }
+
+    /// The names in `dir`.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut n: Vec<String> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        n.sort();
+        n
+    }
+
+    /// A copy onto the very file it copies, by the same path or another
+    /// (letter case, a hard link), is refused: overwriting it destroyed it.
+    #[test]
+    fn copy_onto_itself_is_refused() {
+        for verify in [Verify::None, Verify::Size, Verify::Checksum] {
+            let t = tempfile::tempdir().unwrap();
+            let dir = t.path().join("dir");
+            fs::create_dir(&dir).unwrap();
+            let file = dir.join("x.txt");
+            fs::write(&file, "data").unwrap();
+            let links = t.path().join("links");
+            fs::create_dir(&links).unwrap();
+            fs::hard_link(&file, links.join("x.txt")).unwrap();
+            let options = TransferOptions { verify, ..Default::default() };
+            let mut targets = vec![dir.clone(), links.clone()];
+            if cfg!(windows) {
+                // case-insensitive names: the same folder, the same file
+                targets.extend([t.path().join("DIR"), t.path().join("DIR").join("X.TXT")]);
+            }
+            for target in targets {
+                let mut obs = Noted::new(ConflictAction::Overwrite);
+                let s = transfer_with(OpKind::Copy, std::slice::from_ref(&file), &target, &options, &mut obs);
+                assert_eq!((s.files, s.skipped, obs.asked), (0, 1, 0), "{verify:?} to {}", target.display());
+                assert!(obs.errors.len() == 1 && obs.errors[0].contains("onto itself"), "{:?}", obs.errors);
+                assert_eq!(fs::read_to_string(&file).unwrap(), "data", "{verify:?} to {}", target.display());
+                assert_eq!(names(&dir), ["x.txt"]);
+            }
+        }
+    }
+
+    /// A folder copied into itself by another path stops at once.
+    #[cfg(windows)]
+    #[test]
+    fn copy_into_itself_by_alias_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("dir");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.txt"), "a").unwrap();
+        for (kind, target) in [(OpKind::Copy, t.path().join("DIR")), (OpKind::Copy, t.path().join("DIR").join("SUB")), (OpKind::Move, t.path().join("DIR").join("SUB"))] {
+            let mut obs = Noted::new(ConflictAction::Overwrite);
+            let s = transfer(kind, std::slice::from_ref(&dir), &target, &mut obs);
+            assert_eq!((s.files, s.skipped), (0, 1), "{kind:?} to {}", target.display());
+            assert!(obs.errors[0].contains("into itself"), "{:?}", obs.errors);
+            assert_eq!(names(&dir), ["a.txt", "sub"]);
+            assert_eq!(names(&dir.join("sub")).len(), 0);
+        }
+    }
+
+    /// A move onto itself by another path changes nothing, asks nothing;
+    /// one that changes only the case of the name renames it.
+    #[cfg(windows)]
+    #[test]
+    fn move_onto_itself_keeps_it_or_changes_the_case() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("dir");
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("x.txt");
+        fs::write(&file, "data").unwrap();
+        let mut obs = Noted::new(ConflictAction::Overwrite);
+        let s = transfer(OpKind::Move, std::slice::from_ref(&file), &t.path().join("DIR"), &mut obs);
+        assert!(!s.cancelled && obs.errors.is_empty() && obs.asked == 0);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "data");
+        let s = transfer(OpKind::Move, std::slice::from_ref(&file), &dir.join("X.TXT"), &mut obs);
+        assert!(!s.cancelled && obs.errors.is_empty() && obs.asked == 0, "{:?}", obs.errors);
+        assert_eq!(s.renamed, 1);
+        assert_eq!(names(&dir), ["X.TXT"]);
+        assert_eq!(fs::read_to_string(dir.join("X.TXT")).unwrap(), "data");
+        // a folder likewise
+        let s = transfer(OpKind::Move, std::slice::from_ref(&dir), &t.path().join("Dir"), &mut obs);
+        assert!(!s.cancelled && obs.errors.is_empty() && obs.asked == 0, "{:?}", obs.errors);
+        assert_eq!(names(t.path()), ["Dir"]);
+    }
+
+    /// No file beside `dst` left from a copy that didn't finish.
+    fn no_partial(dir: &Path) {
+        assert!(names(dir).iter().all(|n| !n.contains("rsal-partial")), "{:?}", names(dir));
+    }
+
+    /// A copy over an existing file that is cancelled, or fails its check,
+    /// leaves that file as it was.
+    #[test]
+    fn a_failed_overwrite_keeps_the_old_file() {
+        struct Cancel;
+        impl OpObserver for Cancel {
+            fn progress(&mut self, _: &Progress) -> bool {
+                false
+            }
+            fn conflict(&mut self, _: &Path, _: &Path) -> ConflictAction {
+                ConflictAction::Overwrite
+            }
+            fn error(&mut self, _: &Path, _: &io::Error) -> ErrorAction {
+                ErrorAction::Cancel
+            }
+        }
+        /// Grows the original while it is copied.
+        struct Grow(PathBuf);
+        impl OpObserver for Grow {
+            fn progress(&mut self, _: &Progress) -> bool {
+                fs::OpenOptions::new().append(true).open(&self.0).unwrap().write_all(b"more").unwrap();
+                true
+            }
+            fn conflict(&mut self, _: &Path, _: &Path) -> ConflictAction {
+                ConflictAction::Overwrite
+            }
+            fn error(&mut self, _: &Path, _: &io::Error) -> ErrorAction {
+                ErrorAction::Cancel
+            }
+        }
+        let long_ago = || Instant::now().checked_sub(std::time::Duration::from_secs(1)).unwrap();
+        for verify in [Verify::None, Verify::Size, Verify::Checksum] {
+            let t = tempfile::tempdir().unwrap();
+            let src = t.path().join("big.bin");
+            fs::write(&src, vec![1u8; 3 << 20]).unwrap();
+            let out = t.path().join("out");
+            fs::create_dir(&out).unwrap();
+            let dst = out.join("big.bin");
+            fs::write(&dst, "old").unwrap();
+
+            let mut obs = Cancel;
+            let mut ctx = new_ctx(&mut obs, &[]);
+            ctx.verify = verify;
+            ctx.last_report = long_ago();
+            let e = ctx.copy_file_data(&src, &dst).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::Interrupted, "{verify:?}: {e}");
+            assert_eq!(fs::read_to_string(&dst).unwrap(), "old", "{verify:?}");
+            no_partial(&out);
+
+            if verify == Verify::Checksum {
+                let mut obs = Grow(src.clone());
+                let mut ctx = new_ctx(&mut obs, &[]);
+                ctx.verify = verify;
+                ctx.last_report = long_ago();
+                let e = ctx.copy_file_data(&src, &dst).unwrap_err();
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+                assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
+                no_partial(&out);
+            }
+
+            // and one that succeeds replaces it, read-only or not
+            set_readonly(&dst);
+            let options = TransferOptions { verify, ..Default::default() };
+            let s = transfer_with(OpKind::Copy, std::slice::from_ref(&src), &out, &options, &mut Noted::new(ConflictAction::Overwrite));
+            assert_eq!(s.files, 1);
+            assert_eq!(fs::metadata(&dst).unwrap().len(), fs::metadata(&src).unwrap().len());
+            assert!(!fs::metadata(&dst).unwrap().permissions().readonly(), "the original's attributes");
+            no_partial(&out);
+        }
+    }
+
+    /// A move over an existing file whose rename fails leaves that file
+    /// (it was deleted before the rename was tried).
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_move_keeps_the_old_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("a.txt");
+        fs::write(&src, "new").unwrap();
+        let out = t.path().join("out");
+        fs::create_dir(&out).unwrap();
+        let dst = out.join("a.txt");
+        fs::write(&dst, "old").unwrap();
+        set_readonly(&dst);
+        let held = fs::OpenOptions::new().read(true).share_mode(0).open(&src).unwrap();
+        let mut obs = Noted::new(ConflictAction::Overwrite);
+        let s = transfer(OpKind::Move, std::slice::from_ref(&src), &out, &mut obs);
+        drop(held);
+        assert_eq!((s.files, obs.errors.len()), (0, 1), "{:?}", obs.errors);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
+        assert!(fs::metadata(&dst).unwrap().permissions().readonly(), "read-only as it was");
+        // not held: replaces it
+        let s = transfer(OpKind::Move, std::slice::from_ref(&src), &out, &mut Noted::new(ConflictAction::Overwrite));
+        assert_eq!((s.files, s.renamed), (1, 1));
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "new");
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn partial_names() {
+        let t = tempfile::tempdir().unwrap();
+        let dst = t.path().join("a.txt");
+        assert_eq!(partial_name(&dst), t.path().join("a.txt.rsal-partial"));
+        fs::write(t.path().join("a.txt.rsal-partial"), "").unwrap();
+        assert_eq!(partial_name(&dst), t.path().join("a.txt.rsal-partial2"));
+        let long = t.path().join("n".repeat(250));
+        assert_eq!(partial_name(&long), t.path().join(".rsal-partial"));
     }
 }

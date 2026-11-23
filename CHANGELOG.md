@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.14-beta (2026-11-23)
+
+- **A file copied onto itself is no longer destroyed:** copying a file into its own folder and answering *Overwrite*, or copying it to the same file under another path (other letter case, a short name, a hard link, another drive letter for it), emptied or deleted the original. Copy and move now tell such paths apart by the file itself, not its name: a copy onto itself is refused, a move onto itself does nothing, or changes only the letter case of the name (for folders too, which failed before). A folder copied into itself under another path stops at once instead of copying itself without end.
+- **Overwriting keeps the old file until the new one is complete:** a copy over an existing file goes into `<name>.rsal-partial` beside it first and replaces it in one step only when it is complete and checked; cancelling, a failed write or a failed check leaves the old file as it was (before, it was gone). A move on the same drive no longer deletes the existing file before renaming, so a move that fails leaves it too.
+- **Updates survive an interruption:** an update in place, and a plugin update at start, write down what they are about to replace before changing anything, and replace files only by renaming them. If the program is stopped half way (a crash, the power), the next start finishes the update when the new program is already in place, else undoes it, before anything is loaded; the files put aside are deleted only then. A plugin left half updated is not loaded. Only one running copy of the program updates at a time.
+- **Compare 0.1.6-alpha** is now in the package: Ctrl+F finds text in both compared files, as in the viewer.
+
 ## 0.9.13-beta (2026-11-20)
 
 - **Show changelog opens a viewer window:** the changes of an update open in the Viewer, as a Markdown file headed with the versions, instead of a narrow box in the update window whose lines were cut off.
