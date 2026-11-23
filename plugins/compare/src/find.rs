@@ -58,21 +58,37 @@ impl Query {
 /// Every match of `query` in `rows`, in order (in a row, the left side's
 /// first); whether there were more than [`MAX_HITS`]. Empty matches (a
 /// lone `*`) don't count.
+#[cfg(test)]
 pub fn find_all(rows: &[Row], query: &Query) -> (Vec<Hit>, bool) {
-    let Some(re) = query.pattern() else { return (Vec::new(), false) };
+    let never = std::sync::atomic::AtomicBool::new(false);
+    find_until(rows, query, &never).unwrap_or_default()
+}
+
+/// [`find_all`], given up (`None`) as soon as `stop` is set: a search
+/// runs beside the window, and one for what was typed before is no longer
+/// wanted.
+pub fn find_until(rows: &[Row], query: &Query, stop: &std::sync::atomic::AtomicBool) -> Option<(Vec<Hit>, bool)> {
+    use std::sync::atomic::Ordering;
+    let Some(re) = query.pattern() else { return Some((Vec::new(), false)) };
     let mut hits = Vec::new();
     for (row, r) in rows.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
         for (right, side) in [(false, &r.left), (true, &r.right)] {
             let Some((_, text)) = side else { continue };
             for m in re.find_iter(text).filter(|m| m.start() < m.end()) {
                 if hits.len() == MAX_HITS {
-                    return (hits, true);
+                    return Some((hits, true));
+                }
+                if hits.len() % 4096 == 4095 && stop.load(Ordering::Relaxed) {
+                    return None;
                 }
                 hits.push(Hit { row, right, start: m.start(), end: m.end() });
             }
         }
     }
-    (hits, false)
+    Some((hits, false))
 }
 
 /// The matches on one side of row `row` (`hits` in order).
@@ -153,6 +169,9 @@ mod tests {
         assert_eq!(first_from(&hits, 3), Some(0), "round the end");
         assert_eq!(on_side(&hits, 2, true).count(), 1);
         assert_eq!(on_side(&hits, 1, false).count(), 0);
+        // no longer wanted: given up
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        assert!(find_until(&r, &q("a", false, false), &stop).is_none(), "given up");
         let many = "a".repeat(1000) + "\n";
         let r = rows(&many.repeat(120), "");
         let (hits, more) = find_all(&r, &q("a", false, false));

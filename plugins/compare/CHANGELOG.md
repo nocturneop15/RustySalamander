@@ -2,6 +2,11 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.7-alpha (2026-11-24)
+
+- **Find searches beside the window:** the window stays usable while big files are searched, the bar says **Searching…** until it is done (never "Not found" before), and a search for what was typed before is given up as you type on: one search at a time, the latest only, however fast you type. **Compare again** forgets the matches found in the texts before at once, so none is drawn into the new texts or gone to with F3. What is looked for takes at most 1 000 characters.
+- **A match far along a long line comes into sight:** going to a match beyond the window's edge moves that side's text sideways so the match is shown (a third in from the left, or further so that a long match ends in sight); a match near the start of its line puts the text back, and so do going to a difference (F8), comparing again and closing the find bar. Before, such a match was counted but stayed out of sight.
+
 ## 0.1.6-alpha (2026-11-23)
 
 - **Finds text:** **Ctrl+F**, or the magnifier in the toolbar, opens a find bar, as in the viewer: every match in both files is marked, the current one in orange; **F3** and **Shift+F3** (or Enter and Shift+Enter in the box, or the arrows) go to the next and the previous match, round the end, scrolling it into view. **Match case** and **Wildcards** (`*` for any characters, `?` for one) as in the viewer; Esc closes the bar, a second Esc the window. Works with RustySalamander 0.9.4-beta and later.
