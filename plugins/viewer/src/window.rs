@@ -73,27 +73,93 @@ struct FindBar {
     focus: bool,
     /// Bring the current match into view (next frame).
     reveal: bool,
+    /// The worker searching beside the window (one per window: the latest
+    /// query only), started at the first search.
+    searcher: Option<Searcher>,
+    /// What it was last asked for, until it is done.
+    pending: Option<Pending>,
+}
+
+/// The search the worker does for the find bar: what to look for in what.
+type Searcher = sal_ui::latest::Latest<(std::sync::Arc<Vec<String>>, Query), (Vec<Hit>, bool)>;
+
+/// The search asked for and not done yet: for `key`, to start from line
+/// `from` when it is done.
+struct Pending {
+    key: (Query, u64),
+    from: usize,
 }
 
 impl FindBar {
-    /// Find again when the text, the options or the document changed. A new
-    /// search starts from the current match, or the first line shown.
-    fn refresh(&mut self, doc: &Doc, top_line: usize) {
+    /// Find again when the text, the options or the document changed, beside
+    /// the window (a big file takes a while; the window stays usable): what
+    /// was found shows when it is done. A new search starts from the current
+    /// match, or the first line shown. `wake` draws the window again then.
+    fn refresh(&mut self, doc: &Doc, top_line: usize, wake: impl Fn() + Send + 'static) {
         if !self.open {
+            self.cancel();
             self.hits.clear();
             self.made_for = None;
             self.current = None;
             return;
         }
         let key = (self.query.clone(), doc.version());
+        // back to what the matches shown are for (typed on, then back,
+        // before the other search was done): those stay, and the other search
+        // is given up (else it would stay "Searching…"); drawn again, as this
+        // frame may have said so already and a search given up never wakes
         if self.made_for.as_ref() == Some(&key) {
+            if self.pending.is_some() {
+                self.cancel();
+                wake();
+            }
             return;
         }
+        // other text: the matches found in the text before don't fit it (a
+        // line may be gone, or shorter); only for other words in the same
+        // text do they stay shown until the search is done
+        if self.made_for.as_ref().is_some_and(|m| m.1 != key.1) || self.pending.as_ref().is_some_and(|p| p.key.1 != key.1) {
+            self.forget();
+        }
+        if let Some(p) = self.pending.as_ref().filter(|p| p.key == key) {
+            let Some((hits, more)) = self.searcher.as_ref().and_then(Searcher::take) else { return };
+            let from = p.from;
+            self.pending = None;
+            (self.hits, self.more) = (hits, more);
+            self.current = find::first_from(&self.hits, from);
+            self.reveal = self.current.is_some();
+            self.made_for = Some(key);
+            return;
+        }
+        // a new search: it replaces one asked for before
         let from = self.current.and_then(|c| self.hits.get(c)).map_or(top_line, |h| h.line);
-        (self.hits, self.more) = find::find_all(&doc.lines, &self.query);
-        self.current = find::first_from(&self.hits, from);
-        self.reveal = self.current.is_some();
-        self.made_for = Some(key);
+        if self.query.text.is_empty() {
+            self.cancel();
+            (self.hits, self.more, self.current) = (Vec::new(), false, None);
+            self.made_for = Some(key);
+            return;
+        }
+        let searcher = self.searcher.get_or_insert_with(|| Searcher::new("viewer find", |(lines, query), stop| find::find_until(&lines, &query, stop), wake));
+        searcher.ask((doc.lines.clone(), self.query.clone()));
+        self.pending = Some(Pending { key, from });
+    }
+
+    /// Forget the matches found (the text changed): none marked, none to go to.
+    fn forget(&mut self) {
+        (self.hits, self.more, self.current, self.reveal, self.made_for) = (Vec::new(), false, None, false, None);
+    }
+
+    /// Give up the search asked for, if one is.
+    fn cancel(&mut self) {
+        if let Some(s) = &mut self.searcher {
+            s.cancel();
+        }
+        self.pending = None;
+    }
+
+    /// Whether a search is still running.
+    fn searching(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Go to the next match (or the previous one), round the end.
@@ -110,10 +176,14 @@ impl FindBar {
         self.reveal = true;
     }
 
-    /// "3 of 12", "Not found", or nothing yet.
+    /// "3 of 12", "Not found", "Searching…", or nothing yet.
     fn status(&self) -> String {
         if self.query.text.is_empty() {
             return String::new();
+        }
+        // not "Not found" before it is done
+        if self.searching() {
+            return tr("Searching…");
         }
         match self.current {
             None => tr("Not found"),
@@ -284,7 +354,7 @@ impl Content for ViewerWin {
                 ui.horizontal(|ui| {
                     ui.label(tr("Find:"));
                     let hint = if find.query.wildcards { tr("text, * any characters, ? one") } else { tr("text") };
-                    let field = ui.add(egui::TextEdit::singleline(&mut find.query.text).desired_width(260.0).margin(sal_ui::layout::FIELD_MARGIN).hint_text(hint));
+                    let field = ui.add(egui::TextEdit::singleline(&mut find.query.text).char_limit(sal_ui::layout::limit::FIND).desired_width(260.0).margin(sal_ui::layout::FIELD_MARGIN).hint_text(hint));
                     if std::mem::take(&mut find.focus) {
                         field.request_focus();
                         select_all(ui, &field, &find.query.text);
@@ -304,7 +374,7 @@ impl Content for ViewerWin {
                         step = Some(true);
                     }
                     let status = find.status();
-                    if find.current.is_none() && !find.query.text.is_empty() {
+                    if find.current.is_none() && !find.query.text.is_empty() && !find.searching() {
                         ui.label(RichText::new(status).color(ui.visuals().warn_fg_color));
                     } else {
                         ui.label(status);
@@ -320,7 +390,11 @@ impl Content for ViewerWin {
                 });
             });
         }
-        find.refresh(doc, self.top_line);
+        let wake = {
+            let ctx = ctx.clone();
+            move || ctx.request_repaint_of(egui::ViewportId::ROOT)
+        };
+        find.refresh(doc, self.top_line, wake);
         if let Some(forward) = step {
             find.step(forward);
         }
@@ -361,7 +435,7 @@ impl Content for ViewerWin {
                     }
                 });
             } else if doc.wrap {
-                let reveal = find.reveal.then(|| find.current.map(|c| find.hits[c].line)).flatten();
+                let reveal = find.reveal.then(|| find.current.and_then(|c| find.hits.get(c)).map(|h| h.line)).flatten();
                 find.reveal = false;
                 let mut area = egui::ScrollArea::vertical().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
                 if to_end {
@@ -398,10 +472,11 @@ impl Content for ViewerWin {
                 if to_end {
                     area = area.vertical_scroll_offset(TO_END);
                 }
-                if let Some(hit) = find.current.filter(|_| find.reveal).map(|c| find.hits[c]) {
+                let fits = |h: &Hit| doc.lines.get(h.line).is_some_and(|l| h.end <= l.len() && l.is_char_boundary(h.start) && l.is_char_boundary(h.end));
+                if let Some(hit) = find.current.filter(|_| find.reveal).and_then(|c| find.hits.get(c).copied()).filter(fits) {
                     find.reveal = false;
                     // the match's line in the middle, its text in sight
-                        let view = ui.available_size();
+                    let view = ui.available_size();
                     let y = (hit.line as f32 * pitch - view.y / 2.0).max(0.0);
                     let line = &doc.lines[hit.line];
                     let font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -835,7 +910,7 @@ mod tests {
         std::fs::write(&file, "Kůň\nnic\nKŮŇ a kůň\n").unwrap();
         let mut w = ViewerWin::new(Doc::open(&file));
         let ctx = egui::Context::default();
-        let frame = |w: &mut ViewerWin, keys: &[(egui::Key, egui::Modifiers)], text: &str| {
+        let once = |w: &mut ViewerWin, keys: &[(egui::Key, egui::Modifiers)], text: &str| {
             let mut events: Vec<egui::Event> =
                 keys.iter().map(|&(key, modifiers)| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }).collect();
             if !text.is_empty() {
@@ -847,12 +922,24 @@ mod tests {
                 w.show(ctx);
             });
         };
+        // a frame, then as many as the search beside the window takes
+        let frame = |w: &mut ViewerWin, keys: &[(egui::Key, egui::Modifiers)], text: &str| {
+            once(w, keys, text);
+            let until = Instant::now() + Duration::from_secs(10);
+            while w.find.searching() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+                once(w, &[], "");
+            }
+        };
         let none = egui::Modifiers::NONE;
         assert!(!w.takes_escape());
         frame(&mut w, &[(egui::Key::F, egui::Modifiers::COMMAND)], "");
         assert!(w.find.open && w.takes_escape(), "Ctrl+F opens it; Escape is its now");
         frame(&mut w, &[], "");
-        frame(&mut w, &[], "kůň");
+        once(&mut w, &[], "kůň");
+        // the search runs beside the window: not "Not found" meanwhile
+        assert!(w.find.searching());
+        assert_eq!(w.find.status(), "Searching…");
         frame(&mut w, &[], "");
         assert_eq!(w.find.query.text, "kůň");
         assert_eq!((w.find.hits.len(), w.find.current), (3, Some(0)), "in any case");
@@ -873,6 +960,94 @@ mod tests {
         assert!(!w.find.open && !w.takes_escape(), "Escape closed the bar, not the window");
         frame(&mut w, &[], "");
         assert!(w.find.hits.is_empty(), "no marks without the bar");
+    }
+
+    /// The file gets shorter while Find is open: the matches found in the
+    /// longer text are forgotten at once, and F3 before the new search is
+    /// done goes nowhere (no line that isn't there any more).
+    #[test]
+    fn find_after_the_text_changed() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("a.txt");
+        let long: String = (0..200).map(|i| format!("line {i} kůň\n")).collect();
+        std::fs::write(&file, &long).unwrap();
+        let mut w = ViewerWin::new(Doc::open(&file));
+        let ctx = egui::Context::default();
+        let once = |w: &mut ViewerWin, events: Vec<egui::Event>| {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 400.0));
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(rect), events, ..Default::default() }, |ctx| {
+                w.show(ctx);
+            });
+        };
+        let f3 = || egui::Event::Key { key: egui::Key::F3, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        w.find.open = true;
+        w.find.query.text = "kůň".into();
+        once(&mut w, vec![]);
+        let until = Instant::now() + Duration::from_secs(10);
+        while w.find.searching() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            once(&mut w, vec![]);
+        }
+        assert_eq!(w.find.hits.len(), 200);
+        // to the last match, far down
+        for _ in 0..199 {
+            w.find.step(true);
+        }
+        assert_eq!(w.find.current.map(|c| w.find.hits[c].line), Some(199));
+        // the file is read again (as when following it), much shorter, and in other words
+        std::fs::write(&file, "a\nkůň b\n").unwrap();
+        assert!(w.doc.poll());
+        once(&mut w, vec![f3()]);
+        assert!(w.find.hits.iter().all(|h| h.line < 2), "nothing of the longer text: {:?}", w.find.hits.len());
+        once(&mut w, vec![f3(), f3()]);
+        let until = Instant::now() + Duration::from_secs(10);
+        while w.find.searching() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            once(&mut w, vec![f3()]);
+        }
+        assert_eq!(w.find.hits, [Hit { line: 1, start: 0, end: 5 }]);
+    }
+
+    /// Typed on and back again before the other search was done: the
+    /// matches shown stay (and the one gone to), and nothing is left
+    /// "Searching…" (whatever the worker's speed: the other search's result
+    /// is never looked at).
+    #[test]
+    fn back_to_the_words_shown() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("a.txt");
+        std::fs::write(&file, "kůň a\nb kůň\nkůň\n").unwrap();
+        let doc = Doc::open(&file);
+        let mut bar = FindBar { open: true, ..Default::default() };
+        let settle = |bar: &mut FindBar| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while bar.searching() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+                bar.refresh(&doc, 0, || {});
+            }
+        };
+        bar.query.text = "kůň".into();
+        bar.refresh(&doc, 0, || {});
+        settle(&mut bar);
+        bar.step(true);
+        let (hits, current) = (bar.hits.clone(), bar.current);
+        assert_eq!((hits.len(), current), (3, Some(1)));
+        // B asked for, then back to A before B is looked at again
+        bar.query.text = "b".into();
+        bar.refresh(&doc, 0, || {});
+        assert!(bar.searching());
+        bar.query.text = "kůň".into();
+        let woken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let w = woken.clone();
+        bar.refresh(&doc, 0, move || w.store(true, std::sync::atomic::Ordering::Relaxed));
+        assert!(bar.pending.is_none() && !bar.searching(), "not left searching");
+        assert!(woken.load(std::sync::atomic::Ordering::Relaxed), "drawn again");
+        assert_eq!((bar.hits.clone(), bar.current), (hits, current), "A's matches, A's place");
+        assert_eq!(bar.status(), "2 of 3");
+        // and B's result, when it comes, never takes over
+        std::thread::sleep(Duration::from_millis(50));
+        bar.refresh(&doc, 0, || {});
+        assert_eq!((bar.hits.len(), bar.current, bar.status().as_str()), (3, Some(1), "2 of 3"));
     }
 
     /// The arrows, Page Up/Down and Home/End scroll the text and the bytes;
@@ -1028,10 +1203,10 @@ mod tests {
         };
         write("paused\n");
         frame(&mut w, false);
-        assert_eq!(w.doc.lines, ["start"], "not followed yet");
+        assert_eq!(*w.doc.lines, ["start"], "not followed yet");
         frame(&mut w, true);
         assert!(w.following);
-        assert_eq!(w.doc.lines, ["start", "paused"], "Play catches up at once");
+        assert_eq!(*w.doc.lines, ["start", "paused"], "Play catches up at once");
         write("live\n");
         w.polled = Some(Instant::now() - POLL);
         frame(&mut w, false);

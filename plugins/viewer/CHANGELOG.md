@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.7.3-alpha (2026-11-24)
+
+- **Find searches beside the window:** the window stays usable while a big file is searched, the bar says **Searching…** until it is done (never "Not found" before), and a search for what was typed before is given up as you type on: one search at a time, the latest only, however fast you type. When the text changes (read again, a file followed grows), the matches found in it before are forgotten at once, so F3 never goes to a line that isn't there any more. What is looked for takes at most 1 000 characters (a bigger paste keeps the start). Works with RustySalamander 0.9.4-beta and later.
+
 ## 0.7.2-alpha (2026-11-20)
 
 - **Selecting and copying text:** in the Text view, drag the mouse over the text (past the window's edge it scrolls along), Shift+click to extend, double-click for a word. **Shift** with the arrows, Home/End and Page Up/Down selects from where you clicked, or from the first line shown; with **Ctrl**, ←/→ go by words and Home/End to the start and the end of the file. **Ctrl+A** selects all, **Ctrl+C** or Ctrl+Insert copies (lines end with CR LF). The keys without Shift scroll as before; while the find box has the keyboard, they are its. Works with RustySalamander 0.9.4-beta and later.

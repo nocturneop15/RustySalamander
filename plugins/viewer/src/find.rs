@@ -50,20 +50,36 @@ impl Query {
     }
 }
 
-/// Every match of `query` in `lines`, in order; whether there were more than
-/// [`MAX_HITS`]. Empty matches (a lone `*`) don't count.
+/// Every match of `query` in `lines`, in order; whether there were more
+/// than [`MAX_HITS`]. Empty matches (a lone `*`) don't count.
+#[cfg(test)]
 pub fn find_all(lines: &[String], query: &Query) -> (Vec<Hit>, bool) {
-    let Some(re) = query.pattern() else { return (Vec::new(), false) };
+    let never = std::sync::atomic::AtomicBool::new(false);
+    find_until(lines, query, &never).unwrap_or_default()
+}
+
+/// [`find_all`], given up (`None`) as soon as `stop` is set: a search
+/// runs beside the window, and one for what was typed before is no longer
+/// wanted.
+pub fn find_until(lines: &[String], query: &Query, stop: &std::sync::atomic::AtomicBool) -> Option<(Vec<Hit>, bool)> {
+    use std::sync::atomic::Ordering;
+    let Some(re) = query.pattern() else { return Some((Vec::new(), false)) };
     let mut hits = Vec::new();
     for (line, text) in lines.iter().enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            return None;
+        }
         for m in re.find_iter(text).filter(|m| m.start() < m.end()) {
             if hits.len() == MAX_HITS {
-                return (hits, true);
+                return Some((hits, true));
+            }
+            if hits.len() % 4096 == 4095 && stop.load(Ordering::Relaxed) {
+                return None;
             }
             hits.push(Hit { line, start: m.start(), end: m.end() });
         }
     }
-    (hits, false)
+    Some((hits, false))
 }
 
 /// The matches on line `line` (`hits` in order).
@@ -152,6 +168,9 @@ mod tests {
 
     #[test]
     fn at_most_max_hits() {
+        // no longer wanted: given up
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        assert!(find_until(&lines("a\nb"), &q("a", false, false), &stop).is_none(), "given up");
         let l = vec!["a".repeat(MAX_HITS + 5)];
         let (hits, more) = find_all(&l, &q("a", false, false));
         assert_eq!((hits.len(), more), (MAX_HITS, true));

@@ -31,7 +31,9 @@ pub struct Doc {
     pub file_len: u64,
     pub encoding: TextEncoding,
     bom: usize,
-    pub lines: Vec<String>,
+    /// Shared with a search running beside the window (copied only when
+    /// the file grows while one runs).
+    pub lines: std::sync::Arc<Vec<String>>,
     /// How many of `lines` end with a line break: all of them, or all but
     /// the last. They stay as they are when the file grows.
     complete: usize,
@@ -141,7 +143,7 @@ impl Doc {
             file_len: 0,
             encoding: TextEncoding::Utf8,
             bom: 0,
-            lines: Vec::new(),
+            lines: Default::default(),
             complete: 0,
             hex: false,
             wrap: false,
@@ -184,7 +186,7 @@ impl Doc {
         let bom = if matches!((enc, self.bom), (TextEncoding::Utf8, 3) | (TextEncoding::Utf16Le | TextEncoding::Utf16Be, 2)) { self.bom } else { 0 };
         let text = encoding::decode(&self.bytes[bom.min(self.bytes.len())..], enc);
         self.complete = text.matches('\n').count();
-        self.lines = to_lines(&text).collect();
+        self.lines = std::sync::Arc::new(to_lines(&text).collect());
         self.version += 1;
         self.epoch += 1;
     }
@@ -270,10 +272,10 @@ impl Doc {
         let cut = if self.utf16() { None } else { self.bytes[..old].iter().rposition(|&b| b == b'\n').map(|p| p + 1) };
         let Some(cut) = cut else { return self.decode() };
         let kept = self.complete;
-        self.lines.truncate(kept);
+        std::sync::Arc::make_mut(&mut self.lines).truncate(kept);
         let text = encoding::decode(&self.bytes[cut..], self.encoding);
         self.complete += text.matches('\n').count();
-        self.lines.extend(to_lines(&text));
+        std::sync::Arc::make_mut(&mut self.lines).extend(to_lines(&text));
         // the colors of the lines kept stay
         if let Some(s) = self.spans.as_mut().filter(|s| s.epoch == self.epoch) {
             s.rows.truncate(kept);
@@ -461,7 +463,7 @@ mod tests {
         std::fs::write(&utf8, "\u{FEFF}Dobrý den\n\tžluťoučký kůň\n").unwrap();
         let d = Doc::open(&utf8);
         assert_eq!((d.encoding, d.hex, d.error.as_deref()), (TextEncoding::Utf8, false, None));
-        assert_eq!(d.lines, ["Dobrý den", "    žluťoučký kůň"], "the BOM is left out, tabs are spaces");
+        assert_eq!(*d.lines, ["Dobrý den", "    žluťoučký kůň"], "the BOM is left out, tabs are spaces");
         assert!(d.title.ends_with("zpráva 🦎.txt - Viewer"), "{}", d.title);
 
         // UTF-16 has zero bytes but is text
@@ -470,7 +472,7 @@ mod tests {
         b.extend("ahoj".encode_utf16().flat_map(u16::to_le_bytes));
         std::fs::write(&utf16, b).unwrap();
         let d = Doc::open(&utf16);
-        assert_eq!((d.encoding, d.hex, d.lines.clone()), (TextEncoding::Utf16Le, false, vec!["ahoj".to_owned()]));
+        assert_eq!((d.encoding, d.hex, d.lines.to_vec()), (TextEncoding::Utf16Le, false, vec!["ahoj".to_owned()]));
 
         // binary files open as hex
         let bin = t.path().join("data.bin");
@@ -545,10 +547,10 @@ mod tests {
         assert!(!d.follow(), "nothing new");
         add(&log, "tře");
         assert!(d.poll());
-        assert_eq!(d.lines, ["první", "druhý", "tře"]);
+        assert_eq!(*d.lines, ["první", "druhý", "tře"]);
         add(&log, "tí\nčtvrtý\n");
         assert!(d.poll());
-        assert_eq!(d.lines, ["první", "druhý", "třetí", "čtvrtý"]);
+        assert_eq!(*d.lines, ["první", "druhý", "třetí", "čtvrtý"]);
         assert_eq!((d.file_len, d.len() as u64), (std::fs::metadata(&log).unwrap().len(), d.file_len));
         let v = d.version();
         assert!(!d.poll());
@@ -565,11 +567,11 @@ mod tests {
         // shorter: read anew
         std::fs::write(&log, "nový\n").unwrap();
         assert!(d.poll());
-        assert_eq!(d.lines, ["nový"]);
+        assert_eq!(*d.lines, ["nový"]);
         // replaced by a longer one: read anew too
         std::fs::write(&log, "jiný soubor, delší než ten předtím\n").unwrap();
         assert!(d.poll());
-        assert_eq!(d.lines, ["jiný soubor, delší než ten předtím"]);
+        assert_eq!(*d.lines, ["jiný soubor, delší než ten předtím"]);
 
         // deleted: what was shown stays
         std::fs::remove_file(&log).unwrap();
@@ -583,7 +585,7 @@ mod tests {
         let mut d = Doc::open(&u16);
         std::fs::OpenOptions::new().append(true).open(&u16).map(|mut f| io::Write::write_all(&mut f, &enc("b\n"))).unwrap().unwrap();
         assert!(d.poll());
-        assert_eq!(d.lines, ["a", "b"]);
+        assert_eq!(*d.lines, ["a", "b"]);
     }
 
     /// Lines added to a colored file keep the colors of the lines before
