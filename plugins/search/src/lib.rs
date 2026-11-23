@@ -144,6 +144,13 @@ fn query(values: &Values) -> Result<(PathBuf, Query), String> {
         return Err(tr("Choose the folder to look in."));
     }
     let dir = PathBuf::from(dir);
+    // before anything is looked at there: never a device, a stream, a
+    // drive's current folder, nor a plugin's connection (not on a disk)
+    match sal_core::fileops::validate_location(&dir) {
+        Err(e) => return Err(trf("{dir} can't be searched: {error}", &[("dir", &dir.display()), ("error", &e)])),
+        Ok(sal_core::fileops::PlaceKind::Mounted) => return Err(trf("{dir} is not a folder on a disk.", &[("dir", &dir.display())])),
+        Ok(_) => {}
+    }
     if !dir.is_dir() {
         return Err(trf("{dir} is not a folder.", &[("dir", &dir.display())]));
     }
@@ -595,6 +602,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// "Look in" is checked before anything is looked at there: a device,
+    /// a stream, a drive's current folder or a connection is refused with
+    /// what is wrong; a folder on a disk or a server isn't.
+    #[test]
+    fn look_in_is_checked_first() {
+        let values = |dir: &str| -> Values { [("dir".to_owned(), dir.to_owned()), ("names".to_owned(), "*".to_owned())].into() };
+        for dir in [r"\\.\PhysicalDrive0", r"\\.\pipe\x", r"\\?\GLOBALROOT\Device\HarddiskVolume1", r"\??\C:\x", r"C:\x\NUL", r"C:\x\con.txt\y", "C:x", r"C:\a\b:stream"] {
+            let e = query(&values(dir)).unwrap_err();
+            assert!(e.contains("can't be searched"), "{dir}: {e}");
+        }
+        let e = query(&values(r"\\?\scp\me@host\home")).unwrap_err();
+        assert!(e.contains("not a folder on a disk"), "{e}");
+        let t = tempfile::tempdir().unwrap();
+        assert!(query(&values(&t.path().display().to_string())).is_ok());
     }
 
     fn wait(p: &Search, root: &Path) -> Activity {

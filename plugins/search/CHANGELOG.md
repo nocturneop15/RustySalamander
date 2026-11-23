@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `search-v<version>` in the RustySalamander repository.
 
+## 0.5.5-alpha (2026-11-24)
+
+- **"Look in" is checked before anything is looked at there:** a device (`\\.\PhysicalDrive0`, `NUL`, `C:\x\CON\…`), a stream (`file:stream`), a drive without its folder (`C:x`) or a server's connection is refused with what is wrong, instead of being opened to see whether it is a folder. Folders on a disk and on a server are searched as before.
+
 ## 0.5.4-alpha (2026-11-03)
 
 - **Find folders too is on by default:** a search finds matching folders as well as files unless you untick it.
