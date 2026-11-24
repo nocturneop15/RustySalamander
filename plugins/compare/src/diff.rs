@@ -112,7 +112,52 @@ impl<R: io::Read> ReadFull for R {
     }
 }
 
-/// Two texts lined up line by line.
+/// How many lines ahead a line replaced looks for one like it on the
+/// other side.
+const LOOK_AHEAD: usize = 8;
+
+/// How long pairing the lines alike may take over all; after that the rest
+/// are paired in order, as they come.
+const PAIRING: Duration = Duration::from_secs(2);
+
+/// The lines `a` replaced by the lines `b` (indexes into them), side by side:
+/// a line beside one like it (changed), the others alone (removed, added),
+/// in order. Lines in order past `until`.
+fn pair<S: AsRef<str>>(a: &[S], b: &[S], until: Instant) -> Vec<(Option<usize>, Option<usize>)> {
+    let (n, m) = (a.len(), b.len());
+    let mut out = Vec::with_capacity(n.max(m));
+    let (mut i, mut j) = (0, 0);
+    let like = |x: usize, y: usize| crate::inline::alike(a[x].as_ref(), b[y].as_ref()) >= crate::inline::ALIKE;
+    while i < n && j < m {
+        if Instant::now() > until {
+            while i < n || j < m {
+                out.push(((i < n).then_some(i), (j < m).then_some(j)));
+                (i, j) = (i + 1, j + 1);
+            }
+            return out;
+        }
+        // the nearest pair alike ahead: the fewest lines left alone
+        let found = (0..=LOOK_AHEAD).find_map(|d| (0..=d).map(|di| (di, d - di)).find(|&(di, dj)| i + di < n && j + dj < m && like(i + di, j + dj)));
+        match found {
+            Some((di, dj)) => {
+                out.extend((i..i + di).map(|x| (Some(x), None)));
+                out.extend((j..j + dj).map(|y| (None, Some(y))));
+                out.push((Some(i + di), Some(j + dj)));
+                (i, j) = (i + di + 1, j + dj + 1);
+            }
+            None => {
+                out.push((Some(i), None));
+                i += 1;
+            }
+        }
+    }
+    out.extend((i..n).map(|x| (Some(x), None)));
+    out.extend((j..m).map(|y| (None, Some(y))));
+    out
+}
+
+/// Two texts lined up line by line: lines replaced beside one like them
+/// (changed), or alone (removed, added) when none is.
 pub fn text(a: &str, b: &str, ignore_space: bool) -> Outcome {
     let (la, lb): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
     // what the lines are compared by: the lines themselves (borrowed), or
@@ -126,6 +171,7 @@ pub fn text(a: &str, b: &str, ignore_space: bool) -> Outcome {
     }
     let (ka, kb): (Vec<std::borrow::Cow<str>>, Vec<std::borrow::Cow<str>>) = (la.iter().map(|l| key(l, ignore_space)).collect(), lb.iter().map(|l| key(l, ignore_space)).collect());
     let ops = capture_diff_slices_deadline(Algorithm::Myers, &ka, &kb, Some(Instant::now() + DEADLINE));
+    let pairing = Instant::now() + PAIRING;
     let line = |lines: &[&str], i: usize| Some((i + 1, lines[i].replace('\t', "    ")));
     let mut rows = Vec::with_capacity(la.len().max(lb.len()));
     let mut changes = Vec::new();
@@ -142,8 +188,8 @@ pub fn text(a: &str, b: &str, ignore_space: bool) -> Outcome {
                 rows.extend((0..new_len).map(|k| Row { left: None, right: line(&lb, new_index + k), tag: Tag::Added }));
             }
             DiffOp::Replace { old_index, old_len, new_index, new_len } => {
-                for k in 0..old_len.max(new_len) {
-                    let (l, r) = ((k < old_len).then(|| old_index + k), (k < new_len).then(|| new_index + k));
+                for (l, r) in pair(&ka[old_index..old_index + old_len], &kb[new_index..new_index + new_len], pairing) {
+                    let (l, r) = (l.map(|k| old_index + k), r.map(|k| new_index + k));
                     let tag = match (l, r) {
                         (Some(_), Some(_)) => Tag::Changed,
                         (Some(_), None) => Tag::Removed,
@@ -184,6 +230,31 @@ mod tests {
         assert!(changes.is_empty());
         let Outcome::Text { changes, .. } = text("a  b\n", "a b\n", false) else { panic!() };
         assert_eq!(changes, [0]);
+    }
+
+    /// Lines replaced are side by side only when they are alike: else one
+    /// was removed and the other added.
+    #[test]
+    fn only_lines_alike_are_paired() {
+        let a = "začátek\nlet x = foo(1);\nkonec\n";
+        let b = "začátek\n// nový komentář\nlet y = foo(1);\nkonec\n";
+        let Outcome::Text { rows, changes } = text(a, b, false) else { panic!("text") };
+        let tags: Vec<Tag> = rows.iter().map(|r| r.tag).collect();
+        assert_eq!(tags, [Tag::Same, Tag::Added, Tag::Changed, Tag::Same], "the comment added, the line beside its new self");
+        assert_eq!(changes, [1], "one block");
+        assert_eq!(rows[2].left.as_ref().unwrap().1, "let x = foo(1);");
+        assert_eq!(rows[2].right.as_ref().unwrap().1, "let y = foo(1);");
+        // nothing alike: removed, then added
+        let Outcome::Text { rows, .. } = text("a\nfn main() {\nz\n", "a\n// a comment here\nz\n", false) else { panic!() };
+        let tags: Vec<Tag> = rows.iter().map(|r| r.tag).collect();
+        assert_eq!(tags, [Tag::Same, Tag::Removed, Tag::Added, Tag::Same]);
+        // a long code changed inside: still the same line, changed
+        let a = "<x>\n  <username>EncX D82F2CA16164B152B7C50665FA97CC5BA0822E26DBABE8</username>\n</x>\n";
+        let b = "<x>\n  <username>EncX D82F2CA16164B152B7C50665FAokokooo97CC5BA0822E26DBABE8</username>\n</x>\n";
+        let Outcome::Text { rows, .. } = text(a, b, false) else { panic!() };
+        assert_eq!(rows.iter().map(|r| r.tag).collect::<Vec<_>>(), [Tag::Same, Tag::Changed, Tag::Same], "no gaps");
+        // out of time: in order, as they come
+        assert_eq!(pair(&["x", "y"], &["p"], Instant::now() - Duration::from_secs(1)), [(Some(0), Some(0)), (Some(1), None)]);
     }
 
     #[test]

@@ -2,6 +2,15 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.9-alpha (2026-11-24)
+
+- **Line numbers can be turned off:** both texts show their line numbers from the start, as before; **Line numbers** in the toolbar or **Ctrl+L** turns them off and on for both sides together, and the texts then start at the edge. The numbers stand in a column of their own, in the colors of the panels' footer.
+- **What changed inside a line:** in a line changed (amber), the words that differ from the other side's line are on a stronger amber, on both sides; a change in spaces too, unless **Ignore spaces** is on.
+- **Only lines alike side by side:** a line is shown beside the line that replaced it only when the two are alike (at least half of their characters the same, in runs of three or more, spaces and upper or lower case aside; a long code or hash changed in a few places stays alike, and only the characters changed in it are marked). Lines that aren't are shown as removed (red) and added (green), each with a gap opposite, so an unrelated line no longer looks like a changed one.
+- **The current difference is marked:** the difference **Next** and **Previous** (F8, Shift+F8) went to last shows its colors (amber, red, green, and the words changed in it) strong, the others faint, with a bar in the selection color at its left edge, so it stands out from the others. Going to a difference (or a match) already wholly in sight moves only the mark: the text stays still, scrolled only to one out of sight.
+- **Only changes:** a box in the toolbar hides the parts that are the same, but for 3 lines around each difference. Each hidden part leaves a line of its own, **+ Same lines: 120**; a click on it shows them, and the line stays above them as **− Same lines: 120** to hide them again. A match Find goes to in a hidden part shows that part too. Turned on again, it hides everything again.
+- **Choices remembered:** **Line numbers**, **Only changes** and **Ignore spaces** stay as you left them for the next window and the next session, saved in `settings.toml` in the plugin's folder.
+
 ## 0.1.8-alpha (2026-11-24)
 
 - **Lighter on big files:** the compared rows are shared with Find instead of copied for it, and lines are compared without copying them unless **Ignore spaces** is on.

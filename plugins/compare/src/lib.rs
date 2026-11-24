@@ -17,6 +17,8 @@
 
 mod diff;
 mod find;
+mod fold;
+mod inline;
 mod tree;
 mod window;
 
@@ -55,6 +57,8 @@ pub struct Compare {
     windows: sal_window::Windows,
     /// The values of the last form, offered again.
     last: Mutex<Values>,
+    /// The choices remembered for new windows (line numbers, spaces).
+    settings: sal_plugin_api::settings::Settings,
 }
 
 export_plugin!(Compare);
@@ -66,12 +70,13 @@ impl Plugin for Compare {
     const NAME: &'static str = n_("Compare");
     const DESCRIPTION: &'static str = n_("Compares two files side by side, or two folders in the two panels, with the differences marked. Start with Plugins → Compare.");
 
-    fn start(_dir: &Path) -> Result<Self, String> {
+    fn start(dir: &Path) -> Result<Self, String> {
         Ok(Compare {
             next: AtomicU32::new(1),
             jobs: Mutex::new(HashMap::new()),
             windows: sal_window::Windows::new(sal_ui::icon::program, [1100.0, 700.0]),
             last: Mutex::new(Values::new()),
+            settings: sal_plugin_api::settings::Settings::load(dir),
         })
     }
 }
@@ -143,7 +148,8 @@ impl Compare {
         }
         match (left.is_dir(), right.is_dir()) {
             (false, false) => {
-                self.windows.open(Box::new(move || Box::new(window::DiffWin::new(left, right))), options.clone())?;
+                let settings = self.settings.clone();
+                self.windows.open(Box::new(move || Box::new(window::DiffWin::with_settings(left, right, settings))), options.clone())?;
                 Ok(Reply::Done)
             }
             (true, true) => self.compare_folders(left, right, by),
