@@ -203,10 +203,11 @@ impl DiffWin {
         self.version += 1;
         self.shift = [0.0; 2];
         self.reveal = None;
-        self.search_rows = std::sync::Arc::new(match &self.outcome {
+        // the same rows, shared: not a copy of every line
+        self.search_rows = match &self.outcome {
             Ok(Outcome::Text { rows, .. }) => rows.clone(),
-            _ => Vec::new(),
-        });
+            _ => Default::default(),
+        };
     }
 
     /// The first rows of the blocks of differences.

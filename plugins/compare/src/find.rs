@@ -114,7 +114,7 @@ mod tests {
 
     fn rows(a: &str, b: &str) -> Vec<Row> {
         let Outcome::Text { rows, .. } = text(a, b, false) else { panic!("text") };
-        rows
+        rows.to_vec()
     }
 
     fn q(text: &str, match_case: bool, wildcards: bool) -> Query {

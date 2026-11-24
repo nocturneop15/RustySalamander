@@ -41,8 +41,8 @@ pub struct Row {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// Text, lined up; `changes` are the first rows of each block of
-    /// differences.
-    Text { rows: Vec<Row>, changes: Vec<usize> },
+    /// differences. The rows are shared (with Find), not copied.
+    Text { rows: std::sync::Arc<Vec<Row>>, changes: Vec<usize> },
     /// Binary (or too large to show as text): the sizes, and the offset of
     /// the first differing byte (`None`: the same bytes).
     Binary { sizes: (u64, u64), first_difference: Option<u64> },
@@ -115,15 +115,16 @@ impl<R: io::Read> ReadFull for R {
 /// Two texts lined up line by line.
 pub fn text(a: &str, b: &str, ignore_space: bool) -> Outcome {
     let (la, lb): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
-    // what the lines are compared by
-    let key = |l: &&str| -> String {
+    // what the lines are compared by: the lines themselves (borrowed), or
+    // with their spaces evened out
+    fn key(l: &str, ignore_space: bool) -> std::borrow::Cow<'_, str> {
         if ignore_space {
-            l.split_whitespace().collect::<Vec<_>>().join(" ")
+            std::borrow::Cow::Owned(l.split_whitespace().collect::<Vec<_>>().join(" "))
         } else {
-            (*l).to_owned()
+            std::borrow::Cow::Borrowed(l)
         }
-    };
-    let (ka, kb): (Vec<String>, Vec<String>) = (la.iter().map(key).collect(), lb.iter().map(key).collect());
+    }
+    let (ka, kb): (Vec<std::borrow::Cow<str>>, Vec<std::borrow::Cow<str>>) = (la.iter().map(|l| key(l, ignore_space)).collect(), lb.iter().map(|l| key(l, ignore_space)).collect());
     let ops = capture_diff_slices_deadline(Algorithm::Myers, &ka, &kb, Some(Instant::now() + DEADLINE));
     let line = |lines: &[&str], i: usize| Some((i + 1, lines[i].replace('\t', "    ")));
     let mut rows = Vec::with_capacity(la.len().max(lb.len()));
@@ -157,7 +158,7 @@ pub fn text(a: &str, b: &str, ignore_space: bool) -> Outcome {
             changes.push(start);
         }
     }
-    Outcome::Text { rows, changes }
+    Outcome::Text { rows: std::sync::Arc::new(rows), changes }
 }
 
 #[cfg(test)]

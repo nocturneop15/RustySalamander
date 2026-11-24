@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.8-alpha (2026-11-24)
+
+- **Lighter on big files:** the compared rows are shared with Find instead of copied for it, and lines are compared without copying them unless **Ignore spaces** is on.
+
 ## 0.1.7-alpha (2026-11-24)
 
 - **Find searches beside the window:** the window stays usable while big files are searched, the bar says **Searching…** until it is done (never "Not found" before), and a search for what was typed before is given up as you type on: one search at a time, the latest only, however fast you type. **Compare again** forgets the matches found in the texts before at once, so none is drawn into the new texts or gone to with F3. What is looked for takes at most 1 000 characters.
