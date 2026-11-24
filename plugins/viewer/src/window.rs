@@ -9,6 +9,8 @@ use sal_plugin_api::{tr, trf};
 use sal_window::egui::{self, Color32, RichText};
 use sal_window::Content;
 
+use sal_plugin_api::settings::Settings;
+
 use crate::doc::{Colors, Doc};
 use crate::find::{self, Hit, Query};
 use crate::highlight::{self, Span};
@@ -28,6 +30,63 @@ pub struct ViewerWin {
     to_end: bool,
     /// Selected text (Text view).
     sel: TextSel,
+    /// Line numbers beside the text (Text view); on until turned off.
+    numbers: bool,
+    /// Where the choices of the toolbar are remembered for the next window.
+    settings: Settings,
+}
+
+/// What a window remembers for the next one: line numbers on, wrap.
+const NUMBERS: &str = "line_numbers";
+const WRAP: &str = "wrap";
+
+/// The line numbers left of the text: as wide as the largest number, and
+/// in place when the text is scrolled sideways.
+struct Gutter {
+    /// The width of the numbers' column, without the gap after it.
+    width: f32,
+}
+
+impl Gutter {
+    /// The column for `lines` lines (at least three digits wide, so it
+    /// doesn't widen at once as a followed file grows).
+    fn new(ui: &egui::Ui, lines: usize) -> Gutter {
+        let digits = lines.max(1).to_string().len().max(3);
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let width = ui.fonts(|f| f.layout_no_wrap("0".repeat(digits), font, Color32::WHITE).size().x) + ui.spacing().item_spacing.x;
+        Gutter { width }
+    }
+
+    /// Draw a line moved right past the column, as high as its text (a row
+    /// is otherwise at least as high as a button: the lines would no longer
+    /// be where the scrolling expects them).
+    fn line(&self, ui: &mut egui::Ui, line: usize, label: egui::Label) -> Drawn {
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = 0.0;
+            ui.horizontal(|ui| {
+                ui.add_space(self.width);
+                draw_line(ui, line, label)
+            })
+            .inner
+        })
+        .inner
+    }
+
+    /// The column over the left edge of what is in sight, with the number
+    /// of each line drawn (at its first row), over any text scrolled under it;
+    /// in the colors of the panels' footer, standing out from the text.
+    fn paint(&self, ui: &egui::Ui, drawn: &[Drawn]) {
+        let clip = ui.clip_rect();
+        let column = egui::Rect::from_min_max(clip.min, egui::pos2(clip.min.x + self.width, clip.max.y));
+        let painter = ui.painter();
+        painter.rect_filled(column, 0.0, sal_ui::layout::strip_color(ui.visuals()));
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let color = ui.visuals().strong_text_color();
+        let right = column.max.x - ui.spacing().item_spacing.x / 2.0;
+        for d in drawn {
+            painter.text(egui::pos2(right, d.pos.y), egui::Align2::RIGHT_TOP, (d.line + 1).to_string(), font.clone(), color);
+        }
+    }
 }
 
 /// Selecting text with the mouse and Shift+keys, copying it with Ctrl+C.
@@ -194,8 +253,18 @@ impl FindBar {
 }
 
 impl ViewerWin {
+    /// A window with the choices of a new viewer (none remembered).
+    #[cfg(test)]
     pub fn new(doc: Doc) -> ViewerWin {
-        ViewerWin { doc, find: FindBar::default(), top_line: 0, following: false, polled: None, to_end: false, sel: TextSel::default() }
+        ViewerWin::with_settings(doc, Settings::in_memory())
+    }
+
+    /// A window as the last one was left: line numbers, and wrap if the
+    /// file is small enough for it.
+    pub fn with_settings(mut doc: Doc, settings: Settings) -> ViewerWin {
+        doc.wrap = settings.bool(WRAP, false) && doc.can_wrap();
+        let numbers = settings.bool(NUMBERS, true);
+        ViewerWin { doc, find: FindBar::default(), top_line: 0, following: false, polled: None, to_end: false, sel: TextSel::default(), numbers, settings }
     }
 
     /// Play: follow the file from its end; Pause: stop.
@@ -241,11 +310,18 @@ impl Content for ViewerWin {
             self.set_following(!self.following);
         }
         self.poll(ctx);
+        // as the user leaves them, remembered at the end of the frame (not
+        // wrap turned off because the file grew too large for it)
+        let chosen = (self.numbers, self.doc.wrap);
         let mut play = None;
         let following = self.following;
         let to_end = std::mem::take(&mut self.to_end);
+        if ctx.input(|i| i.key_pressed(egui::Key::L) && i.modifiers.command) {
+            self.numbers = !self.numbers;
+        }
         let doc = &mut self.doc;
         let find = &mut self.find;
+        let numbers = &mut self.numbers;
         let wake = {
             let ctx = ctx.clone();
             move || ctx.request_repaint_of(egui::ViewportId::ROOT)
@@ -291,6 +367,9 @@ impl Content for ViewerWin {
                 ui.separator();
                 ui.add_enabled_ui(!doc.hex && doc.can_wrap(), |ui| {
                     ui.checkbox(&mut doc.wrap, tr("Wrap")).on_hover_text("Ctrl+W");
+                });
+                ui.add_enabled_ui(!doc.hex, |ui| {
+                    ui.checkbox(numbers, tr("Line numbers")).on_hover_text("Ctrl+L");
                 });
                 ui.separator();
                 let mut chosen = None;
@@ -421,6 +500,11 @@ impl Content for ViewerWin {
             let page = (ui.available_height() - pitch).max(pitch);
             ts.view_h = ui.available_height();
             let sel_color = ui.visuals().selection.bg_fill;
+            let gutter = numbers.then(|| Gutter::new(ui, doc.lines.len()));
+            let draw = |ui: &mut egui::Ui, line: usize, label: egui::Label| match &gutter {
+                Some(g) => g.line(ui, line, label),
+                None => draw_line(ui, line, label),
+            };
             let scroll = |area: egui::ScrollArea| keys.jump(area, following && !keys.leaves_end());
             if doc.hex {
                 let mut area = egui::ScrollArea::both().auto_shrink(false).scroll_bar_visibility(bars).stick_to_bottom(following);
@@ -451,7 +535,7 @@ impl Content for ViewerWin {
                         let (m, eol) = ts.marks(i, l.len(), sel_color, &marks);
                         let mut job = line_job(ui, l, doc.line_spans(i), &m, eol);
                         job.wrap.max_width = ui.available_width();
-                        let d = draw_line(ui, i, egui::Label::new(job).wrap());
+                        let d = draw(ui, i, egui::Label::new(job).wrap());
                         if reveal == Some(i) {
                             ui.scroll_to_rect(d.rect, Some(egui::Align::Center));
                         }
@@ -465,6 +549,9 @@ impl Content for ViewerWin {
                         *top_line = first.line;
                         ts.shown = first.line..drawn.last().map_or(first.line, |d| d.line) + 1;
                     }
+                    if let Some(g) = &gutter {
+                        g.paint(ui, &drawn);
+                    }
                     ts.mouse(ui, &drawn, &doc.lines, pitch);
                 });
             } else {
@@ -475,8 +562,9 @@ impl Content for ViewerWin {
                 let fits = |h: &Hit| doc.lines.get(h.line).is_some_and(|l| h.end <= l.len() && l.is_char_boundary(h.start) && l.is_char_boundary(h.end));
                 if let Some(hit) = find.current.filter(|_| find.reveal).and_then(|c| find.hits.get(c).copied()).filter(fits) {
                     find.reveal = false;
-                    // the match's line in the middle, its text in sight
-                    let view = ui.available_size();
+                    // the match's line in the middle, its text in sight (beside
+                    // the line numbers)
+                    let view = ui.available_size() - egui::vec2(gutter.as_ref().map_or(0.0, |g| g.width + ui.spacing().item_spacing.x), 0.0);
                     let y = (hit.line as f32 * pitch - view.y / 2.0).max(0.0);
                     let line = &doc.lines[hit.line];
                     let font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -502,9 +590,12 @@ impl Content for ViewerWin {
                         let l = &doc.lines[i];
                         let (m, eol) = ts.marks(i, l.len(), sel_color, &marks);
                         let job = line_job(ui, l, doc.line_spans(i), &m, eol);
-                        let d = draw_line(ui, i, egui::Label::new(job).extend());
+                        let d = draw(ui, i, egui::Label::new(job).extend());
                         ts.reveal_in(ui, &d, &doc.lines);
                         drawn.push(d);
+                    }
+                    if let Some(g) = &gutter {
+                        g.paint(ui, &drawn);
                     }
                     ts.mouse(ui, &drawn, &doc.lines, pitch);
                 });
@@ -513,6 +604,12 @@ impl Content for ViewerWin {
         if let Some(on) = play {
             self.set_following(on);
             ctx.request_repaint();
+        }
+        if self.numbers != chosen.0 {
+            let _ = self.settings.set_bool(NUMBERS, self.numbers);
+        }
+        if self.doc.wrap != chosen.1 {
+            let _ = self.settings.set_bool(WRAP, self.doc.wrap);
         }
         true
     }
@@ -821,6 +918,59 @@ fn line_job(ui: &egui::Ui, text: &str, spans: Option<&[Span]>, marks: &[(usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The texts drawn in a frame, with where each starts.
+    fn drawn_texts(out: &egui::FullOutput) -> Vec<(String, egui::Pos2)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Pos2)>) {
+            match s {
+                egui::Shape::Text(t) => out.push((t.galley.text().to_owned(), t.pos)),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut v = Vec::new();
+        out.shapes.iter().for_each(|c| walk(&c.shape, &mut v));
+        v
+    }
+
+    /// Line numbers are shown left of the text until Ctrl+L (or the box)
+    /// turns them off; the text then starts at the edge.
+    #[test]
+    fn line_numbers() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("a.txt");
+        std::fs::write(&file, "alfa\nbeta\ngama\n").unwrap();
+        let mut w = ViewerWin::new(Doc::open(&file));
+        let ctx = egui::Context::default();
+        let frame = |w: &mut ViewerWin, events: Vec<egui::Event>| {
+            let modifiers = events.iter().find_map(|e| if let egui::Event::Key { modifiers, .. } = e { Some(*modifiers) } else { None }).unwrap_or_default();
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0));
+            let mut out = None;
+            for e in [events, Vec::new()] {
+                out = Some(ctx.run(egui::RawInput { screen_rect: Some(rect), events: e, modifiers, ..Default::default() }, |ctx| {
+                    w.show(ctx);
+                }));
+            }
+            drawn_texts(&out.unwrap())
+        };
+        let at = |texts: &[(String, egui::Pos2)], s: &str| texts.iter().find(|(t, _)| t == s).map(|(_, p)| *p);
+        let on = frame(&mut w, vec![]);
+        assert!(w.numbers, "on at first");
+        let (three, gama) = (at(&on, "3").expect("the third line's number"), at(&on, "gama").expect("the third line"));
+        assert!(three.x < gama.x && (three.y - gama.y).abs() < 1.0, "beside its line: {three:?} {gama:?}");
+        assert!(at(&on, "4").is_none(), "no number past the last line");
+        let ctrl_l = egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        let off = frame(&mut w, vec![ctrl_l]);
+        assert!(!w.numbers);
+        assert!(at(&off, "3").is_none(), "{off:?}");
+        assert!(at(&off, "gama").unwrap().x < gama.x, "the text moves to the edge");
+        assert!(!w.settings.bool(NUMBERS, true), "remembered for the next window");
+        let next = ViewerWin::with_settings(Doc::open(&file), w.settings.clone());
+        assert!(!next.numbers && !next.doc.wrap, "which opens so");
+        // the lines are as far apart either way (the scrolling counts on it)
+        let apart = |texts: &[(String, egui::Pos2)]| at(texts, "gama").unwrap().y - at(texts, "beta").unwrap().y;
+        assert_eq!(apart(&on), apart(&off));
+    }
 
     /// A colored line is laid out in its colors; the rest stays plain.
     #[test]
@@ -1134,9 +1284,13 @@ mod tests {
             ev
         };
         // the text starts below the toolbar: the first point below it that
-        // a click puts the caret at
+        // a click puts the caret at (right of the line numbers)
         w.sel = TextSel::default();
-        let top = (0..400).map(|y| egui::pos2(30.0, y as f32)).find(|&p| {
+        assert!(w.numbers);
+        let font = egui::TextStyle::Monospace.resolve(&ctx.style());
+        let (line_h, col) = ctx.fonts(|f| (f.row_height(&font), f.glyph_width(&font, '0')));
+        let numbers = col * 3.0 + 2.0 * ctx.style().spacing.item_spacing.x;
+        let top = (0..400).map(|y| egui::pos2(30.0 + numbers, y as f32)).find(|&p| {
             frame(&mut w, pointer(p, Some(true)), egui::Modifiers::NONE);
             frame(&mut w, pointer(p, Some(false)), egui::Modifiers::NONE);
             // above a line's text is its start; on it, where it is pointed at
@@ -1145,8 +1299,6 @@ mod tests {
         let top = top.expect("a point on the first line");
         let start = w.sel.sel.caret;
         assert!(start.line == 0 && start.col > 0 && w.sel.sel.is_empty(), "a click puts the caret, selecting nothing: {start:?}");
-        let font = egui::TextStyle::Monospace.resolve(&ctx.style());
-        let (line_h, col) = ctx.fonts(|f| (f.row_height(&font), f.glyph_width(&font, '0')));
         // press there, drag down a line and right, release
         frame(&mut w, pointer(top, Some(true)), egui::Modifiers::NONE);
         let to = top + egui::vec2(col * 2.0, line_h * 1.5);

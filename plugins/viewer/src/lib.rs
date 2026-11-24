@@ -21,6 +21,8 @@ const TEXT: &str = "text";
 
 pub struct Viewer {
     windows: sal_window::Windows,
+    /// The choices remembered for new windows (line numbers, wrap).
+    settings: sal_plugin_api::settings::Settings,
 }
 
 export_plugin!(Viewer);
@@ -32,8 +34,8 @@ impl Plugin for Viewer {
     const NAME: &'static str = n_("Viewer");
     const DESCRIPTION: &'static str = n_("Shows files as text, in the encoding it detects or one you choose, or as hex (F3).");
 
-    fn start(_dir: &Path) -> Result<Self, String> {
-        Ok(Viewer { windows: sal_window::Windows::new(sal_ui::icon::viewer, [900.0, 650.0]) })
+    fn start(dir: &Path) -> Result<Self, String> {
+        Ok(Viewer { windows: sal_window::Windows::new(sal_ui::icon::viewer, [900.0, 650.0]), settings: sal_plugin_api::settings::Settings::load(dir) })
     }
 }
 
@@ -83,7 +85,8 @@ impl FolderPlugin for Viewer {
             return Err(unsupported());
         }
         let file = file.to_path_buf();
-        self.windows.open(Box::new(move || Box::new(window::ViewerWin::new(doc::Doc::open(&file)))), options.clone())
+        let settings = self.settings.clone();
+        self.windows.open(Box::new(move || Box::new(window::ViewerWin::with_settings(doc::Doc::open(&file), settings))), options.clone())
     }
 }
 

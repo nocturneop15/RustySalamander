@@ -2,6 +2,11 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `viewer-v<version>` in the RustySalamander repository.
 
+## 0.7.4-alpha (2026-11-24)
+
+- **Line numbers:** the Text view shows each line's number left of it, on from the start; **Line numbers** in the toolbar or **Ctrl+L** turns them off and on. They stand in a column in the colors of the panels' footer, and stay in place when a long line is scrolled sideways, and with Wrap on, each number is beside its line's first row. Of a file too large to show whole, the lines are counted from the start of the part shown.
+- **Choices remembered:** **Line numbers** and **Wrap** stay as you left them for the next window and the next session (Wrap only for files small enough for it), saved in `settings.toml` in the plugin's folder.
+
 ## 0.7.3-alpha (2026-11-24)
 
 - **Find searches beside the window:** the window stays usable while a big file is searched, the bar says **Searching…** until it is done (never "Not found" before), and a search for what was typed before is given up as you type on: one search at a time, the latest only, however fast you type. When the text changes (read again, a file followed grows), the matches found in it before are forgotten at once, so F3 never goes to a line that isn't there any more. What is looked for takes at most 1 000 characters (a bigger paste keeps the start). Works with RustySalamander 0.9.4-beta and later.
