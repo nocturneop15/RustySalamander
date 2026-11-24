@@ -2933,15 +2933,24 @@ impl App {
 
         let mut sizes = self.dir_sizes.snapshot_in(self.panels[idx].path());
         // inside an archive every folder's size is known from the archive's index
+        // (worked out once per archive index and folder, not every frame)
         if let Some(a) = self.panels[idx].archive.as_ref().filter(|a| a.index.complete) {
+            let children = a.child_sizes.get_or_init(|| plugins::child_stats(&a.index, &a.inner));
             for e in self.panels[idx].entries().iter().filter(|e| e.kind == EntryKind::Dir) {
-                let info = crate::dirsize::SizeInfo { size: plugins::stats(&a.index, &plugins::join_inner(&a.inner, &e.name)), done: true };
+                let info = crate::dirsize::SizeInfo { size: children.get(&e.name).copied().unwrap_or_default(), done: true };
                 sizes.insert(e.path.clone(), info);
             }
         }
         // sorted by size: folders by their sizes once known (not while counting, so nothing jumps)
         if self.panels[idx].sort.key == SortKey::Size && !sizes.is_empty() {
-            self.panels[idx].keep_sorted_by_size(&|e| sizes.get(&e.path).filter(|i| i.done).map(|i| i.size.bytes));
+            // a fingerprint of the sizes known, to look at the order only when they change
+            let known = sizes.iter().filter(|(_, i)| i.done).fold(0u64, |acc, (p, i)| {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (p, i.size.bytes).hash(&mut h);
+                acc ^ h.finish()
+            });
+            self.panels[idx].keep_sorted_by_size(known, &|e| sizes.get(&e.path).filter(|i| i.done).map(|i| i.size.bytes));
         }
         let use_icons = self.cfg.system_icons;
         let marks = self.panels[idx].archive.as_ref().map(|a| a.marks.clone()).filter(|m| !m.is_empty());
@@ -4032,7 +4041,13 @@ impl App {
                     let all = ready.len() > 1 && !running;
                     let mut buttons = Vec::new();
                     if all {
-                        buttons.push((tr("Update all"), tr("Downloads and installs every update that can be installed")));
+                        let program_first = ready.iter().any(|&i| rows[i].update.target == crate::update::Target::Program);
+                        let tip = if program_first {
+                            tr("Updates the program first; the plugins' updates are offered again after it")
+                        } else {
+                            tr("Downloads and installs every update that can be installed")
+                        };
+                        buttons.push((tr("Update all"), tip));
                     }
                     if staged {
                         buttons.push((tr("Restart now"), tr("Closes and starts RustySalamander again")));
@@ -4093,7 +4108,7 @@ impl App {
                         }
                     }
                 }
-                let to_start: Vec<usize> = if update_all { ready } else { start.into_iter().collect() };
+                let to_start: Vec<usize> = if update_all { update_all_set(rows, ready) } else { start.into_iter().collect() };
                 // nothing starts in the frame a row was taken away (the indexes moved)
                 let to_start = if decline.is_some() { Vec::new() } else { to_start };
                 for i in to_start {
@@ -5960,6 +5975,16 @@ fn startable(rows: &[UpdateRow], states: &[Option<crate::update::Progress>]) -> 
         .filter(|(_, (row, state))| !row.update.new && row.update.fits().is_ok() && matches!(state, None | Some(Progress::Failed(_))))
         .map(|(i, _)| i)
         .collect()
+}
+
+/// What Update all starts of the `ready` ones: the program alone when it is
+/// one of them (its new version brings its own plugins; the plugins' updates
+/// are offered again after it), else all of them.
+fn update_all_set(rows: &[UpdateRow], ready: Vec<usize>) -> Vec<usize> {
+    match ready.iter().find(|&&i| rows[i].update.target == crate::update::Target::Program) {
+        Some(&program) => vec![program],
+        None => ready,
+    }
 }
 
 /// How a new version of the program is installed: in this folder, or in a
@@ -10626,6 +10651,10 @@ mod tests {
         let rows = vec![UpdateRow::new(program.clone()), UpdateRow::new(plugin.clone()), UpdateRow::new(newer), UpdateRow::new(scp), UpdateRow::new(ftp.clone())];
         let states = [None, Some(Progress::Staged), None, Some(Progress::Failed("offline".into())), None];
         assert_eq!(startable(&rows, &states), [0, 3], "not the staged one, not the one for a newer program, not a new plugin; a failed one again");
+        // with the program among them, Update all updates it alone
+        assert_eq!(update_all_set(&rows, startable(&rows, &states)), [0], "the program first, the plugins after it");
+        let plugins_only = [Some(Progress::Staged), None, None, Some(Progress::Failed("offline".into())), None];
+        assert_eq!(update_all_set(&rows, startable(&rows, &plugins_only)), [1, 3], "the program installed: the plugins");
         ui.app.dialog = Dialog::Update { rows };
         ui.frames(4);
         if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {

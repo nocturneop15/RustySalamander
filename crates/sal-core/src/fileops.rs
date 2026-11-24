@@ -233,6 +233,9 @@ struct Ctx<'a> {
     /// Reads a file's [`FileStamp`]: [`file_stamp`] (in tests, one that
     /// fails on cue).
     stamp_of: fn(&Path) -> Option<FileStamp>,
+    /// The files and bytes of each source, counted when the operation began
+    /// (a source moved by a rename is counted by these, not walked again).
+    source_totals: std::collections::HashMap<PathBuf, (u64, u64)>,
 }
 
 /// An original a move across volumes copied, as it was then: what its
@@ -395,7 +398,9 @@ impl Ctx<'_> {
             // the original as it is when its copy begins (a move deletes it
             // only while it is still this file, unchanged; one whose stamp
             // can't be read is copied, never deleted)
-            let src_id = file_id(src, false).zip((self.stamp_of)(src));
+            // (only then: an ordinary copy keeps the original anyway, and
+            // each lookup opens it again, slow for many small files on a server)
+            let src_id = if self.copied_ids.is_some() { file_id(src, false).zip((self.stamp_of)(src)) } else { None };
             let done = self.attempt(src, |ctx| {
                 ctx.progress.bytes_done = start_bytes;
                 match ctx.copy_file_data(src, dst, approved) {
@@ -757,7 +762,8 @@ impl Ctx<'_> {
         };
         match renamed {
             Some(true) => {
-                let (f, b) = measure(&[dst.to_path_buf()]);
+                // a source counted when the operation began isn't walked again
+                let (f, b) = self.source_totals.get(src).copied().unwrap_or_else(|| measure(&[dst.to_path_buf()]));
                 self.progress.files_done += f;
                 self.progress.bytes_done += b;
                 self.summary.files += f;
@@ -772,7 +778,7 @@ impl Ctx<'_> {
             Some(false) => self.move_by_copy(src, dst, approved),
             None => {
                 // skipped after the error: done with, for the progress
-                let (f, b) = measure(&[src.to_path_buf()]);
+                let (f, b) = self.source_totals.get(src).copied().unwrap_or_else(|| measure(&[src.to_path_buf()]));
                 self.progress.files_done += f;
                 self.progress.bytes_done += b * self.passes();
                 Ok(false)
@@ -970,7 +976,9 @@ impl Ctx<'_> {
 
 /// An operation's state, with the totals of `sources` counted first.
 fn new_ctx<'a>(obs: &'a mut dyn OpObserver, sources: &[PathBuf]) -> Ctx<'a> {
-    let (files_total, bytes_total) = measure(sources);
+    // each source counted once, kept for when it is moved by a rename
+    let source_totals: std::collections::HashMap<PathBuf, (u64, u64)> = sources.iter().map(|s| (s.clone(), measure(std::slice::from_ref(s)))).collect();
+    let (files_total, bytes_total) = sources.iter().filter_map(|s| source_totals.get(s)).fold((0, 0), |(f, b), (sf, sb)| (f + sf, b + sb));
     Ctx {
         obs,
         progress: Progress { files_total, bytes_total, ..Default::default() },
@@ -985,6 +993,7 @@ fn new_ctx<'a>(obs: &'a mut dyn OpObserver, sources: &[PathBuf]) -> Ctx<'a> {
         preapproved: None,
         copied_ids: None,
         stamp_of: file_stamp,
+        source_totals,
     }
 }
 

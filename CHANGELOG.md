@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.16-beta (2026-11-24)
+
+- **Update all updates the program first:** when a new version of the program is among the updates, **Update all** updates only the program (its new version brings its own plugins); the plugins' updates are offered again after it. Before, everything started at once, and the program's update and some plugins' failed with "another running RustySalamander is updating". Updates started one by one take turns too, instead of failing on each other.
+- **Quicker panels and copies:**
+  - Inside an archive, the sizes of its folders are worked out once per folder shown, not again in every frame for every folder.
+  - Sorted by size, the order is looked at again only when the items, the sort or the sizes known change, not in every frame; sorting puts the items in place in linear time.
+  - An ordinary copy no longer looks up each original's identity and times (only a move to another drive needs them).
+  - A folder moved by a rename on the same drive is no longer walked a second time to count it.
+- **Compare 0.1.8-alpha** is now in the package.
+
 ## 0.9.15-beta (2026-11-24)
 
 - **Names a rename mask makes are checked:** copying or moving with a mask (`*.bak`, `*`) checks each name it makes before anything is done with it; one that can't be (empty, a device's such as `nul` of `nul.txt`, ending in a space or a dot) skips that item with the reason, and the others go on. A single item copied to a new name is checked the same way.

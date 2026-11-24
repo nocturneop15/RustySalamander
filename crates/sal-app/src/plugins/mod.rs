@@ -402,6 +402,41 @@ pub fn split(plugins: &[Arc<dyn FolderPlugin>], path: &Path) -> Option<(Arc<dyn 
 }
 
 /// Size, files and folders inside the folder `inner` of `index`.
+/// What [`stats`] gives for each folder directly in `inner`, by its name,
+/// in one pass over the index (not one pass per folder).
+pub fn child_stats(index: &Index, inner: &str) -> std::collections::HashMap<String, sal_core::fileops::DirSize> {
+    use std::collections::{HashMap, HashSet};
+    let mut found: HashMap<&str, (sal_core::fileops::DirSize, HashSet<String>)> = HashMap::new();
+    for it in index.items.iter().filter(|it| it.path.len() > inner.len() && sal_plugin_api::under(&it.path, inner)) {
+        let rest = if inner.is_empty() { &it.path[..] } else { &it.path[inner.len() + 1..] };
+        let Some((child, below)) = rest.split_once('\\') else {
+            // directly in `inner`: a folder is there (empty, maybe); a file isn't one
+            if it.dir {
+                found.entry(rest).or_default();
+            }
+            continue;
+        };
+        let (size, dirs) = found.entry(child).or_default();
+        if it.dir {
+            dirs.insert(below.to_owned());
+        } else {
+            size.files += 1;
+            size.bytes += it.size;
+        }
+        // folders known only from the paths of what is inside them
+        let mut parts: Vec<&str> = below.split('\\').collect();
+        parts.pop();
+        for n in 1..=parts.len() {
+            dirs.insert(parts[..n].join("\\"));
+        }
+    }
+    found.into_iter().map(|(name, (mut size, dirs))| {
+        size.dirs = dirs.len() as u64;
+        (name.to_owned(), size)
+    }).collect()
+}
+
+#[cfg(test)]
 pub fn stats(index: &Index, inner: &str) -> sal_core::fileops::DirSize {
     let s = index.stats(inner);
     sal_core::fileops::DirSize { bytes: s.bytes, files: s.files, dirs: s.dirs, ..Default::default() }
@@ -433,6 +468,43 @@ pub fn cleanup_temp() {
 #[cfg(test)]
 mod load_tests {
     use super::*;
+
+    /// The sizes of an archive's folders in one pass are those of each
+    /// folder on its own: files, bytes, folders (those only in paths too).
+    #[test]
+    fn child_stats_in_one_pass() {
+        let item = |path: &str, dir: bool, size: u64| sal_plugin_api::Item { path: path.into(), dir, size, modified: None, attrs: 0, index: None };
+        let index = Index {
+            items: vec![
+                item("a", true, 0),
+                item("a\\x.txt", false, 10),
+                item("a\\deep\\er\\y.bin", false, 5),
+                item("a\\empty", true, 0),
+                item("b\\only-in-paths\\z", false, 7),
+                item("c", true, 0),
+                item("top.txt", false, 100),
+                item("ž\\kůň.txt", false, 1),
+            ],
+            complete: true,
+        };
+        for inner in ["", "a", "a\\deep", "b"] {
+            let all = child_stats(&index, inner);
+            let names: std::collections::HashSet<String> = index
+                .items
+                .iter()
+                .filter(|it| it.path.len() > inner.len() && sal_plugin_api::under(&it.path, inner))
+                .filter_map(|it| {
+                    let rest = if inner.is_empty() { &it.path[..] } else { &it.path[inner.len() + 1..] };
+                    rest.split_once('\\').map(|(c, _)| c.to_owned()).or_else(|| it.dir.then(|| rest.to_owned()))
+                })
+                .collect();
+            assert_eq!(all.len(), names.len(), "{inner:?}: {all:?}");
+            for name in names {
+                assert_eq!(all[&name], stats(&index, &join_inner(inner, &name)), "{inner:?} {name}");
+            }
+        }
+        assert_eq!(child_stats(&index, "")["a"], sal_core::fileops::DirSize { bytes: 15, files: 2, dirs: 3, ..Default::default() });
+    }
 
     /// While another running copy changes files, the start looks for no
     /// plugin at all: one it puts in place after the start learnt that would

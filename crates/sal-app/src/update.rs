@@ -528,9 +528,12 @@ pub fn install(ctx: &egui::Context, update: Update, how: How) -> Install {
                 return Err(format!("the download is incomplete ({} of {} bytes)", zip.len(), release.asset_size));
             }
             set(Progress::Unpacking);
-            // one running copy of the program at a time changes files, nor
-            // while another is loading its plugins (only while it changes
-            // them: not while it downloads)
+            // one install of this program at a time (they wait their turn:
+            // the lock below is the same file for all of them, and would make
+            // the others give up); then one running copy of the program at a
+            // time changes files, nor while another is loading its plugins
+            // (only while it changes them: not while it downloads)
+            let _turn = INSTALL_TURN.lock().unwrap_or_else(|e| e.into_inner());
             let _lock = match sal_core::config::app_dir() {
                 Some(app) => lock_waiting(&app, LOCK_WAIT)?,
                 None => None,
@@ -669,6 +672,11 @@ pub fn lock(app: &Path) -> Result<Option<UpdateLock>, String> {
 /// another running copy of the program to let go of the update lock (it
 /// holds it only while it changes files or loads its plugins).
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Installs of this program take turns ([`install`]): several started at
+/// once (one by one, or one of them the program) don't fail on the update
+/// lock, they wait for the one before.
+static INSTALL_TURN: Mutex<()> = Mutex::new(());
 
 /// [`lock`], waiting up to `wait` while another running copy holds it.
 pub fn lock_waiting(app: &Path, wait: std::time::Duration) -> Result<Option<UpdateLock>, String> {

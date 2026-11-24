@@ -243,13 +243,20 @@ pub fn sort_entries_sized(entries: &mut [FileEntry], spec: SortSpec, dir_size: D
     let keys: Vec<NameKey> = entries.iter().map(NameKey::of).collect();
     let mut order: Vec<usize> = (0..entries.len()).collect();
     order.sort_by(|&i, &j| cmp_entries((&entries[i], &keys[i]), (&entries[j], &keys[j]), spec, dir_size));
-    // move each item to its place (position i gets the item at order[i])
-    for i in 0..order.len() {
-        let mut from = order[i];
-        while from < i {
-            from = order[from];
+    // move each item to its place (position i gets the item at order[i]):
+    // each cycle of the order followed once, so every item moves once
+    let mut placed = vec![false; order.len()];
+    for start in 0..order.len() {
+        let mut i = start;
+        while !placed[i] {
+            placed[i] = true;
+            let from = order[i];
+            if from == start {
+                break;
+            }
+            entries.swap(i, from);
+            i = from;
         }
-        entries.swap(i, from);
     }
 }
 
@@ -333,6 +340,36 @@ mod tests {
         sort_entries(&mut v, SortSpec::default());
         assert!(start.elapsed() < std::time::Duration::from_secs(2), "{:?}", start.elapsed());
         assert!(v[0].name.contains(" 0 ") && v[1].name.contains(" 1 ") && v[19_999].name.contains(" 19999 "));
+    }
+
+    /// The order is put in place exactly: every item where an independent
+    /// sort puts it, none lost or doubled, in every key and direction.
+    #[test]
+    fn the_order_put_in_place_is_exact() {
+        for key in [SortKey::Name, SortKey::Ext, SortKey::Time, SortKey::Size, SortKey::Attr] {
+            for reverse in [false, true] {
+                let spec = SortSpec { key, reverse };
+                let mk = |i: u64| {
+                    let n = (i * 7919) % 5_000;
+                    FileEntry::new(
+                        PathBuf::from(format!("f{} .{}", n % 97, ["txt", "log", "bin"][(n % 3) as usize])),
+                        if n.is_multiple_of(11) { EntryKind::Dir } else { EntryKind::File },
+                        (n * 31) % 1_000,
+                        None,
+                        0,
+                    )
+                };
+                let mut v: Vec<FileEntry> = (0..5_000).map(mk).collect();
+                let mut expected = v.clone();
+                let keys: Vec<NameKey> = expected.iter().map(NameKey::of).collect();
+                let mut order: Vec<usize> = (0..expected.len()).collect();
+                order.sort_by(|&i, &j| cmp_entries((&expected[i], &keys[i]), (&expected[j], &keys[j]), spec, &|_| None));
+                expected = order.iter().map(|&i| expected[i].clone()).collect();
+                sort_entries_sized(&mut v, spec, &|_| None);
+                let names = |v: &[FileEntry]| v.iter().map(|e| (e.name.clone(), e.size)).collect::<Vec<_>>();
+                assert_eq!(names(&v), names(&expected), "{spec:?}");
+            }
+        }
     }
 
     #[test]

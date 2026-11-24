@@ -28,6 +28,9 @@ pub struct ArchiveView {
     /// comparison of two folders); empty for most plugins.
     pub marks: Arc<std::collections::HashMap<String, sal_plugin_api::ItemMark>>,
     stamp: (Option<SystemTime>, u64),
+    /// The sizes of the folders in `inner`, worked out once for this index
+    /// and folder (a new view has new ones).
+    pub child_sizes: Arc<std::sync::OnceLock<std::collections::HashMap<String, sal_core::fileops::DirSize>>>,
 }
 
 /// A file's modification time and size, to notice when it changed.
@@ -37,6 +40,10 @@ fn stamp_of(file: &Path) -> (Option<SystemTime>, u64) {
 
 pub struct Panel {
     pub listing: Listing,
+    /// Counts the changes of `listing`'s items or their order.
+    generation: u64,
+    /// What the order by size was last looked at for ([`Panel::keep_sorted_by_size`]).
+    size_order_for: Option<(u64, usize, SortSpec, u64)>,
     pub cursor: usize,
     pub sort: SortSpec,
     /// Text of the editable path bar.
@@ -138,6 +145,8 @@ impl Panel {
             last_check: Instant::now(),
             check: None,
             loading: None,
+            generation: 0,
+            size_order_for: None,
             plugins,
             archive: None,
         };
@@ -225,10 +234,10 @@ impl Panel {
         let stamp = stamp_of(file);
         let marks = Arc::new(plugin.marks(file, &inner).into_iter().collect());
         if let Some(v) = self.archive.as_ref().filter(|v| v.index.complete && v.file == file && v.stamp == stamp && v.plugin.id() == plugin.id()) {
-            return Ok(ArchiveView { inner, marks, ..v.clone() });
+            return Ok(ArchiveView { inner, marks, child_sizes: Default::default(), ..v.clone() });
         }
         let index = plugin.list(file, &inner).map_err(|e| format!("{}: {e}", display_path(&file.join(&inner))))?;
-        Ok(ArchiveView { plugin: plugin.clone(), file: file.to_path_buf(), inner, index: Arc::new(index), marks, stamp })
+        Ok(ArchiveView { plugin: plugin.clone(), file: file.to_path_buf(), inner, index: Arc::new(index), marks, stamp, child_sizes: Default::default() })
     }
 
     /// What tells a change of the shown folder: the directory itself, or the archive file.
@@ -271,6 +280,7 @@ impl Panel {
 
     /// Show a listing that was read: history, change detection, cursor.
     fn install(&mut self, listing: Listing, view: Option<ArchiveView>, focus: Option<&str>) {
+        self.generation += 1;
         let same_dir = listing.path == self.listing.path && !self.history.is_empty();
         if !same_dir {
             self.history.truncate(self.history_pos + usize::from(!self.history.is_empty()));
@@ -396,6 +406,7 @@ impl Panel {
     /// Sort by `sort`, folders by the sizes `dir_size` knows, keeping the
     /// cursor on its item.
     pub fn resort_sized(&mut self, sort: SortSpec, dir_size: sal_core::sort::DirSizeOf) {
+        self.generation += 1;
         self.sort = sort;
         let focus = self.current().map(|e| e.name.clone());
         sal_core::sort::sort_entries_sized(&mut self.listing.entries, sort, dir_size);
@@ -406,11 +417,21 @@ impl Panel {
     }
 
     /// Sorted by size: put folders whose size became known (calculated, or
-    /// listed again) in their place.
-    pub fn keep_sorted_by_size(&mut self, dir_size: sal_core::sort::DirSizeOf) {
-        if self.sort.key == sal_core::SortKey::Size && !sal_core::sort::is_sorted(&self.listing.entries, self.sort, dir_size) {
+    /// listed again) in their place. Looked at only when something it
+    /// depends on changed: the items (`generation`, their number), the sort,
+    /// the sizes known (`sizes`, a fingerprint of them); not every frame.
+    pub fn keep_sorted_by_size(&mut self, sizes: u64, dir_size: sal_core::sort::DirSizeOf) {
+        if self.sort.key != sal_core::SortKey::Size {
+            return;
+        }
+        let inputs = (self.generation, self.listing.entries.len(), self.sort, sizes);
+        if self.size_order_for == Some(inputs) {
+            return;
+        }
+        if !sal_core::sort::is_sorted(&self.listing.entries, self.sort, dir_size) {
             self.resort_sized(self.sort, dir_size);
         }
+        self.size_order_for = Some((self.generation, self.listing.entries.len(), self.sort, sizes));
     }
 
     /// Leave a plugin's connection (closed, or its plugin turned off): back
@@ -451,6 +472,7 @@ impl Panel {
         self.history_pos = pos;
         self.loading = None;
         self.archive = view;
+        self.generation += 1;
         self.listing = listing;
         self.set_baseline();
         self.path_edit = display_path(&self.listing.path);
