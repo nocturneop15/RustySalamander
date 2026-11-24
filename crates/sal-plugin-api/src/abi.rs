@@ -52,7 +52,7 @@ use std::path::{Path, PathBuf};
 
 /// The interface version. It changes whenever anything in this module
 /// changes (see the module's "Versions").
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 
 /// The oldest interface version the program still runs plugins of. Version
 /// 5 is the first that tells the plugin's own version.
@@ -447,6 +447,9 @@ pub struct VTable {
     /// Version 8: [`crate::FolderPlugin::stream`]: `items` is an array of
     /// `n` paths inside; the files go to `sink`.
     pub stream: unsafe extern "C" fn(this: *mut c_void, file: Wide, items: *const Str, n: usize, sink: *const SinkFn, error: *const StrOut) -> i32,
+    /// Version 10: [`crate::FolderPlugin::hotkeys`], sent to `out` encoded
+    /// by [`crate::ui`] (command, label and keys of each).
+    pub hotkeys: unsafe extern "C" fn(this: *mut c_void, out: *const StrOut),
 }
 
 // Only pointers to static data and functions, or to data the program keeps

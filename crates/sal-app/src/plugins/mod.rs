@@ -13,6 +13,7 @@
 //!   `scp://me@host/home/f.txt`. The open mounts are listed here, with the
 //!   plugin each belongs to.
 
+pub mod keys;
 pub mod mount;
 pub mod ops;
 
@@ -166,7 +167,9 @@ pub fn plugins_dir() -> Option<PathBuf> {
 pub struct Found {
     pub info: Info,
     pub file: PathBuf,
-    desc: &'static Descriptor,
+    /// Its descriptor: a pointer, never a reference (an older plugin's is
+    /// shorter than [`Descriptor`]; see `host::info`). The DLL stays loaded.
+    desc: *const Descriptor,
     /// What the program offers this plugin: translations from its `lang`
     /// folder. Kept for the session, like the DLL.
     host: &'static HostApi,
@@ -174,7 +177,7 @@ pub struct Found {
 
 impl Found {
     /// A plugin found in `file`, with its translations ready.
-    fn new(info: Info, file: PathBuf, desc: &'static Descriptor) -> Found {
+    fn new(info: Info, file: PathBuf, desc: *const Descriptor) -> Found {
         let lang: &'static PathBuf = Box::leak(Box::new(file.parent().unwrap_or(Path::new(".")).join("lang")));
         let host = Box::leak(Box::new(HostApi {
             version: abi::VERSION,
@@ -216,6 +219,8 @@ pub struct Plugins {
     /// couldn't be put in place yet (they are tried again next time).
     pub updated: Vec<String>,
     pub update_failed: Vec<String>,
+    /// The shortcuts of the running plugins' commands, in `active`'s order.
+    pub keys: Vec<keys::PluginKeys>,
 }
 
 impl Plugins {
@@ -296,7 +301,7 @@ impl Plugins {
             }
         }
         found.sort_by_key(|a| a.info.name.to_lowercase());
-        Plugins { found: Arc::new(found), broken, active: Vec::new(), errors: Vec::new(), updated: Vec::new(), update_failed: Vec::new() }
+        Plugins { found: Arc::new(found), broken, active: Vec::new(), errors: Vec::new(), updated: Vec::new(), update_failed: Vec::new(), keys: Vec::new() }
     }
 
     /// Start the plugins that are on and stop the others; running ones keep
@@ -314,6 +319,40 @@ impl Plugins {
                 Err(e) => self.errors.push((f.info.id.clone(), e)),
             }
         }
+        self.refresh_keys();
+    }
+
+    /// Ask the running plugins which of their commands can have keys again
+    /// (their labels change with the language); the user's keys of a
+    /// plugin are read from its folder when it starts.
+    pub fn refresh_keys(&mut self) {
+        let old = std::mem::take(&mut self.keys);
+        for p in &self.active {
+            let list = keys::offered(&p.commands(), &p.hotkeys());
+            let k = match old.iter().find(|k| k.plugin == p.id()) {
+                Some(k) => keys::PluginKeys { list, ..k.clone() },
+                None => {
+                    let file = self.found.iter().find(|f| f.info.id == p.id()).map(|f| sal_plugin_api::data_dir(f.dir()).join(keys::FILE)).unwrap_or_default();
+                    keys::PluginKeys::load(p.id(), file, list)
+                }
+            };
+            self.keys.push(k);
+        }
+    }
+
+    /// The shortcuts of the running plugin `id`.
+    pub fn keys_of_mut(&mut self, id: &str) -> Option<&mut keys::PluginKeys> {
+        self.keys.iter_mut().find(|k| k.plugin == id)
+    }
+
+    /// The plugin and its command that a key press runs, if any.
+    pub fn key_command(&self, key: eframe::egui::Key, m: eframe::egui::Modifiers) -> Option<(Arc<dyn FolderPlugin>, String)> {
+        self.keys.iter().find_map(|k| Some((self.get(&k.plugin)?.clone(), k.lookup(key, m)?.to_owned())))
+    }
+
+    /// The first key of the plugin `id`'s command, for its menu item.
+    pub fn key_text(&self, id: &str, command: &str) -> String {
+        self.keys.iter().find(|k| k.plugin == id).and_then(|k| k.bindings(command).into_iter().next()).unwrap_or_default()
     }
 
     /// The running plugin with this id.
@@ -336,7 +375,7 @@ impl Plugins {
 
 /// The descriptor of the plugin DLL `file`. The DLL stays loaded for the
 /// rest of the session (plugins started from it may be running).
-fn load_library(file: &Path) -> Result<&'static Descriptor, String> {
+fn load_library(file: &Path) -> Result<*const Descriptor, String> {
     use windows::core::{PCSTR, PCWSTR};
     use windows::Win32::Foundation::FreeLibrary;
     use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR};
@@ -372,7 +411,7 @@ fn load_library(file: &Path) -> Result<&'static Descriptor, String> {
     if desc.is_null() {
         return Err("not a RustySalamander plugin".into());
     }
-    Ok(unsafe { &*desc })
+    Ok(desc)
 }
 
 /// The plugin, file and path inside it (`\`-separated, empty at the file's

@@ -92,7 +92,7 @@ third_party/7zip-26.05/   7-Zip source (LGPL): built into 7z.dll
 
 The project uses the `x86_64-pc-windows-gnu` Rust toolchain with MinGW-w64, so Visual Studio isn't needed. You need:
 
-- **Rust** 1.88 or newer via [rustup](https://rustup.rs/), with the GNU toolchain: `rustup default stable-x86_64-pc-windows-gnu`.
+- **Rust** 1.89 or newer via [rustup](https://rustup.rs/), with the GNU toolchain: `rustup default stable-x86_64-pc-windows-gnu`.
 - **MinGW-w64** (gcc, g++, `mingw32-make`), for example [WinLibs](https://winlibs.com/) (`winget install BrechtSanders.WinLibs.POSIX.UCRT`). It links the program and builds 7-Zip's `7z.dll`. Without it the program still builds, but without the 7-Zip plugin's library.
 
 ```powershell
@@ -247,7 +247,7 @@ Everything the program keeps lives in its own folder, so the folder can be copie
 
 ```
 rustysalamander.exe
-config.toml        settings, keyboard shortcuts, hot paths, typed paths (written on exit)
+config.toml        settings, keyboard shortcuts, hot paths, typed paths (saved a moment after each change)
 lang\en.toml       English UI strings (the template for translations)
 lang\cs.toml       Czech
 plugins\7zip\      the 7-Zip plugin: 7zip.spl and 7z.dll, 7-Zip's archive library

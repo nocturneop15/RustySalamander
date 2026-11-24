@@ -24,6 +24,27 @@ pub struct Command {
     pub label: String,
 }
 
+/// A keyboard shortcut a plugin offers for one of its commands
+/// ([`crate::FolderPlugin::hotkeys`]). The program lists it in Settings →
+/// Plugins, where the user can change its keys (kept in the plugin's own
+/// folder, in `shortcuts.toml`), and runs the command when the keys are
+/// pressed in the panels, as if it were picked in the Plugins menu.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Hotkey {
+    /// The command it runs ([`crate::FolderPlugin::run`]), usually one of
+    /// [`crate::FolderPlugin::commands`].
+    pub command: String,
+    /// Its name in Settings, translated; empty: the label of the command of
+    /// that id in [`crate::FolderPlugin::commands`].
+    pub label: String,
+    /// The keys it has until the user changes them, as Settings writes them:
+    /// modifiers `Ctrl`, `Shift`, `Alt` joined to a key with `+`
+    /// (`"Ctrl+Shift+K"`, `"Alt+F9"`). Empty: no key; the user may give it
+    /// one. Keys the program itself uses win over a plugin's (Settings says
+    /// so), so prefer combinations the program leaves free.
+    pub keys: Vec<String>,
+}
+
 /// A way a plugin opens files: as their viewer (F3) or their editor (F4).
 /// The program picks the first opener of the right kind whose `masks`
 /// match the file's name, unless the user chose a program of their own in
@@ -326,6 +347,23 @@ pub(crate) fn decode_item_commands(s: &str) -> Option<Vec<Command>> {
     if parts.len() % 2 == 1 { parts.last().map(|last| decode_commands(last)) } else { None }
 }
 
+/// Shortcuts as text: command, label and keys (encoded once more) of each.
+pub(crate) fn encode_hotkeys(hotkeys: &[Hotkey]) -> String {
+    encode(&hotkeys.iter().flat_map(|h| [h.command.clone(), h.label.clone(), encode(&h.keys)]).collect::<Vec<_>>())
+}
+
+/// Shortcuts from [`encode_hotkeys`]; damaged ones are left out.
+pub(crate) fn decode_hotkeys(s: &str) -> Vec<Hotkey> {
+    let parts = decode(s).unwrap_or_default();
+    parts
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter_map(|h| Some(Hotkey { command: h[0].clone(), label: h[1].clone(), keys: decode(&h[2])? }))
+        .filter(|h| !h.command.is_empty())
+        .collect()
+}
+
 /// Viewers and editors as text: id, kind, label and masks of each.
 pub(crate) fn encode_openers(openers: &[Opener]) -> String {
     let kind = |k: OpenKind| if k == OpenKind::View { "view" } else { "edit" };
@@ -608,6 +646,13 @@ mod tests {
             Opener { id: "ini".into(), kind: OpenKind::Edit, label: "INI".into(), masks: "*.ini; *.inf".into() },
         ];
         assert_eq!(decode_openers(&encode_openers(&openers)), openers);
+        let hotkeys = vec![
+            Hotkey { command: "compare".into(), label: String::new(), keys: vec!["Ctrl+Shift+K".into(), "Alt+F9".into()] },
+            Hotkey { command: "a:b,".into(), label: "Porovnat 🦎".into(), keys: Vec::new() },
+        ];
+        assert_eq!(decode_hotkeys(&encode_hotkeys(&hotkeys)), hotkeys);
+        assert_eq!(decode_hotkeys(&encode(&["", "no command", ""])), [], "a shortcut runs a command");
+        assert_eq!(decode_hotkeys("damaged"), []);
     }
 
     #[test]

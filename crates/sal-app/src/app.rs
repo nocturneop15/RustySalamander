@@ -149,11 +149,19 @@ enum Dialog {
     },
     /// Move the settings to %APPDATA% and switch to multi-user mode for good.
     MultiUser,
-    /// `recording`: the next key combination is added to that action.
+    /// `recording`: the next key combination is added to that command.
     Settings {
         tab: SettingsTab,
-        recording: Option<Action>,
+        recording: Option<KeyTarget>,
     },
+}
+
+/// A command that can have keys: the program's, or a plugin's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyTarget {
+    Program(Action),
+    /// The plugin's id and the command's.
+    Plugin(String, String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -197,6 +205,27 @@ impl UpdateRow {
     }
 }
 
+/// The settings as last saved, for saving them when they change
+/// ([`App::autosave`]).
+#[derive(Default)]
+struct AutoSave {
+    saved: Config,
+    /// When to save the settings changed since (a moment after the change,
+    /// or after a failed save, a while later).
+    due: Option<Instant>,
+    /// The last save failed (said once in the log, not at every try).
+    failing: bool,
+    /// Where to save; `None` for the configuration file in use
+    /// (`config_path`, which moves with multi-user mode).
+    file: Option<PathBuf>,
+}
+
+/// How long settings stay changed before they are saved.
+const AUTOSAVE_AFTER: Duration = Duration::from_secs(1);
+
+/// How long after a failed save it is tried again.
+const AUTOSAVE_RETRY: Duration = Duration::from_secs(30);
+
 /// A plugin as Settings shows it.
 struct PluginRow {
     id: String,
@@ -209,6 +238,18 @@ struct PluginRow {
     openers: Vec<String>,
     /// Running (its status) or why it couldn't start.
     state: Result<String, String>,
+    /// Its commands that can have keys.
+    keys: Vec<PluginKeyRow>,
+    /// Every command has the plugin's own keys.
+    keys_default: bool,
+}
+
+/// A plugin's command in Settings → Plugins: its keys, each with what
+/// else it is bound to.
+struct PluginKeyRow {
+    command: String,
+    label: String,
+    keys: Vec<(String, Vec<String>)>,
 }
 
 /// The command a configurable shortcut runs.
@@ -258,6 +299,40 @@ fn action_cmd(a: Action) -> Cmd {
     }
 }
 
+/// What else the key `key` runs, named for Settings: the program's
+/// command bound to it, and plugins' commands but `except` (the
+/// plugin's command it is shown for).
+fn key_users(shortcuts: &keymap::Overrides, plugins: &Plugins, key: &str, except: Option<(&str, &str)>) -> Vec<String> {
+    let Some(s) = Shortcut::parse(key) else { return Vec::new() };
+    let m = Modifiers { alt: s.alt, ctrl: s.ctrl, shift: s.shift, ..Modifiers::NONE };
+    let mut out: Vec<String> = keymap::lookup(shortcuts, s.key, m).map(|a| tr(a.info().label).to_owned()).into_iter().collect();
+    for pk in &plugins.keys {
+        for c in pk.list.iter().filter(|c| except != Some((pk.plugin.as_str(), c.command.as_str()))) {
+            if keymap::pressed(&pk.bindings(&c.command), s.key, m) {
+                out.push(format!("{} ({})", c.label, plugins.name_of(&pk.plugin)));
+            }
+        }
+    }
+    out
+}
+
+/// Every plugin command's keys, for the program's shortcut table: the key
+/// written the one way (`Ctrl+Shift+C`), and the command named as Settings
+/// names it ("Eject (Tapes)").
+fn plugin_key_users(plugins: &Plugins) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for pk in &plugins.keys {
+        for c in &pk.list {
+            for b in pk.bindings(&c.command) {
+                if let Some(s) = Shortcut::parse(&b) {
+                    out.push((s.to_string(), format!("{} ({})", c.label, plugins.name_of(&pk.plugin))));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Shortcut text shown next to a menu item.
 fn menu_key(ov: &keymap::Overrides, c: Cmd) -> String {
     Action::ALL.into_iter().find(|&a| action_cmd(a) == c).and_then(|a| keymap::bindings(ov, a).into_iter().next()).unwrap_or_default()
@@ -269,6 +344,10 @@ enum KeyEdit {
     Remove(Action, String),
     Record(Action),
     ResetAll,
+    /// Plugin id, command id, key.
+    PluginRemove(String, String, String),
+    PluginRecord(String, String),
+    PluginReset(String),
 }
 
 /// A button drawn exactly into `rect` (inside a list row), whatever the
@@ -408,6 +487,11 @@ impl PluginTask {
 
 pub struct App {
     cfg: Config,
+    /// Saving the settings by themselves when they change (not in tests).
+    autosave: Option<AutoSave>,
+    /// This frame's keys egui turns into clipboard events (see rawkeys),
+    /// while a dialog is open: a shortcut being recorded may be one.
+    dialog_keys: Vec<(Key, Modifiers)>,
     /// A look for a new release, until its answer is shown.
     update_check: Option<crate::update::Check>,
     /// The results window of a plugin's connection (search results).
@@ -787,7 +871,54 @@ impl App {
         if let (true, Some(path)) = (crate::debuglog::full(), crate::debuglog::path()) {
             app.status = trf("Debug log: {file}", &[("file", &path.display().to_string())]);
         }
+        // a folder that can't be written to was said above: not tried again and again
+        if sal_core::config::settings_writable() {
+            app.sync_config();
+            app.autosave = Some(AutoSave { saved: app.cfg.clone(), ..AutoSave::default() });
+        }
         app
+    }
+
+    /// Save the settings once they have changed and stayed so for a moment
+    /// (a slider dragged is saved once, when it is let go); the panels'
+    /// folders and sort orders count too. Called each frame. Saved only
+    /// when written: a failed save is tried again a while later (said once
+    /// in the log).
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if self.autosave.is_none() {
+            return;
+        }
+        self.sync_config();
+        let Some(a) = self.autosave.as_mut() else { return };
+        if a.saved == self.cfg {
+            a.due = None;
+            return;
+        }
+        let now = Instant::now();
+        let due = *a.due.get_or_insert(now + AUTOSAVE_AFTER);
+        if now < due {
+            ctx.request_repaint_after(due - now);
+            return;
+        }
+        let file = a.file.clone().unwrap_or_else(sal_core::config::config_path);
+        // only what changed here since the last save: what another copy of the
+        // program saved meanwhile stays (and `saved` stays this copy's own)
+        match self.cfg.save_changes(&a.saved, &file) {
+            Ok(()) => {
+                if a.failing {
+                    crate::debuglog::write(format!("the configuration is saved again to {}", file.display()));
+                }
+                (a.saved, a.due, a.failing) = (self.cfg.clone(), None, false);
+            }
+            Err(e) => {
+                if !a.failing {
+                    crate::debuglog::error(format!("cannot save the configuration to {}: {e} (tried again every {} s)", file.display(), AUTOSAVE_RETRY.as_secs()));
+                }
+                a.failing = true;
+                a.due = Some(now + AUTOSAVE_RETRY);
+                ctx.request_repaint_after(AUTOSAVE_RETRY);
+            }
+        }
     }
 
     /// The application with `cfg` (the tests' entry point): panels on the
@@ -833,6 +964,8 @@ impl App {
         let update_check = (cfg.check_updates && !cfg!(test)).then(|| crate::update::Check::start(ctx, false, update_sources(&plugins), update_offer(&cfg, false)));
         App {
             cfg,
+            autosave: None,
+            dialog_keys: Vec::new(),
             update_check,
             results: None,
             kept_results: Vec::new(),
@@ -1540,8 +1673,19 @@ impl App {
     /// active panel as they are now.
     fn save_config(&mut self) {
         self.sync_config();
-        if let Err(e) = self.cfg.save() {
-            crate::debuglog::error(format!("cannot save the configuration to {}: {e}", sal_core::config::config_path().display()));
+        // what changed since the last save only (another copy's changes stay),
+        // as the autosave does; without it, the whole settings
+        let result = match &self.autosave {
+            Some(a) => self.cfg.save_changes(&a.saved, &a.file.clone().unwrap_or_else(sal_core::config::config_path)),
+            None => self.cfg.save(),
+        };
+        match result {
+            Ok(()) => {
+                if let Some(a) = self.autosave.as_mut() {
+                    (a.saved, a.due) = (self.cfg.clone(), None);
+                }
+            }
+            Err(e) => crate::debuglog::error(format!("cannot save the configuration to {}: {e}", sal_core::config::config_path().display())),
         }
     }
 
@@ -1633,6 +1777,20 @@ impl App {
     fn set_language(&mut self, code: &str) {
         self.cfg.language = code.to_owned();
         crate::i18n::set_language(code);
+        // the plugins' commands are labelled in it
+        self.plugins.refresh_keys();
+    }
+
+    /// Change the keys of the plugin `plugin`'s commands and save them in
+    /// its folder.
+    fn edit_plugin_keys(&mut self, plugin: &str, f: impl FnOnce(&mut plugins::keys::PluginKeys)) {
+        let Some(k) = self.plugins.keys_of_mut(plugin) else { return };
+        f(k);
+        if let Err(e) = k.save() {
+            let file = display_path(&k.file);
+            crate::debuglog::error(format!("cannot save the shortcuts of plugin {plugin} to {file}: {e}"));
+            self.status = trf("The shortcuts can't be saved to {file}: {error}", &[("file", &file), ("error", &e)]);
+        }
     }
 
     /// Show `text` in an error message.
@@ -2642,6 +2800,11 @@ impl App {
             self.skip_text = true;
             return self.command(ctx, action_cmd(a));
         }
+        // then the plugins' (Settings → Plugins), as if picked in their menu
+        if let Some((plugin, command)) = self.plugins.key_command(key, m).filter(|_| !typing_space) {
+            self.skip_text = true;
+            return self.run_plugin_command(ctx, plugin, command, plugins::Values::new());
+        }
         if let Some(cmd) = self.drive_letter_shortcut(key, m) {
             self.skip_text = true;
             return self.command(ctx, cmd);
@@ -3273,7 +3436,7 @@ impl App {
         let qs = panel.qs.clone();
         let free = self.free.get(ui.ctx(), panel.path()).map(|(f, t)| trf("{free} free of {total}", &[("free", &format_size(f)), ("total", &format_size(t))]));
         // a strip that stands out from the panel in both themes
-        let strip = strip_color(ui.visuals());
+        let strip = layout::strip_color(ui.visuals());
         let strong = ui.visuals().strong_text_color();
         egui::Frame::none().fill(strip).inner_margin(layout::LINE_MARGIN).rounding(2.0f32).show(ui, |ui| {
             ui.visuals_mut().override_text_color = Some(strong);
@@ -4148,6 +4311,7 @@ impl App {
                 let languages = &self.languages;
                 let mut lang_changed = false;
                 let mut plugins_changed = false;
+                let plugin_users = plugin_key_users(&self.plugins);
                 let view_choices = opener_choices(&self.plugins, OpenKind::View);
                 let edit_choices = opener_choices(&self.plugins, OpenKind::Edit);
                 let suffix_edit = &mut self.suffix_edit;
@@ -4177,26 +4341,49 @@ impl App {
                             })
                             .collect();
                         let version = trf("Version {version} · interface {interface}", &[("version", &f.info.version), ("interface", &f.info.interface)]);
-                        PluginRow { id: id.clone(), name: f.tr(&f.info.name), description: f.tr(&f.info.description), file: display_path(&f.file), version, openers, state }
+                        let pk = self.plugins.keys.iter().find(|k| k.plugin == *id);
+                        let keys = pk
+                            .map(|pk| {
+                                pk.list
+                                    .iter()
+                                    .map(|c| PluginKeyRow {
+                                        command: c.command.clone(),
+                                        label: c.label.clone(),
+                                        keys: pk.bindings(&c.command).into_iter().map(|b| (b.clone(), key_users(&cfg.shortcuts, &self.plugins, &b, Some((id, &c.command))))).collect(),
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let keys_default = pk.is_none_or(|pk| pk.is_default());
+                        PluginRow { id: id.clone(), name: f.tr(&f.info.name), description: f.tr(&f.info.description), file: display_path(&f.file), version, openers, state, keys, keys_default }
                     })
                     .collect();
                 let broken_plugins: Vec<(String, String)> = self.plugins.broken.iter().map(|(f, e)| (display_path(f), e.clone())).collect();
                 let plugins_dir = plugins::plugins_dir().map(|d| display_path(&d)).unwrap_or_default();
                 let font_filter = &mut self.font_filter;
+                let dialog_keys = &self.dialog_keys;
                 let mut captured = false;
+                let mut plugin_recorded: Option<(String, String, String)> = None;
                 // fixed width: the scroll areas inside take all the width they are given
                 dw.with_icon(sal_ui::icon::settings).modal().show(ctx, &mut self.dialog_places, "settings", tr("Settings"), 860.0, &mut enter, &mut escape, &mut |ui| {
-                    if let Some(action) = *recording {
-                        // capture the next key combination; Esc cancels
-                        let pressed = ui.input(|i| {
-                            i.events.iter().find_map(|e| match e {
-                                Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
-                                _ => None,
+                    if let Some(target) = recording.clone() {
+                        // capture the next key combination; Esc cancels. Ctrl+C and the
+                        // like reach egui only as clipboard events: those come from rawkeys
+                        let pressed = dialog_keys.first().copied().or_else(|| {
+                            ui.input(|i| {
+                                i.events.iter().find_map(|e| match e {
+                                    Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                                    _ => None,
+                                })
                             })
                         });
                         if let Some((key, m)) = pressed {
                             if !(key == Key::Escape && m.is_none()) {
-                                keymap::add_binding(&mut cfg.shortcuts, action, &Shortcut::new(key, m).to_string());
+                                let text = Shortcut::new(key, m).to_string();
+                                match target {
+                                    KeyTarget::Program(a) => keymap::add_binding(&mut cfg.shortcuts, a, &text),
+                                    KeyTarget::Plugin(plugin, command) => plugin_recorded = Some((plugin, command, text)),
+                                }
                             }
                             *recording = None;
                             ui.input_mut(|i| i.events.clear());
@@ -4597,6 +4784,49 @@ impl App {
                                             ui.label(RichText::new(o.as_str()).small().weak());
                                         }
                                     }
+                                    if on && !k.keys.is_empty() {
+                                        ui.add_space(layout::GAP_SMALL);
+                                        let warn = ui.visuals().error_fg_color;
+                                        layout::table_grid(("plugin_keys", k.id.as_str())).striped(true).num_columns(2).min_col_width(200.0).show(ui, |ui| {
+                                            ui.label(RichText::new(tr("Command")).small().weak());
+                                            ui.label(RichText::new(tr("Shortcuts (click to remove)")).small().weak());
+                                            ui.end_row();
+                                            for row in &k.keys {
+                                                ui.label(row.label.as_str());
+                                                ui.horizontal(|ui| {
+                                                    for (b, others) in &row.keys {
+                                                        let mut text = RichText::new(format!("{b} ×")).monospace();
+                                                        let tip = if others.is_empty() {
+                                                            tr("Click to remove").to_owned()
+                                                        } else {
+                                                            text = text.color(warn);
+                                                            format!(
+                                                                "{}\n{}\n{}",
+                                                                trf("Also bound to: {list}", &[("list", &others.join(", "))]),
+                                                                tr("The program's shortcuts win over a plugin's; of two plugins, the one listed first wins."),
+                                                                tr("Click to remove")
+                                                            )
+                                                        };
+                                                        if ui.add(egui::Button::new(text).small()).on_hover_text(tip).clicked() {
+                                                            edit = Some(KeyEdit::PluginRemove(k.id.clone(), row.command.clone(), b.clone()));
+                                                        }
+                                                    }
+                                                    if row.keys.is_empty() {
+                                                        ui.weak(tr("none"));
+                                                    }
+                                                    if *recording == Some(KeyTarget::Plugin(k.id.clone(), row.command.clone())) {
+                                                        ui.label(RichText::new(tr("press keys… (Esc cancels)")).italics());
+                                                    } else if ui.small_button(tr("+ Add…")).on_hover_text(tr("Record a custom shortcut")).clicked() {
+                                                        edit = Some(KeyEdit::PluginRecord(k.id.clone(), row.command.clone()));
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            }
+                                        });
+                                        if ui.add_enabled(!k.keys_default, egui::Button::new(tr("Reset this plugin's shortcuts")).small()).clicked() {
+                                            edit = Some(KeyEdit::PluginReset(k.id.clone()));
+                                        }
+                                    }
                                     match &k.state {
                                         _ if !on => {}
                                         Ok(status) if !status.is_empty() => {
@@ -4664,14 +4894,27 @@ impl App {
                                                 });
                                                 ui.horizontal(|ui| {
                                                     for b in &cur {
-                                                        let others: Vec<&str> =
+                                                        let mut others: Vec<&str> =
                                                             conflicts.get(b).map(|v| v.iter().filter(|&&o| o != a).map(|o| tr(o.info().label)).collect()).unwrap_or_default();
+                                                        // plugins' commands on the same key: this one wins over them
+                                                        let norm = Shortcut::parse(b).map(|s| s.to_string());
+                                                        let plugin_others: Vec<&str> =
+                                                            plugin_users.iter().filter(|(k, _)| Some(k) == norm.as_ref()).map(|(_, name)| name.as_str()).collect();
+                                                        let shared_with_plugin = !plugin_others.is_empty();
+                                                        others.extend(plugin_others);
                                                         let mut text = RichText::new(format!("{b} ×")).monospace();
                                                         if !others.is_empty() {
                                                             text = text.color(warn);
                                                         }
                                                         let tip = if others.is_empty() {
                                                             tr("Click to remove").to_owned()
+                                                        } else if shared_with_plugin {
+                                                            format!(
+                                                                "{}\n{}\n{}",
+                                                                trf("Also bound to: {list}", &[("list", &others.join(", "))]),
+                                                                tr("The program's shortcuts win over a plugin's; of two plugins, the one listed first wins."),
+                                                                tr("Click to remove")
+                                                            )
                                                         } else {
                                                             format!("{}\n{}", trf("Also bound to: {list}", &[("list", &others.join(", "))]), tr("Click to remove"))
                                                         };
@@ -4682,7 +4925,7 @@ impl App {
                                                     if cur.is_empty() {
                                                         ui.weak(tr("none"));
                                                     }
-                                                    if *recording == Some(a) {
+                                                    if *recording == Some(KeyTarget::Program(a)) {
                                                         ui.label(RichText::new(tr("press keys… (Esc cancels)")).italics());
                                                     } else if ui.small_button(tr("+ Add…")).on_hover_text(tr("Record a custom shortcut")).clicked() {
                                                         edit = Some(KeyEdit::Record(a));
@@ -4733,7 +4976,7 @@ impl App {
                         }
                     }
                     layout::before_buttons(ui);
-                    ui.small(tr("Settings apply immediately and are saved on exit."));
+                    ui.small(tr("Settings apply and are saved immediately."));
                     if layout::buttons(ui, &[(tr("Close"), "")], Some(0)).is_some() {
                         outcome = 2;
                     }
@@ -4770,15 +5013,24 @@ impl App {
                 match edit {
                     Some(KeyEdit::Set(a, list)) => keymap::set_bindings(&mut self.cfg.shortcuts, a, list),
                     Some(KeyEdit::Remove(a, b)) => keymap::remove_binding(&mut self.cfg.shortcuts, a, &b),
-                    Some(KeyEdit::Record(a)) => *recording = Some(a),
+                    Some(KeyEdit::Record(a)) => *recording = Some(KeyTarget::Program(a)),
                     Some(KeyEdit::ResetAll) => {
                         self.cfg.shortcuts.clear();
                         *recording = None;
                     }
+                    Some(KeyEdit::PluginRemove(plugin, command, key)) => self.edit_plugin_keys(&plugin, |k| k.remove(&command, &key)),
+                    Some(KeyEdit::PluginRecord(plugin, command)) => *recording = Some(KeyTarget::Plugin(plugin, command)),
+                    Some(KeyEdit::PluginReset(plugin)) => {
+                        self.edit_plugin_keys(&plugin, |k| k.reset());
+                        *recording = None;
+                    }
                     None => {}
                 }
+                if let Some((plugin, command, key)) = plugin_recorded {
+                    self.edit_plugin_keys(&plugin, |k| k.add(&command, &key));
+                }
                 // Enter/Esc while the shortcut table is active must not close it by accident
-                if *tab == SettingsTab::Keyboard {
+                if *tab == SettingsTab::Keyboard || *tab == SettingsTab::Plugins {
                     enter = false;
                 }
             }
@@ -4808,9 +5060,32 @@ impl App {
                             });
                             ui.add_space(layout::GAP);
                         }
+                        // the plugins' commands that have keys
+                        let plugin_keys: Vec<(String, String)> = self
+                            .plugins
+                            .keys
+                            .iter()
+                            .flat_map(|pk| {
+                                let name = self.plugins.name_of(&pk.plugin);
+                                pk.list.iter().filter_map(move |c| {
+                                    let b = pk.bindings(&c.command);
+                                    (!b.is_empty()).then(|| (b.join(", "), format!("{} ({name})", c.label)))
+                                })
+                            })
+                            .collect();
+                        if !plugin_keys.is_empty() {
+                            ui.label(RichText::new(tr("Plugins")).strong());
+                            layout::table_grid("help_plugins").striped(true).num_columns(2).min_col_width(200.0).show(ui, |ui| {
+                                for (k, d) in &plugin_keys {
+                                    ui.label(RichText::new(k.as_str()).monospace().strong());
+                                    ui.label(d.as_str());
+                                    ui.end_row();
+                                }
+                            });
+                        }
                     });
                     layout::before_buttons(ui);
-                    ui.small(tr("Shortcuts are configured in Options → Settings… → Keyboard shortcuts."));
+                    ui.small(tr("Shortcuts are configured in Options → Settings… → Keyboard shortcuts, the plugins' in Settings → Plugins."));
                     if layout::buttons(ui, &[(tr("Close"), "")], Some(0)).is_some() {
                         outcome = 2;
                     }
@@ -5090,7 +5365,7 @@ impl App {
             // controls for everything, on a strip like the panels' status bar
             layout::before_buttons(ui);
             let all_paused = jobs.running.iter().filter(|j| j.spec.kind.can_pause()).all(|j| j.is_paused());
-            layout::strip_frame(strip_color(ui.visuals())).show(ui, |ui| {
+            layout::strip_frame(layout::strip_color(ui.visuals())).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let buttons = [
                     if all_paused { (tr("Resume all"), tr("Continue all paused operations")) } else { (tr("Pause all"), tr("Pause all running operations")) },
@@ -5563,7 +5838,8 @@ const CONFLICT_DEFAULT: usize = 2;
                 for (name, plugin, commands) in &plugin_menu {
                     ui.label(RichText::new(name.as_str()).small().weak());
                     for c in commands {
-                        if ui.add_enabled(!busy.iter().any(|b| b == plugin.id()), egui::Button::new(c.label.as_str())).clicked() {
+                        let button = egui::Button::new(c.label.as_str()).shortcut_text(self.plugins.key_text(plugin.id(), &c.id));
+                        if ui.add_enabled(!busy.iter().any(|b| b == plugin.id()), button).clicked() {
                             plugin_pick = Some((plugin.clone(), c.id.clone()));
                             ui.close_menu();
                         }
@@ -5949,16 +6225,6 @@ fn plugin_banner(plugin: &str, file: &Path) -> String {
         None => file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
     };
     format!("{} {plugin} · {what}", sal_ui::mdi::PUZZLE_OUTLINE)
-}
-
-/// Background of status strips: the panels' status bar, the operations
-/// window's global controls.
-fn strip_color(v: &egui::Visuals) -> Color32 {
-    if v.dark_mode {
-        v.extreme_bg_color
-    } else {
-        Color32::from_gray(222)
-    }
 }
 
 /// How many search results a session keeps; the oldest are closed.
@@ -7076,6 +7342,7 @@ impl App {
         let menu_open = self.ctx_menu.is_some();
         // taken every frame: one pressed while a dialog was open is dropped
         let raw_keys = crate::rawkeys::take();
+        self.dialog_keys = if no_dialog { Vec::new() } else { raw_keys.clone() };
         if no_dialog && !editing_path && !menu_open {
             self.handle_right_button(ctx);
         }
@@ -7102,6 +7369,8 @@ impl App {
             self.close_all_connections();
             plugins::mount::unmount_all();
             plugins::cleanup_temp();
+        } else {
+            self.autosave(ctx);
         }
         self.poll_plugin_task(ctx);
         self.follow_links();
@@ -8900,14 +9169,14 @@ mod tests {
         ui.frames(2);
         let Dialog::Settings { tab, recording } = &mut ui.app.dialog else { panic!("settings not open") };
         *tab = SettingsTab::Keyboard;
-        *recording = Some(Action::Root);
+        *recording = Some(KeyTarget::Program(Action::Root));
         ui.frames(1);
         chord(&mut ui, Key::F9, Modifiers::CTRL | Modifiers::SHIFT, None);
         assert_eq!(keymap::bindings(&ui.app.cfg.shortcuts, Action::Root), ["Ctrl+Backspace", "Ctrl+Backslash", "Ctrl+Shift+F9"]);
         assert!(matches!(ui.app.dialog, Dialog::Settings { recording: None, .. }), "dialog stays open");
         // Esc while recording cancels without closing or changing anything
         if let Dialog::Settings { recording, .. } = &mut ui.app.dialog {
-            *recording = Some(Action::Copy);
+            *recording = Some(KeyTarget::Program(Action::Copy));
         }
         ui.key(Key::Escape);
         assert_eq!(keymap::bindings(&ui.app.cfg.shortcuts, Action::Copy), ["F5"]);
@@ -10541,6 +10810,119 @@ mod tests {
         assert!(matches!(ui.app.dialog, Dialog::None), "a cancelled command says nothing");
         ui.app.cancel_plugin_task(0);
         wait_plugin(&mut ui);
+    }
+
+    /// A changed setting is saved by itself, a moment after the change (not
+    /// at once: a slider dragged is saved once), and only when something
+    /// changed.
+    #[test]
+    fn settings_save_themselves() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let file = t.path().join("config.toml");
+        ui.app.sync_config();
+        ui.app.autosave = Some(AutoSave { saved: ui.app.cfg.clone(), file: Some(file.clone()), ..AutoSave::default() });
+        ui.frames(2);
+        assert!(!file.exists(), "nothing changed, nothing saved");
+        let hidden = ui.app.cfg.show_hidden;
+        ui.app.command(&ui.ctx.clone(), Cmd::ToggleHidden);
+        ui.frames(2);
+        assert!(!file.exists(), "not at once");
+        std::thread::sleep(AUTOSAVE_AFTER + Duration::from_millis(100));
+        ui.frames(1);
+        let saved: Config = toml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved.show_hidden, !hidden, "saved a moment after");
+        assert_eq!(saved, ui.app.cfg);
+        // saved once: nothing more is written while nothing changes
+        fs::remove_file(&file).unwrap();
+        std::thread::sleep(AUTOSAVE_AFTER + Duration::from_millis(100));
+        ui.frames(2);
+        assert!(!file.exists());
+        // a save that fails (a folder where the file should be) isn't taken
+        // as done: tried again later, and saved once it can be
+        fs::create_dir(&file).unwrap();
+        ui.app.command(&ui.ctx.clone(), Cmd::ToggleHidden);
+        ui.frames(1);
+        std::thread::sleep(AUTOSAVE_AFTER + Duration::from_millis(100));
+        ui.frames(1);
+        let a = ui.app.autosave.as_ref().unwrap();
+        assert!(a.failing && a.saved != ui.app.cfg, "not saved");
+        assert!(a.due.is_some_and(|d| d > Instant::now() + AUTOSAVE_RETRY / 2), "tried again later, not each frame");
+        fs::remove_dir(&file).unwrap();
+        ui.app.autosave.as_mut().unwrap().due = Some(Instant::now());
+        ui.frames(1);
+        let saved: Config = toml::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(saved.show_hidden, hidden, "saved at the next try");
+        assert!(!ui.app.autosave.as_ref().unwrap().failing);
+    }
+
+    /// A plugin's command gets a key in Settings → Plugins: recorded like
+    /// the program's, saved in the plugin's own file, and pressed in the
+    /// panels it runs the command. The program's shortcuts win.
+    #[test]
+    fn plugin_commands_have_keys() {
+        let t = tempfile::tempdir().unwrap();
+        let mut ui = Ui::new(t.path(), t.path());
+        let tapes = Slow::new("tapes");
+        ui.app.plugins.active.push(tapes.clone());
+        ui.app.plugins.refresh_keys();
+        let file = t.path().join("plugins").join("tapes").join(plugins::keys::FILE);
+        ui.app.plugins.keys_of_mut("tapes").unwrap().file = file.clone();
+        let commands: Vec<&str> = ui.app.plugins.keys_of_mut("tapes").unwrap().list.iter().map(|k| k.command.as_str()).collect();
+        assert_eq!(commands, ["format", "eject"], "every menu command can have keys");
+        assert!(ui.app.plugins.keys_of_mut("tapes").unwrap().bindings("eject").is_empty(), "none of its own");
+
+        ui.app.command(&ui.ctx.clone(), Cmd::Settings);
+        ui.frames(2);
+        let Dialog::Settings { tab, recording } = &mut ui.app.dialog else { panic!("settings not open") };
+        *tab = SettingsTab::Plugins;
+        *recording = Some(KeyTarget::Plugin("tapes".into(), "eject".into()));
+        ui.frames(1);
+        chord(&mut ui, Key::E, Modifiers::CTRL | Modifiers::SHIFT, None);
+        assert!(matches!(ui.app.dialog, Dialog::Settings { recording: None, .. }), "dialog stays open");
+        assert_eq!(ui.app.plugins.keys_of_mut("tapes").unwrap().bindings("eject"), ["Ctrl+Shift+E"]);
+        assert!(ui.app.cfg.shortcuts.is_empty(), "not the program's configuration");
+        let saved = fs::read_to_string(&file).unwrap();
+        assert!(saved.contains("eject = [\"Ctrl+Shift+E\"]"), "{saved}");
+        assert_eq!(ui.app.plugins.key_text("tapes", "eject"), "Ctrl+Shift+E", "shown in the Plugins menu");
+        // Ctrl+Shift+C reaches egui only as Copy: recorded from the window's own keys
+        #[cfg(windows)]
+        {
+            let Dialog::Settings { recording, .. } = &mut ui.app.dialog else { panic!("settings not open") };
+            *recording = Some(KeyTarget::Plugin("tapes".into(), "format".into()));
+            ui.frames(1);
+            crate::rawkeys::push(Key::C, Modifiers::CTRL | Modifiers::SHIFT);
+            ui.run(vec![Event::Copy], Modifiers::CTRL | Modifiers::SHIFT);
+            assert!(matches!(ui.app.dialog, Dialog::Settings { recording: None, .. }), "recorded");
+            assert_eq!(ui.app.plugins.keys_of_mut("tapes").unwrap().bindings("format"), ["Ctrl+Shift+C"]);
+            ui.app.edit_plugin_keys("tapes", |k| k.remove("format", "Ctrl+Shift+C"));
+        }
+        // a key the program uses: the program's command wins, Settings says so
+        ui.app.edit_plugin_keys("tapes", |k| k.add("format", "Ctrl+R"));
+        assert_eq!(key_users(&ui.app.cfg.shortcuts, &ui.app.plugins, "Ctrl+R", Some(("tapes", "format"))), ["Refresh"]);
+        // and the program's shortcut table marks Ctrl+R of Refresh as shared with it
+        let users = plugin_key_users(&ui.app.plugins);
+        assert!(users.iter().any(|(k, _)| k == "Ctrl+R"), "{users:?}");
+        ui.app.dialog = Dialog::Settings { tab: SettingsTab::Keyboard, recording: None };
+        ui.frames(2);
+        assert!(key_users(&ui.app.cfg.shortcuts, &ui.app.plugins, "Ctrl+Shift+E", Some(("tapes", "eject"))).is_empty());
+        ui.app.open_dialog(Dialog::None);
+        ui.frames(2);
+
+        ui.key_mod(Key::R, Modifiers::CTRL);
+        assert!(ui.app.plugin_tasks.is_empty(), "Ctrl+R refreshes");
+        ui.key_mod(Key::E, Modifiers::CTRL | Modifiers::SHIFT);
+        assert_eq!(ui.app.plugin_tasks.len(), 1, "the plugin's command runs");
+        assert_eq!(ui.app.plugin_tasks[0].plugin.id(), "tapes");
+        ui.app.cancel_plugin_task(0);
+        wait_plugin(&mut ui);
+
+        // read again when the plugin starts next time; reset: the file goes
+        let again = plugins::keys::PluginKeys::load("tapes", file.clone(), ui.app.plugins.keys_of_mut("tapes").unwrap().list.clone());
+        assert_eq!(again.bindings("eject"), ["Ctrl+Shift+E"]);
+        ui.app.edit_plugin_keys("tapes", |k| k.reset());
+        assert!(!file.exists());
+        assert!(ui.app.plugins.key_command(Key::E, Modifiers::CTRL | Modifiers::SHIFT).is_none());
     }
 
     /// The question before switching to multi-user mode is permanent, so

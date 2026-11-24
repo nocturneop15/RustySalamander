@@ -21,6 +21,12 @@
 //! Any plugin can also be a **viewer or editor** of files ([`Opener`]): F3
 //! and F4 then open matching files with it, in a window of its own.
 //!
+//! Its commands can have **keyboard shortcuts** ([`Hotkey`]), which the
+//! user changes in Settings → Plugins.
+//!
+//! What a plugin remembers between sessions it keeps with [`settings`],
+//! saved in its data folder ([`data_dir`]) as soon as it changes.
+//!
 //! Each plugin has its own **version** ([`Plugin::VERSION`]) and may say
 //! where newer ones are published ([`Plugin::UPDATES`]); the program's
 //! update check looks there too.
@@ -34,6 +40,7 @@ pub mod abi;
 #[doc(hidden)]
 pub mod export;
 pub mod host;
+pub mod settings;
 pub mod ui;
 
 use std::collections::{BTreeMap, HashSet};
@@ -43,7 +50,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::SystemTime;
 
 pub use export::{n_, tr, trf};
-pub use ui::{Command, Field, FieldKind, Form, ItemMark, Mount, OpenKind, Opener, Panels, Reply, Results, Values};
+pub use ui::{Command, Field, FieldKind, Form, Hotkey, ItemMark, Mount, OpenKind, Opener, Panels, Reply, Results, Values};
 
 /// The attribute bit of folders (`FILE_ATTRIBUTE_DIRECTORY`).
 pub const ATTR_DIRECTORY: u32 = 0x10;
@@ -131,6 +138,19 @@ pub trait FolderPlugin: Send + Sync {
     /// plugin panels says it isn't available).
     fn item_commands(&self) -> Option<Vec<Command>> {
         None
+    }
+    /// Keyboard shortcuts for the plugin's commands, with the keys they
+    /// have until the user changes them in Settings → Plugins. Every command
+    /// of [`FolderPlugin::commands`] can be given keys there anyway; list
+    /// one here to give it keys of its own, or a label of its own, or to
+    /// offer a command that isn't in the Plugins menu. A key press runs the
+    /// command with [`FolderPlugin::run`], exactly as the menu does. The
+    /// default is none.
+    ///
+    /// Asked for when the plugin starts and when the language changes.
+    /// Programs before 0.9.17-beta don't ask for it.
+    fn hotkeys(&self) -> Vec<Hotkey> {
+        Vec::new()
     }
     /// Run `command` (from [`FolderPlugin::commands`], or the
     /// [`Form::command`] of a form the plugin showed) with `input`: the

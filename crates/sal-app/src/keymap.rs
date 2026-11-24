@@ -289,20 +289,37 @@ pub fn defaults(a: Action) -> Vec<String> {
 
 /// The action's shortcuts: the user's, or the defaults.
 pub fn bindings(ov: &Overrides, a: Action) -> Vec<String> {
-    match ov.get(a.info().id) {
+    bindings_of(ov, a.info().id, &defaults(a))
+}
+
+/// The shortcuts of the command `id` (an action's, or a plugin's command):
+/// the user's, or `defaults`.
+pub fn bindings_of(ov: &Overrides, id: &str, defaults: &[String]) -> Vec<String> {
+    match ov.get(id) {
         Some(list) => normalize_all(list.iter().map(String::as_str)),
-        None => defaults(a),
+        None => normalize_all(defaults.iter().map(String::as_str)),
     }
 }
 
 /// Store `list` for `a`; only differences from the defaults are kept.
 pub fn set_bindings(ov: &mut Overrides, a: Action, list: Vec<String>) {
+    set_bindings_of(ov, a.info().id, &defaults(a), list);
+}
+
+/// Store `list` for the command `id`; only differences from `defaults` are
+/// kept.
+pub fn set_bindings_of(ov: &mut Overrides, id: &str, defaults: &[String], list: Vec<String>) {
     let list = normalize_all(list.iter().map(String::as_str));
-    if list == defaults(a) {
-        ov.remove(a.info().id);
+    if list == normalize_all(defaults.iter().map(String::as_str)) {
+        ov.remove(id);
     } else {
-        ov.insert(a.info().id.to_owned(), list);
+        ov.insert(id.to_owned(), list);
     }
+}
+
+/// Whether one of `bindings` is this key press.
+pub fn pressed(bindings: &[String], key: Key, m: Modifiers) -> bool {
+    bindings.iter().any(|b| Shortcut::parse(b).is_some_and(|s| s.matches(key, m)))
 }
 
 /// Give the action another shortcut.
@@ -350,7 +367,7 @@ pub fn preset_label(ov: &Overrides, a: Action) -> String {
 
 /// The action a key press runs, if any.
 pub fn lookup(ov: &Overrides, key: Key, m: Modifiers) -> Option<Action> {
-    Action::ALL.into_iter().find(|&a| bindings(ov, a).iter().any(|b| Shortcut::parse(b).is_some_and(|s| s.matches(key, m))))
+    Action::ALL.into_iter().find(|&a| pressed(&bindings(ov, a), key, m))
 }
 
 /// Shortcuts bound to more than one action.

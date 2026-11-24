@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::abi::*;
-use crate::{Activity, Command, FolderPlugin, Index, Item, ItemMark, Opener, Progress, Reply, Sink, Values};
+use crate::{Activity, Command, FolderPlugin, Hotkey, Index, Item, ItemMark, Opener, Progress, Reply, Sink, Values};
 
 /// Who a plugin is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,26 +48,32 @@ pub struct Source {
 /// program doesn't have.
 ///
 /// # Safety
-/// `desc` must be a plugin's descriptor (from its [`ENTRY`]).
-pub unsafe fn info(desc: &'static Descriptor) -> Result<Info, String> {
-    if !(MIN_VERSION..=VERSION).contains(&desc.version) {
+/// `desc` must be a plugin's descriptor (from its [`ENTRY`]), staying for
+/// the session. A pointer, never a reference: the descriptor of a plugin
+/// built for an older interface is shorter than [`Descriptor`]. Only the
+/// fields its version has are read, each on its own (`(*desc).field`),
+/// the version first.
+pub unsafe fn info(desc: *const Descriptor) -> Result<Info, String> {
+    let version = (*desc).version;
+    if !(MIN_VERSION..=VERSION).contains(&version) {
         let range = if MIN_VERSION == VERSION { VERSION.to_string() } else { format!("{MIN_VERSION} to {VERSION}") };
-        return Err(format!("made for another version of the program (interface {}, this one has {range})", desc.version));
+        return Err(format!("made for another version of the program (interface {version}, this one has {range})"));
     }
-    let id = desc.id.get().to_owned();
+    let id = (*desc).id.get().to_owned();
     if id.is_empty() {
         return Err("the plugin has no id".into());
     }
-    let repo = desc.update_repo.get().to_owned();
-    let updates = (!repo.is_empty()).then(|| Source { repo, tag: desc.update_tag.get().to_owned(), changelog: desc.changelog.get().to_owned() });
+    // the fields of version 5 (the oldest taken) are in every descriptor
+    let repo = (*desc).update_repo.get().to_owned();
+    let updates = (!repo.is_empty()).then(|| Source { repo, tag: (*desc).update_tag.get().to_owned(), changelog: (*desc).changelog.get().to_owned() });
     // fields added in version 6 aren't there in older plugins' descriptors
-    let (program_min, program_max) = if desc.version >= 6 { (desc.program_min.get().to_owned(), desc.program_max.get().to_owned()) } else { Default::default() };
+    let (program_min, program_max) = if version >= 6 { ((*desc).program_min.get().to_owned(), (*desc).program_max.get().to_owned()) } else { Default::default() };
     Ok(Info {
         id,
-        name: desc.name.get().to_owned(),
-        description: desc.description.get().to_owned(),
-        version: desc.plugin_version.get().to_owned(),
-        interface: desc.version,
+        name: (*desc).name.get().to_owned(),
+        description: (*desc).description.get().to_owned(),
+        version: (*desc).plugin_version.get().to_owned(),
+        interface: version,
         updates,
         program_min,
         program_max,
@@ -77,16 +83,17 @@ pub unsafe fn info(desc: &'static Descriptor) -> Result<Info, String> {
 /// Start the plugin of `desc`; `dir` is its folder.
 ///
 /// # Safety
-/// `desc` must be a plugin's descriptor that [`info`] accepted.
-pub unsafe fn start(desc: &'static Descriptor, host: &'static HostApi, dir: &Path) -> Result<Arc<dyn FolderPlugin>, String> {
+/// `desc` must be a plugin's descriptor that [`info`] accepted (a pointer,
+/// as there).
+pub unsafe fn start(desc: *const Descriptor, host: &'static HostApi, dir: &Path) -> Result<Arc<dyn FolderPlugin>, String> {
     let Info { id, interface, .. } = info(desc)?;
     let dir = Wide::encode(dir);
     let mut error = String::new();
-    let this = (desc.start)(host, Wide::of(&dir), &StrOut::new(&mut error));
+    let this = ((*desc).start)(host, Wide::of(&dir), &StrOut::new(&mut error));
     if this.is_null() {
         return Err(if error.is_empty() { "the plugin didn't start".into() } else { error });
     }
-    Ok(Arc::new(Remote { id, interface, this, vt: &*desc.vtable }))
+    Ok(Arc::new(Remote { id, interface, this, vt: (*desc).vtable }))
 }
 
 /// A started plugin in a DLL.
@@ -96,7 +103,10 @@ struct Remote {
     /// in its [`VTable`].
     interface: u32,
     this: *mut c_void,
-    vt: &'static VTable,
+    /// Its functions. A pointer, never a reference: the table of a plugin
+    /// built for an older interface is shorter than [`VTable`], and only
+    /// the fields its version has are read (`(*vt).field`, see [`Remote::has`]).
+    vt: *const VTable,
 }
 
 impl Remote {
@@ -112,7 +122,7 @@ unsafe impl Sync for Remote {}
 
 impl Drop for Remote {
     fn drop(&mut self) {
-        unsafe { (self.vt.free)(self.this) }
+        unsafe { ((*self.vt).free)(self.this) }
     }
 }
 
@@ -164,17 +174,17 @@ impl FolderPlugin for Remote {
     }
 
     fn handles(&self, name: &str) -> bool {
-        unsafe { (self.vt.handles)(self.this, Str::new(name)) }
+        unsafe { ((*self.vt).handles)(self.this, Str::new(name)) }
     }
 
     fn can_write(&self, file: &Path) -> bool {
         let file = Wide::encode(file);
-        unsafe { (self.vt.can_write)(self.this, Wide::of(&file)) }
+        unsafe { ((*self.vt).can_write)(self.this, Wide::of(&file)) }
     }
 
     fn status(&self) -> String {
         let mut s = String::new();
-        unsafe { (self.vt.status)(self.this, &StrOut::new(&mut s)) };
+        unsafe { ((*self.vt).status)(self.this, &StrOut::new(&mut s)) };
         s
     }
 
@@ -183,14 +193,14 @@ impl FolderPlugin for Remote {
         let mut items: Vec<Item> = Vec::new();
         let mut complete = false;
         let out = ItemOut { ctx: &mut items as *mut Vec<Item> as *mut c_void, put: put_item };
-        call(|e| unsafe { (self.vt.list)(self.this, Wide::of(&file), Str::new(folder), &out, &mut complete, e) })?;
+        call(|e| unsafe { ((*self.vt).list)(self.this, Wide::of(&file), Str::new(folder), &out, &mut complete, e) })?;
         Ok(Index { items, complete })
     }
 
     fn extract(&self, file: &Path, items: &[String], out: &Path, progress: &mut Progress) -> io::Result<()> {
         let (file, out) = (Wide::encode(file), Wide::encode(out));
         let strs: Vec<Str> = items.iter().map(|s| Str::new(s)).collect();
-        with_progress(progress, |p| call(|e| unsafe { (self.vt.extract)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), Wide::of(&out), p, e) }))
+        with_progress(progress, |p| call(|e| unsafe { ((*self.vt).extract)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), Wide::of(&out), p, e) }))
     }
 
     fn stream(&self, file: &Path, items: &[String], sink: &mut dyn Sink) -> io::Result<()> {
@@ -201,73 +211,82 @@ impl FolderPlugin for Remote {
         let strs: Vec<Str> = items.iter().map(|s| Str::new(s)).collect();
         let mut s: &mut dyn Sink = sink;
         let sf = SinkFn { ctx: &mut s as *mut &mut dyn Sink as *mut c_void, begin: sink_begin, write: sink_write };
-        call(|e| unsafe { (self.vt.stream)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), &sf, e) })
+        call(|e| unsafe { ((*self.vt).stream)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), &sf, e) })
     }
     fn add(&self, file: &Path, items: &[(PathBuf, String)], progress: &mut Progress) -> io::Result<()> {
         let file = Wide::encode(file);
         let disk_units: Vec<Vec<u16>> = items.iter().map(|(d, _)| Wide::encode(d)).collect();
         let disk: Vec<Wide> = disk_units.iter().map(|u| Wide::of(u)).collect();
         let inner: Vec<Str> = items.iter().map(|(_, i)| Str::new(i)).collect();
-        with_progress(progress, |p| call(|e| unsafe { (self.vt.add)(self.this, Wide::of(&file), disk.as_ptr(), inner.as_ptr(), items.len(), p, e) }))
+        with_progress(progress, |p| call(|e| unsafe { ((*self.vt).add)(self.this, Wide::of(&file), disk.as_ptr(), inner.as_ptr(), items.len(), p, e) }))
     }
 
     fn delete(&self, file: &Path, items: &[String], progress: &mut Progress) -> io::Result<()> {
         let file = Wide::encode(file);
         let strs: Vec<Str> = items.iter().map(|s| Str::new(s)).collect();
-        with_progress(progress, |p| call(|e| unsafe { (self.vt.delete)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), p, e) }))
+        with_progress(progress, |p| call(|e| unsafe { ((*self.vt).delete)(self.this, Wide::of(&file), strs.as_ptr(), strs.len(), p, e) }))
     }
 
     fn rename(&self, file: &Path, old: &str, new: &str, progress: &mut Progress) -> io::Result<()> {
         let file = Wide::encode(file);
-        with_progress(progress, |p| call(|e| unsafe { (self.vt.rename)(self.this, Wide::of(&file), Str::new(old), Str::new(new), p, e) }))
+        with_progress(progress, |p| call(|e| unsafe { ((*self.vt).rename)(self.this, Wide::of(&file), Str::new(old), Str::new(new), p, e) }))
     }
 
     fn mkdir(&self, file: &Path, inner: &str, progress: &mut Progress) -> io::Result<()> {
         let file = Wide::encode(file);
-        with_progress(progress, |p| call(|e| unsafe { (self.vt.mkdir)(self.this, Wide::of(&file), Str::new(inner), p, e) }))
+        with_progress(progress, |p| call(|e| unsafe { ((*self.vt).mkdir)(self.this, Wide::of(&file), Str::new(inner), p, e) }))
     }
 
     fn commands(&self) -> Vec<Command> {
         let mut s = String::new();
-        unsafe { (self.vt.commands)(self.this, &StrOut::new(&mut s)) };
+        unsafe { ((*self.vt).commands)(self.this, &StrOut::new(&mut s)) };
         crate::ui::decode_commands(&s)
     }
 
     fn item_commands(&self) -> Option<Vec<Command>> {
         let mut s = String::new();
-        unsafe { (self.vt.commands)(self.this, &StrOut::new(&mut s)) };
+        unsafe { ((*self.vt).commands)(self.this, &StrOut::new(&mut s)) };
         crate::ui::decode_item_commands(&s)
+    }
+
+    fn hotkeys(&self) -> Vec<Hotkey> {
+        if !self.has(10) {
+            return Vec::new();
+        }
+        let mut s = String::new();
+        unsafe { ((*self.vt).hotkeys)(self.this, &StrOut::new(&mut s)) };
+        crate::ui::decode_hotkeys(&s)
     }
 
     fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
         let values = crate::ui::encode_values(input);
         let mut reply = String::new();
         let out = StrOut::new(&mut reply);
-        call(|e| unsafe { (self.vt.run)(self.this, Str::new(command), Str::new(&values), &out, e) })?;
+        call(|e| unsafe { ((*self.vt).run)(self.this, Str::new(command), Str::new(&values), &out, e) })?;
         crate::ui::decode_reply(&reply).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "the plugin sent a damaged reply"))
     }
 
     fn close(&self, root: &Path) {
         let root = Wide::encode(root);
-        unsafe { (self.vt.close)(self.this, Wide::of(&root)) }
+        unsafe { ((*self.vt).close)(self.this, Wide::of(&root)) }
     }
 
     fn activity(&self, root: &Path) -> Activity {
         let root = Wide::encode(root);
         let mut text = String::new();
-        let running = unsafe { (self.vt.activity)(self.this, Wide::of(&root), &StrOut::new(&mut text)) };
+        let running = unsafe { ((*self.vt).activity)(self.this, Wide::of(&root), &StrOut::new(&mut text)) };
         Activity { running, text }
     }
 
     fn stop(&self, root: &Path) {
         let root = Wide::encode(root);
-        unsafe { (self.vt.stop)(self.this, Wide::of(&root)) }
+        unsafe { ((*self.vt).stop)(self.this, Wide::of(&root)) }
     }
 
     fn real_path(&self, file: &Path, inner: &str) -> Option<PathBuf> {
         let file = Wide::encode(file);
         let mut out = None;
-        unsafe { (self.vt.real_path)(self.this, Wide::of(&file), Str::new(inner), &PathOut::new(&mut out)) };
+        unsafe { ((*self.vt).real_path)(self.this, Wide::of(&file), Str::new(inner), &PathOut::new(&mut out)) };
         out
     }
 
@@ -276,7 +295,7 @@ impl FolderPlugin for Remote {
             return Vec::new();
         }
         let mut s = String::new();
-        unsafe { (self.vt.openers)(self.this, &StrOut::new(&mut s)) };
+        unsafe { ((*self.vt).openers)(self.this, &StrOut::new(&mut s)) };
         crate::ui::decode_openers(&s)
     }
 
@@ -286,7 +305,7 @@ impl FolderPlugin for Remote {
         }
         let file = Wide::encode(file);
         let options = crate::ui::encode_values(options);
-        call(|e| unsafe { (self.vt.open_file)(self.this, Str::new(opener), Wide::of(&file), Str::new(&options), e) })
+        call(|e| unsafe { ((*self.vt).open_file)(self.this, Str::new(opener), Wide::of(&file), Str::new(&options), e) })
     }
 
     fn marks(&self, file: &Path, folder: &str) -> Vec<(String, ItemMark)> {
@@ -295,7 +314,7 @@ impl FolderPlugin for Remote {
         }
         let file = Wide::encode(file);
         let mut s = String::new();
-        unsafe { (self.vt.marks)(self.this, Wide::of(&file), Str::new(folder), &StrOut::new(&mut s)) };
+        unsafe { ((*self.vt).marks)(self.this, Wide::of(&file), Str::new(folder), &StrOut::new(&mut s)) };
         crate::ui::decode_marks(&s)
     }
 }
@@ -378,6 +397,9 @@ mod tests {
         }
         fn commands(&self) -> Vec<Command> {
             vec![Command { id: "open".into(), label: "Open memory…".into() }]
+        }
+        fn hotkeys(&self) -> Vec<Hotkey> {
+            vec![Hotkey { command: "open".into(), label: String::new(), keys: vec!["Ctrl+Shift+M".into()] }]
         }
         fn run(&self, command: &str, input: &Values) -> io::Result<Reply> {
             match command {
@@ -466,10 +488,17 @@ mod tests {
                 program_max: "0.9.0".into(),
             }
         );
-        // a plugin built for interface 5 has no program range
-        static FIVE: Descriptor = Descriptor { version: 5, ..crate::export::descriptor::<Mem>(&VTABLE) };
-        let five = unsafe { super::info(&FIVE) }.unwrap();
-        assert_eq!((five.program_min.as_str(), five.program_max.as_str(), five.interface), ("", "", 5));
+        // a plugin built for interface 5 has a descriptor without the fields
+        // of 6 (the program range), really shorter: it has no range, and it starts
+        const WORDS: usize = std::mem::size_of::<Descriptor>() / std::mem::size_of::<usize>();
+        let range = 2 * std::mem::size_of::<Str>() / std::mem::size_of::<usize>();
+        let full = Descriptor { version: 5, ..crate::export::descriptor::<Mem>(&VTABLE) };
+        let five: &'static mut [usize] = Box::leak(vec![0usize; WORDS - range].into_boxed_slice());
+        unsafe { std::ptr::copy_nonoverlapping(&full as *const Descriptor as *const usize, five.as_mut_ptr(), WORDS - range) };
+        let five = five.as_ptr() as *const Descriptor;
+        let info5 = unsafe { super::info(five) }.unwrap();
+        assert_eq!((info5.program_min.as_str(), info5.program_max.as_str(), info5.interface, info5.id.as_str()), ("", "", 5, "mem"));
+        assert!(unsafe { start(five, &HOST, Path::new("C:\\plugins\\mem")) }.is_ok());
         assert_eq!(unsafe { start(&DESCRIPTOR, &HOST, Path::new("C:\\x\\bad")) }.err().unwrap(), "C:\\x\\bad is bad");
         let p = unsafe { start(&DESCRIPTOR, &HOST, Path::new("C:\\plugins\\mem")) }.unwrap();
         let t = std::env::temp_dir().join(format!("sal-plugin-api-{}", std::process::id()));
@@ -532,6 +561,7 @@ mod tests {
 
         // commands, forms and connections cross the interface too
         assert_eq!(p.commands(), [Command { id: "open".into(), label: "Open memory…".into() }]);
+        assert_eq!(p.hotkeys(), [Hotkey { command: "open".into(), label: String::new(), keys: vec!["Ctrl+Shift+M".into()] }]);
         let input: Values = [("panel".to_owned(), r"C:\x".to_owned())].into();
         let Reply::Form(form) = p.run("open", &input).unwrap() else { panic!("no form") };
         assert_eq!((form.command.as_str(), form.fields[0].value.as_str()), ("mount", r"C:\x"));
@@ -563,5 +593,20 @@ mod tests {
         assert!(unsafe { info(&NEWER) }.unwrap_err().contains("another version"));
         static OLDER: Descriptor = Descriptor { version: MIN_VERSION - 1, ..crate::export::descriptor::<Mem>(&VTABLE) };
         assert!(unsafe { info(&OLDER) }.unwrap_err().contains("another version"));
+    }
+
+    /// A plugin built for interface 9 has a table without `hotkeys` (the
+    /// last function, added in 10), really shorter: nothing past its end is
+    /// asked for, its commands work.
+    #[test]
+    fn older_plugins_have_no_hotkeys() {
+        const WORDS: usize = std::mem::size_of::<VTable>() / std::mem::size_of::<usize>();
+        // the table as interface 9 has it: every function but the last
+        let nine: &'static mut [usize; WORDS - 1] = Box::leak(Box::new([0; WORDS - 1]));
+        unsafe { std::ptr::copy_nonoverlapping(&VTABLE as *const VTable as *const usize, nine.as_mut_ptr(), WORDS - 1) };
+        let desc: *const Descriptor = Box::leak(Box::new(Descriptor { version: 9, vtable: nine.as_ptr() as *const VTable, ..crate::export::descriptor::<Mem>(&VTABLE) }));
+        let p = unsafe { start(desc, &HOST, Path::new(r"C:\plugins\mem")) }.unwrap();
+        assert!(p.hotkeys().is_empty());
+        assert_eq!(p.commands().len(), 1);
     }
 }

@@ -168,7 +168,7 @@ Plugins only ever see the file and inner paths. `sal_plugin_api::join_inner(base
 | `const VERSION` | The plugin's own version, a semantic version: `env!("CARGO_PKG_VERSION")`. It is independent of the program's; Settings shows it and the update check compares it. |
 | `const PROGRAM_MIN`, `const PROGRAM_MAX` | The oldest and newest RustySalamander versions the plugin works with (both included); empty, the default, for no limit. See [Versions and updates](#versions-and-updates). |
 | `const UPDATES` | Where newer versions are published (`Updates { repo, tag, changelog }`); the default `Updates::NONE` means nowhere. See [Versions and updates](#versions-and-updates). |
-| `fn start(dir) -> Result<Self, String>` | Called when the plugin is turned on. `dir` is the plugin's folder. Load libraries from there. Save files only in `sal_plugin_api::data_dir(dir)`: that is `dir` itself (the program is portable), or `%APPDATA%\RustySalamander\plugins\<folder name>` once the user switched the program to multi-user mode (create it before writing). Never write to `%APPDATA%`, the registry or anywhere else on your own. Check what the user types into your forms before using it: refuse control characters where a protocol has lines (an FTP command ends at a line break), and quote what goes into a shell command (the SCP plugin's `quote`). On failure, return a message telling the user what is wrong and how to fix it (e.g. "7z.dll is missing in …"). It is shown in Settings, so translate it. |
+| `fn start(dir) -> Result<Self, String>` | Called when the plugin is turned on. `dir` is the plugin's folder. Load libraries from there. Save files only in `sal_plugin_api::data_dir(dir)`: that is `dir` itself (the program is portable), or `%APPDATA%\RustySalamander\plugins\<folder name>` once the user switched the program to multi-user mode (create it before writing). Never write to `%APPDATA%`, the registry or anywhere else on your own. To remember small choices between sessions (a window's toolbar), use `sal_plugin_api::settings::Settings::load(dir)`: it reads and writes `settings.toml` there, and saves each value as soon as it changes (`set_bool`, `set`); a copy shares the values, so windows on their own threads can each hold one. Check what the user types into your forms before using it: refuse control characters where a protocol has lines (an FTP command ends at a line break), and quote what goes into a shell command (the SCP plugin's `quote`). On failure, return a message telling the user what is wrong and how to fix it (e.g. "7z.dll is missing in …"). It is shown in Settings, so translate it. |
 
 The program reads `ID`, `NAME`, `DESCRIPTION`, `VERSION` and `UPDATES` without calling `start`, even for plugins that are turned off. Keep them `const`.
 
@@ -307,6 +307,38 @@ An error from `run` is shown as a message, except `Interrupted`.
 - `folder` is the inner path to start in (`home\me`).
 
 The program remembers the connection and shows it in the active panel. The file operations then reach the plugin with `Mount::root()` as `file`. The menu offers **Disconnect** for a panel showing a connection. Disconnecting, turning the plugin off or quitting calls `close(root)`, and panels showing the connection go back to the folder they showed before. A plugin keeps its connections itself, typically in a `Mutex<HashMap<authority, Connection>>`.
+
+### Keyboard shortcuts
+
+Every command of the Plugins menu can be given keys by the user in **Settings → Plugins**, under the plugin's description; from then on, pressing them in the panels runs the command exactly as the menu does (`run(id, values)` with the values above). The Plugins menu shows each command's first key.
+
+A plugin can also give its commands keys of their own with `hotkeys()` (interface 10, RustySalamander 0.9.17-beta):
+
+```rust
+fn hotkeys(&self) -> Vec<Hotkey> {
+    vec![
+        // the menu command "compare", with a key until the user changes it
+        Hotkey { command: "compare".into(), label: String::new(), keys: vec!["Ctrl+Shift+K".into()] },
+        // a command that isn't in the Plugins menu, with no key yet: the user may give it one
+        Hotkey { command: "swap".into(), label: tr("Swap the compared sides"), keys: Vec::new() },
+    ]
+}
+```
+
+- `command` is the id `run` gets; `label` (translated) names it in Settings, empty for the label of the menu command with that id.
+- `keys` are written as Settings writes them: `Ctrl`, `Alt`, `Shift` and a key joined with `+` (`Alt+F9`, `Ctrl+Shift+K`, `Ctrl+Backslash`). Case doesn't matter.
+- The program's own shortcuts win over a plugin's, and of two plugins the one listed first in Settings wins; Settings marks such a key in red and says what it collides with. Pick keys the program leaves free (Settings → Keyboard shortcuts lists them).
+- `hotkeys()` is asked for when the plugin starts and when the language changes, so labels can be translated with `tr`.
+
+The user's keys are kept apart from the program's configuration, in `shortcuts.toml` in the plugin's own folder (in its folder under `%APPDATA%\RustySalamander\plugins` in multi-user mode, like everything else it saves; see `data_dir`), and only where they differ from the plugin's, in a table named by the plugin's id (plugins side by side in one folder share the file, each in its own table):
+
+```toml
+[compare]
+compare = ["Alt+F9"]   # instead of Ctrl+Shift+K
+swap = []              # no key at all
+```
+
+Updates of the plugin keep the file. A key the plugin adds in a newer version reaches users who haven't changed that command's keys.
 
 ### Results windows
 
@@ -487,7 +519,7 @@ Test with names outside the ASCII range (`složka 日本\soubor 🦎.txt`), larg
 
 Commands, replies, forms and values cross the interface as text: lists of strings, each encoded as `<length>:<bytes>,` (`sal_plugin_api::ui::encode`). This way forms can gain new kinds of fields without changing the function table.
 
-**Versioning.** `abi::VERSION` is the interface version (now 9: `open_window` and `repaint` in the host API, with `WindowFns`, for windows the program shows; 8 added `stream` in the function table, `SinkFn` and `ERR_UNSUPPORTED`; 7 added item marks, `marks` in the function table, and the reply `panels`; 6 added the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
+**Versioning.** `abi::VERSION` is the interface version (now 10: `hotkeys` in the function table, the plugin's keyboard shortcuts; 9 added `open_window` and `repaint` in the host API, with `WindowFns`, for windows the program shows; 8 added `stream` in the function table, `SinkFn` and `ERR_UNSUPPORTED`; 7 added item marks, `marks` in the function table, and the reply `panels`; 6 added the program versions a plugin works with, `program_min` and `program_max` in the descriptor; 5 added the plugin's own version and update source, `openers` and `open_file`). From version 5 on, the interface only grows: a new version adds fields at the end of `Descriptor` and `VTable`, each documented with the version that added it, and the program keeps running plugins built for any version from `abi::MIN_VERSION` on. It reads a field or calls a function only when the plugin's version has it, and uses the trait's default otherwise. Plugins built for a newer interface than the program's, or older than `MIN_VERSION`, are skipped and listed in Settings with the reason. Plugins built for 4 or earlier must be rebuilt.
 
 ## Checklist
 
@@ -499,6 +531,7 @@ Commands, replies, forms and values cross the interface as text: lists of string
 - [ ] `list` returns a complete index, or the asked-for folder (`complete: false`), and `NotFound` for what isn't a folder.
 - [ ] `stream` sends the files of `items` without a temporary copy, if the plugin can read their contents (items dragged out of the window are then read only as they are copied); `begin` false skips a file, `write` false stops.
 - [ ] Menu commands have translated labels; forms use `Password` for secrets, which are never saved or logged.
+- [ ] Keys in `hotkeys()`, if any, are ones the program leaves free.
 - [ ] Connections are released in `close`; names from a server are checked before they become paths on disk.
 - [ ] `can_write` is false for anything you can't change safely.
 - [ ] `extract` handles folders recursively and empty folders, and rejects `..` in inner paths.

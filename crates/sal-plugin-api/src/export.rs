@@ -103,6 +103,7 @@ pub const fn vtable<T: Plugin>() -> VTable {
         open_file: open_file::<T>,
         marks: marks::<T>,
         stream: stream::<T>,
+        hotkeys: hotkeys::<T>,
     }
 }
 
@@ -295,6 +296,12 @@ unsafe extern "C" fn stop<T: Plugin>(this: *mut c_void, root: Wide) {
 unsafe extern "C" fn openers<T: Plugin>(this: *mut c_void, out: *const StrOut) {
     let list = catch_unwind(|| me::<T>(this).openers()).unwrap_or_default();
     (*out).send(&crate::ui::encode_openers(&list));
+}
+
+/// [`VTable::hotkeys`].
+unsafe extern "C" fn hotkeys<T: Plugin>(this: *mut c_void, out: *const StrOut) {
+    let list = catch_unwind(|| me::<T>(this).hotkeys()).unwrap_or_default();
+    (*out).send(&crate::ui::encode_hotkeys(&list));
 }
 
 /// [`VTable::open_file`].

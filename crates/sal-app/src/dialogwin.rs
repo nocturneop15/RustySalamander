@@ -194,6 +194,9 @@ impl DialogWin {
                     // Windows' own animation (showing, closing) follows the setting
                     if let Some(h) = place.hwnd {
                         sal_ui::native::set_transitions(h, self.animations);
+                        // Ctrl+C and the like, which egui gets only as copy and
+                        // paste: a shortcut being recorded in Settings may be one
+                        crate::rawkeys::install(h);
                     }
                 }
                 // shown in an earlier frame (a show asked for now happens after this frame)

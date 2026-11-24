@@ -195,6 +195,16 @@ pub fn well_frame(style: &Style) -> Frame {
     Frame::none().fill(style.visuals.extreme_bg_color).inner_margin(GAP)
 }
 
+/// The color of a strip that stands out from the text beside it in both
+/// themes: a panel's footer, the line numbers beside a text.
+pub fn strip_color(v: &egui::Visuals) -> Color32 {
+    if v.dark_mode {
+        v.extreme_bg_color
+    } else {
+        Color32::from_gray(222)
+    }
+}
+
 /// A strip of buttons, colored `fill`, inside a window.
 pub fn strip_frame(fill: Color32) -> Frame {
     Frame::none().fill(fill).inner_margin(STRIP_MARGIN).rounding(2.0)

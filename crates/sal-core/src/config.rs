@@ -146,7 +146,7 @@ pub enum ContextMenuStyle {
     Full,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct PanelConfig {
@@ -154,7 +154,7 @@ pub struct PanelConfig {
     pub sort: SortSpec,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub left: PanelConfig,
@@ -521,19 +521,248 @@ impl Config {
         self.save_to(&config_path())
     }
 
-    /// Save to the file `p`.
+    /// Save to the file `p`: whole or not at all (written beside it, then
+    /// put in its place), so a stop half way never leaves it damaged.
     pub fn save_to(&self, p: &Path) -> io::Result<()> {
         let s = toml::to_string_pretty(self).map_err(io::Error::other)?;
-        if let Some(dir) = p.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        fs::write(p, s)
+        locked(p, || replace(p, &s))
     }
+
+    /// Save to the file `p` the settings changed since `base` (the settings
+    /// as this copy of the program last saved or read them), keeping what
+    /// another copy saved there meanwhile: the file is read, the values that
+    /// differ between `base` and these are put in it (others left as they
+    /// are), and it is written whole, with no other copy doing the same
+    /// meanwhile. A value both changed: these win (saved last).
+    pub fn save_changes(&self, base: &Config, p: &Path) -> io::Result<()> {
+        let value = |c: &Config| toml::Value::try_from(c).map_err(io::Error::other);
+        let (mine, base) = (value(self)?, value(base)?);
+        locked(p, || {
+            // no file: these settings; one that can't be read isn't written over
+            // (an error: tried again later); a damaged one (not TOML, or a
+            // setting of the wrong kind, which would read as all defaults) is
+            // kept beside, and these settings saved in its place
+            let on_disk = match fs::read_to_string(p) {
+                Ok(text) => match toml::from_str::<toml::Value>(&text) {
+                    Ok(v) if v.is_table() && toml::from_str::<Config>(&text).is_ok() => Some(v),
+                    _ => {
+                        keep_damaged(p)?;
+                        None
+                    }
+                },
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            let merged = match on_disk {
+                Some(mut disk) => {
+                    merge_changes(&mut disk, &base, &mine);
+                    let text = toml::to_string(&disk).map_err(io::Error::other)?;
+                    // read strictly: never all defaults in place of what was there,
+                    // never these settings alone over the other copy's (an error:
+                    // the file stays as it is); then through parse, which carries
+                    // over what older versions saved
+                    toml::from_str::<Config>(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("the settings merged with the file's aren't valid: {e}")))?;
+                    Config::parse(&text)
+                }
+                None => self.clone(),
+            };
+            replace(p, &toml::to_string_pretty(&merged).map_err(io::Error::other)?)
+        })
+    }
+}
+
+/// The settings that are one of a choice of kinds ([`OpenWith`]: a
+/// program, Notepad, or a plugin's viewer): merged whole, never mixed with
+/// another kind.
+const WHOLE_CHOICES: &[&str] = &["view_with", "edit_with"];
+
+/// Put into `disk` (the whole settings, a table) the values that differ
+/// between `base` and `mine`; the rest of `disk` stays. A setting that is
+/// a table is merged key by key, and so deeper (a panel; the shortcuts, a
+/// map: another copy's keys of other actions stay, also ones it added),
+/// but for [`WHOLE_CHOICES`], put in whole.
+fn merge_changes(disk: &mut toml::Value, base: &toml::Value, mine: &toml::Value) {
+    merge_tables(disk, base, mine, WHOLE_CHOICES);
+}
+
+/// [`merge_changes`] of one table; `whole`: its keys put in whole.
+fn merge_tables(disk: &mut toml::Value, base: &toml::Value, mine: &toml::Value, whole: &[&str]) {
+    let (Some(d), Some(b), Some(m)) = (disk.as_table_mut(), base.as_table(), mine.as_table()) else {
+        if base != mine {
+            *disk = mine.clone();
+        }
+        return;
+    };
+    let keys: std::collections::BTreeSet<&String> = b.keys().chain(m.keys()).collect();
+    for k in keys {
+        match (b.get(k), m.get(k)) {
+            (bv, mv) if bv == mv => {}
+            (Some(bv), Some(mv)) if !whole.contains(&k.as_str()) && bv.is_table() && mv.is_table() && d.get(k).is_some_and(toml::Value::is_table) => {
+                merge_tables(d.get_mut(k).unwrap(), bv, mv, &[]);
+            }
+            (_, Some(mv)) => {
+                d.insert(k.clone(), mv.clone());
+            }
+            (_, None) => {
+                d.remove(k);
+            }
+        }
+    }
+}
+
+/// Run `f` (reading, changing and writing the file `p`) holding its lock:
+/// the file `<p>.lock` beside it, locked for this program alone, so another
+/// copy of the program saving the same file waits until `f` is done.
+pub fn locked<R>(p: &Path, f: impl FnOnce() -> io::Result<R>) -> io::Result<R> {
+    if let Some(dir) = p.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let mut name = p.file_name().unwrap_or_default().to_owned();
+    name.push(".lock");
+    let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(p.with_file_name(name))?;
+    lock.lock()?;
+    let result = f();
+    let _ = lock.unlock();
+    result
+}
+
+/// Keep the damaged file `p` (one that can't be understood) beside it as
+/// `<p>.damaged` (replacing an older one), before a new one is written in
+/// its place: nothing in it is lost.
+fn keep_damaged(p: &Path) -> io::Result<()> {
+    let mut name = p.file_name().unwrap_or_default().to_owned();
+    name.push(".damaged");
+    let kept = p.with_file_name(name);
+    let _ = fs::remove_file(&kept);
+    fs::rename(p, kept)
+}
+
+/// Write `text` as the file `p`, whole or not at all: written beside it
+/// under a name of its own (no other save, here or in another copy of the
+/// program, writes the same one), then put in its place.
+fn replace(p: &Path, text: &str) -> io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut name = p.file_name().unwrap_or_default().to_owned();
+    name.push(format!(".{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let tmp = p.with_file_name(name);
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, p).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two copies of the program, each saving what it changed: what the
+    /// other saved meanwhile is kept, also inside a table (a panel), and
+    /// also when both save at the same time.
+    #[test]
+    fn copies_keep_each_others_changes() {
+        let t = std::env::temp_dir().join(format!("sal-config-two-{}", std::process::id()));
+        let p = t.join("config.toml");
+        let start = Config::default();
+        start.save_to(&p).unwrap();
+        // both start from the same settings
+        let (mut one, mut two) = (start.clone(), start.clone());
+        one.show_hidden = !start.show_hidden;
+        one.left.path = "C:\\one".into();
+        one.save_changes(&start, &p).unwrap();
+        two.language = "cs".into();
+        two.right.path = "D:\\two".into();
+        two.save_changes(&start, &p).unwrap();
+        let saved = Config::parse(&fs::read_to_string(&p).unwrap());
+        assert_eq!(saved.show_hidden, one.show_hidden, "the first copy's change kept");
+        assert_eq!(saved.left.path, "C:\\one");
+        assert_eq!((saved.language.as_str(), saved.right.path.as_str()), ("cs", "D:\\two"));
+        // a value both changed: the later save wins
+        let mut three = start.clone();
+        three.language = "en".into();
+        three.save_changes(&start, &p).unwrap();
+        assert_eq!(Config::parse(&fs::read_to_string(&p).unwrap()).language, "en");
+        // at the same time, over and over: every change kept
+        let threads: Vec<_> = [0usize, 1]
+            .into_iter()
+            .map(|who| {
+                let (p, start) = (p.clone(), start.clone());
+                std::thread::spawn(move || {
+                    let mut base = start.clone();
+                    for i in 0..20 {
+                        let mut mine = base.clone();
+                        mine.hot_paths.resize(10, String::new());
+                        mine.hot_paths[who] = format!("{who}-{i}");
+                        if who == 0 {
+                            mine.left.path = format!("L{i}");
+                        } else {
+                            mine.right.path = format!("R{i}");
+                        }
+                        mine.save_changes(&base, &p).unwrap();
+                        base = mine;
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|h| h.join().unwrap());
+        let saved = Config::parse(&fs::read_to_string(&p).unwrap());
+        assert_eq!((saved.left.path.as_str(), saved.right.path.as_str()), ("L19", "R19"), "both copies' panels");
+        // a choice of kinds changed in both: one copy edits the viewer program's
+        // command, the other turns to a plugin's viewer; each a setting more.
+        // Never mixed: the later save's whole choice, both other settings kept
+        let mut base = start.clone();
+        base.view_with = OpenWith::Program { command: "a.exe".into(), shell: false };
+        base.save_to(&p).unwrap();
+        let (mut edits, mut turns) = (base.clone(), base.clone());
+        turns.view_with = OpenWith::Plugin { plugin: "viewer".into(), opener: "text".into() };
+        turns.font_size = 21.0;
+        turns.save_changes(&base, &p).unwrap();
+        edits.view_with = OpenWith::Program { command: "b.exe".into(), shell: true };
+        edits.language = "de".into();
+        edits.save_changes(&base, &p).unwrap();
+        let text = fs::read_to_string(&p).unwrap();
+        let saved: Config = toml::from_str(&text).expect("valid");
+        assert_eq!(saved.view_with, edits.view_with, "the later choice whole: {text}");
+        assert_eq!((saved.font_size, saved.language.as_str()), (21.0, "de"), "both copies' other settings");
+        // both start with no shortcuts of their own and each adds one for a
+        // different action, then one changes and removes: every change kept
+        let (mut first, mut second) = (saved.clone(), saved.clone());
+        assert!(saved.shortcuts.is_empty());
+        first.shortcuts.insert("copy".into(), vec!["Ctrl+F5".into()]);
+        first.save_changes(&saved, &p).unwrap();
+        second.shortcuts.insert("move".into(), vec!["Ctrl+F6".into()]);
+        second.save_changes(&saved, &p).unwrap();
+        let both = Config::parse(&fs::read_to_string(&p).unwrap());
+        assert_eq!(both.shortcuts.get("copy").map(Vec::as_slice), Some(&["Ctrl+F5".to_owned()][..]), "{:?}", both.shortcuts);
+        assert_eq!(both.shortcuts.get("move").map(Vec::as_slice), Some(&["Ctrl+F6".to_owned()][..]));
+        let first_base = first.clone();
+        first.shortcuts.remove("copy");
+        first.shortcuts.insert("find".into(), vec![]);
+        first.save_changes(&first_base, &p).unwrap();
+        let after = Config::parse(&fs::read_to_string(&p).unwrap());
+        assert_eq!(after.shortcuts.keys().collect::<Vec<_>>(), ["find", "move"], "the removal and the addition, the other's kept");
+        // a damaged file: kept beside, these settings saved in its place
+        fs::write(&p, "not [ toml").unwrap();
+        one.save_changes(&start, &p).unwrap();
+        assert_eq!(fs::read_to_string(t.join("config.toml.damaged")).unwrap(), "not [ toml");
+        assert_eq!(Config::parse(&fs::read_to_string(&p).unwrap()).left.path, "C:\\one");
+        // TOML, but a setting of the wrong kind beside settings of the user's:
+        // it would read as all defaults; the file is kept beside too
+        let wrong = "show_hidden = \"yes\"\nlanguage = \"cs\"\nfont_size = 17.0\n";
+        fs::write(&p, wrong).unwrap();
+        let mut four = start.clone();
+        four.right.path = "E:\\four".into();
+        four.save_changes(&start, &p).unwrap();
+        assert_eq!(fs::read_to_string(t.join("config.toml.damaged")).unwrap(), wrong, "the user's settings kept");
+        let saved = Config::parse(&fs::read_to_string(&p).unwrap());
+        assert_eq!(saved.right.path, "E:\\four", "this copy's settings saved");
+        // one that can't be read (a folder in its place): an error, not written over
+        let dir = t.join("folder.toml");
+        fs::create_dir(&dir).unwrap();
+        assert!(one.save_changes(&start, &dir).is_err());
+        assert!(dir.is_dir());
+        fs::remove_dir_all(&t).unwrap();
+    }
 
     #[test]
     fn portable_location() {

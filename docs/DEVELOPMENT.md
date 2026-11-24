@@ -4,7 +4,7 @@ How to build, test and change the program. For writing plugins, see [PLUGINS.md]
 
 ## Setup
 
-- **Rust** 1.88 or newer with the GNU toolchain: `rustup default stable-x86_64-pc-windows-gnu`, plus `rustup component add clippy rustfmt`.
+- **Rust** 1.89 or newer with the GNU toolchain: `rustup default stable-x86_64-pc-windows-gnu`, plus `rustup component add clippy rustfmt`.
 - **MinGW-w64** with gcc, g++ and `mingw32-make`, e.g. `winget install BrechtSanders.WinLibs.POSIX.UCRT`.
 - In each new PowerShell window, run `. .\env.ps1` in the repository root. It puts cargo and the WinLibs MinGW on `PATH`. If your MinGW is somewhere else, put its `bin` on `PATH` yourself.
 

@@ -63,8 +63,16 @@ mod imp {
     pub fn take() -> Vec<(Key, Modifiers)> {
         PRESSED.with(|p| std::mem::take(&mut *p.borrow_mut()))
     }
+
+    /// A key as the window would have seen it (for tests).
+    #[cfg(test)]
+    pub fn push(key: Key, m: Modifiers) {
+        PRESSED.with(|p| p.borrow_mut().push((key, m)));
+    }
 }
 
+#[cfg(all(windows, test))]
+pub use imp::push;
 #[cfg(windows)]
 pub use imp::{install, take};
 
