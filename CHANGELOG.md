@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.18-beta (2026-11-25)
+
+- **Fixed:** two folders compared in the panels no longer go out of step: when the other panel can't go into the same folder (its side has no such folder), the panel that moved goes back and the status bar says why. **Compare 0.1.10-alpha** compares each folder again as the panels go into it, and folders only one side has can't be opened.
+
 ## 0.9.17-beta (2026-11-24)
 
 - **Keyboard shortcuts for plugins' commands:** every command of the Plugins menu can be given keys in **Settings → Plugins**, under the plugin's description (recorded with **+ Add…**, removed with a click, **Reset this plugin's shortcuts**); pressed in the panels, they run the command as the menu does, and the menu shows them. A plugin can give its commands keys of its own, and offer commands that aren't in the menu (plugin interface 10, `FolderPlugin::hotkeys`). The keys are kept in each plugin's own folder, in `shortcuts.toml`, not in the program's configuration. The program's shortcuts win over a plugin's; Settings marks a key bound twice and says to what, in the plugin's list and in **Keyboard shortcuts** alike. **F1** lists the plugins' keys too.

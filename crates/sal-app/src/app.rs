@@ -1309,7 +1309,16 @@ impl App {
             };
             let target = roots[1 - leader].join(inside[leader].as_ref().unwrap());
             let focus = now[1 - leader].file_name().map(|n| n.to_string_lossy().into_owned());
-            let _ = self.panels[1 - leader].load(&target, hidden, focus.as_deref());
+            if let Err(e) = self.panels[1 - leader].load(&target, hidden, focus.as_deref()) {
+                // the other side has no such folder: the panel that moved
+                // goes back, so the two stay in the same folder
+                let back = self.linked_at[leader].clone();
+                let name = location::parent_of(&now[leader]).filter(|(p, _)| *p == back).map(|(_, n)| n);
+                if self.panels[leader].load(&back, hidden, name.as_deref()).is_err() {
+                    let _ = self.panels[leader].load(&roots[leader], hidden, None);
+                }
+                self.status = e;
+            }
         }
         self.linked_at = [self.panels[0].path().to_path_buf(), self.panels[1].path().to_path_buf()];
     }
