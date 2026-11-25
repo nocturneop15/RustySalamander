@@ -2,6 +2,12 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `compare-v<version>` in the RustySalamander repository.
 
+## 0.1.10-alpha (2026-11-25)
+
+- **Folders compared stay in step:** going into a folder in one panel takes the other into the same folder, and that folder is compared again on the way in (and the one above on the way back), so what the panels show is what is on disk now, not what was there at the first comparison.
+- **Only folders both sides have can be gone into:** a folder that only the other side has (a placeholder) can't be opened, and neither can a folder only this side has; the status bar says why, and both panels stay where they were.
+- A folder on one side with a file of the same name on the other is shown as a folder on its side and as a file on the other.
+
 ## 0.1.9-alpha (2026-11-24)
 
 - **Line numbers can be turned off:** both texts show their line numbers from the start, as before; **Line numbers** in the toolbar or **Ctrl+L** turns them off and on for both sides together, and the texts then start at the edge. The numbers stand in a column of their own, in the colors of the panels' footer.

@@ -47,6 +47,8 @@ struct Job {
     stop: AtomicBool,
     /// Connections still open of the two (the job ends when both closed).
     views: AtomicU32,
+    /// The folder the panels are in, compared when they went into it.
+    at: Mutex<String>,
 }
 
 pub struct Compare {
@@ -162,7 +164,7 @@ impl Compare {
         let stop = AtomicBool::new(false);
         let comparison = Comparison::new(&left, &right, by, &stop)?;
         let id = self.next.fetch_add(1, Ordering::Relaxed).to_string();
-        let job = Arc::new(Job { comparison: Mutex::new(comparison), running: AtomicBool::new(false), stop, views: AtomicU32::new(2) });
+        let job = Arc::new(Job { comparison: Mutex::new(comparison), running: AtomicBool::new(false), stop, views: AtomicU32::new(2), at: Mutex::new(String::new()) });
         self.jobs.lock().unwrap().insert(id.clone(), job);
         let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
         Ok(Reply::Panels(Panels {
@@ -227,12 +229,28 @@ impl FolderPlugin for Compare {
     }
 
     /// Everything either side has in `folder`: this side's items, and
-    /// placeholders for what only the other side has.
+    /// placeholders for what only the other side has. Only a folder both
+    /// sides have can be gone into, and it is compared again when the panels
+    /// go into it (or back up to it).
     fn list(&self, file: &Path, folder: &str) -> io::Result<Index> {
         let (job, left, _) = self.job(file)?;
+        {
+            let mut at = job.at.lock().unwrap();
+            if *at != folder {
+                job.running.store(true, Ordering::Relaxed);
+                let r = job.comparison.lock().unwrap().refresh(folder, &job.stop);
+                job.running.store(false, Ordering::Relaxed);
+                r?;
+                *at = folder.to_owned();
+            }
+        }
         let c = job.comparison.lock().unwrap();
-        if !folder.is_empty() && !c.nodes.get(folder).is_some_and(|n| n.dir()) {
-            return Err(io::ErrorKind::NotFound.into());
+        if !folder.is_empty() {
+            let n = c.nodes.get(folder).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            let dir = |s: &Option<tree::Side>| s.as_ref().is_some_and(|s| s.dir);
+            if !(dir(&n.left) && dir(&n.right)) {
+                return Err(io::Error::new(io::ErrorKind::NotFound, trf("{name} is a folder on one side only: there is nothing to compare inside.", &[("name", &n.name)])));
+            }
         }
         let items = c
             .children(folder)
@@ -240,7 +258,7 @@ impl FolderPlugin for Compare {
                 let mine = if left { n.left.as_ref() } else { n.right.as_ref() };
                 Item {
                     path: path.clone(),
-                    dir: n.dir(),
+                    dir: mine.map_or(n.dir(), |s| s.dir),
                     size: mine.map_or(0, |s| s.size),
                     modified: mine.and_then(|s| s.modified),
                     attrs: mine.map_or(0, |s| s.attrs),
@@ -509,6 +527,22 @@ mod tests {
         fs::write(l.join("c.txt"), "c").unwrap();
         p.run("refresh", &values(&[("results", &sal_plugin_api::ui::path_value(&lr))])).unwrap();
         assert_eq!(names(&rr), ["a.txt", "b.txt", "c.txt"]);
+        // a folder only one side has can't be gone into; one both have is
+        // compared again when the panels go into it
+        fs::create_dir_all(l.join("only")).unwrap();
+        fs::create_dir_all(l.join("both")).unwrap();
+        fs::create_dir_all(r.join("both")).unwrap();
+        p.run("refresh", &values(&[("results", &sal_plugin_api::ui::path_value(&lr))])).unwrap();
+        assert!(p.list(&rr, "only").is_err(), "a placeholder folder");
+        assert!(p.list(&lr, "only").is_err(), "nothing to compare inside");
+        assert!(p.list(&lr, "both").unwrap().items.is_empty());
+        fs::write(r.join("both").join("new.txt"), "n").unwrap();
+        assert!(p.list(&lr, "").is_ok());
+        assert_eq!(names(&lr), ["a.txt", "b.txt", "both", "c.txt", "only"]);
+        let inside = |root: &Path| p.list(root, "both").unwrap().items.into_iter().map(|i| i.path).collect::<Vec<_>>();
+        assert_eq!(inside(&lr), ["both\\new.txt"], "compared again on the way in");
+        let marks: HashMap<String, ItemMark> = p.marks(&lr, "").into_iter().collect();
+        assert_eq!(marks["both"], ItemMark::Different);
         // both connections closed: the comparison is gone
         p.close(&lr);
         assert!(p.list(&rr, "").is_ok());
