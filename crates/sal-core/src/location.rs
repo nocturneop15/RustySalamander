@@ -275,6 +275,8 @@ pub fn list_shares(server: &str) -> io::Result<Vec<Share>> {
         return Err(match r {
             5 => io::Error::new(io::ErrorKind::PermissionDenied, format!(r"access to \\{server} denied")),
             53 => io::Error::new(io::ErrorKind::NotFound, format!(r"network path \\{server} not found")),
+            // Windows' own words, and the code that tells a login is needed
+            r if LOGON_ERRORS.contains(&(r as i32)) => io::Error::from_raw_os_error(r as i32),
             _ => io::Error::other(format!(r"cannot list shares of \\{server} (error {r})")),
         });
     }
@@ -297,6 +299,72 @@ pub fn list_shares(server: &str) -> io::Result<Vec<Share>> {
 #[cfg(not(windows))]
 pub fn list_shares(_server: &str) -> io::Result<Vec<Share>> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "share browsing is only supported on Windows"))
+}
+
+/// Windows' errors of a server that wants a login the user hasn't given:
+/// logon failure, wrong password, not logged on.
+const LOGON_ERRORS: [i32; 3] = [1326, 86, 1244];
+
+/// What to connect to for `path` with a login: `\\server\share` of a path
+/// on a share (also in the `\\?\UNC\` form), `\\server\IPC$` for a
+/// server's list of shares; `None` for a path not on a server.
+pub fn logon_target(path: &Path) -> Option<String> {
+    if let Some(server) = unc_server(path) {
+        return Some(format!(r"\\{server}\IPC$"));
+    }
+    let s = display_path(path);
+    let rest = s.strip_prefix(r"\\?\UNC\").or_else(|| s.strip_prefix(r"\\")).or_else(|| s.strip_prefix("//"))?;
+    let mut parts = rest.split(['\\', '/']).filter(|x| !x.is_empty());
+    let (server, share) = (parts.next()?, parts.next()?);
+    if server == "?" || server == "." {
+        return None;
+    }
+    Some(format!(r"\\{server}\{share}"))
+}
+
+/// Whether reading `path` failed with `e` because the server wants a login
+/// Windows has none for (or one it wasn't allowed with): then a login
+/// asked for ([`connect_interactive`]) may let it be read, as in Explorer.
+pub fn needs_logon(path: &Path, e: &io::Error) -> bool {
+    logon_target(path).is_some() && (e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error().is_some_and(|c| LOGON_ERRORS.contains(&c)))
+}
+
+/// Connect to the server of `path` as Explorer does when it has no login
+/// for it: Windows asks for a user name and password (over the window
+/// `owner`), offering to remember them. `Ok(true)` connected, `Ok(false)`
+/// the user cancelled.
+#[cfg(windows)]
+pub fn connect_interactive(path: &Path, owner: isize) -> io::Result<bool> {
+    use windows_sys::Win32::NetworkManagement::WNet::{WNetAddConnection3W, CONNECT_INTERACTIVE, CONNECT_PROMPT, NETRESOURCEW, RESOURCETYPE_DISK};
+    let target = logon_target(path).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a path on a server"))?;
+    let mut remote: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+    // IPC$ (a server's list of shares) is no disk; Windows takes any type there
+    let kind = if target.ends_with("IPC$") { 0 } else { RESOURCETYPE_DISK };
+    let res = NETRESOURCEW {
+        dwScope: 0,
+        dwType: kind,
+        dwDisplayType: 0,
+        dwUsage: 0,
+        lpLocalName: std::ptr::null_mut(),
+        lpRemoteName: remote.as_mut_ptr(),
+        lpComment: std::ptr::null_mut(),
+        lpProvider: std::ptr::null_mut(),
+    };
+    // no drive letter, nothing kept in the user's profile: only the login
+    // for this server, as Explorer makes it
+    let r = unsafe { WNetAddConnection3W(owner as _, &res, std::ptr::null(), std::ptr::null(), CONNECT_INTERACTIVE | CONNECT_PROMPT) };
+    match r {
+        0 => Ok(true),
+        // ERROR_CANCELLED
+        1223 => Ok(false),
+        code => Err(io::Error::from_raw_os_error(code as i32)),
+    }
+}
+
+/// Elsewhere there are no servers to log on to.
+#[cfg(not(windows))]
+pub fn connect_interactive(_path: &Path, _owner: isize) -> io::Result<bool> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "only on Windows"))
 }
 
 /// Panel entries for a server's shares; administrative (`$`) shares only with `show_hidden`.
@@ -367,6 +435,17 @@ mod tests {
         assert_eq!(unc_server(Path::new(r"\\nas\share")), None);
         assert_eq!(unc_server(Path::new(r"\\?\C:\")), None);
         assert_eq!(unc_server(Path::new(r"C:\")), None);
+        // what a login is asked for
+        assert_eq!(logon_target(Path::new(r"\\nas")), Some(r"\\nas\IPC$".into()));
+        assert_eq!(logon_target(Path::new(r"\\nas\share\a\b")), Some(r"\\nas\share".into()));
+        assert_eq!(logon_target(Path::new(r"\\?\UNC\nas\share\a")), Some(r"\\nas\share".into()));
+        assert_eq!(logon_target(Path::new(r"\\?\C:\x")), None);
+        assert_eq!(logon_target(Path::new(r"\\.\PhysicalDrive0")), None);
+        assert_eq!(logon_target(Path::new(r"C:\x")), None);
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(needs_logon(Path::new(r"\\nas\share"), &denied) && !needs_logon(Path::new(r"C:\x"), &denied));
+        assert!(needs_logon(Path::new(r"\\nas\share"), &io::Error::from_raw_os_error(1326)));
+        assert!(!needs_logon(Path::new(r"\\nas\share"), &io::Error::from_raw_os_error(53)), "not found: no login helps");
         assert_eq!(unc_share_root(Path::new(r"\\nas\data\")), Some(("nas".into(), "data".into())));
         assert_eq!(unc_share_root(Path::new(r"\\nas\data\x")), None);
     }

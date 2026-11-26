@@ -7011,6 +7011,10 @@ impl App {
     pub fn update_frame(&mut self, ctx: &egui::Context, hwnd: Option<isize>, drew: Option<f32>) {
         if let (None, Some(h)) = (self.hwnd, hwnd) {
             self.hwnd = Some(h);
+            // a server's login is asked for over the window
+            for p in &mut self.panels {
+                p.owner = Some(h);
+            }
             crate::rawkeys::install(h);
             self.drop_shared = dnd::register(h, ctx.clone());
             crate::debuglog::write(format!("startup: drop target {}", if self.drop_shared.is_some() { "registered" } else { "not registered" }));

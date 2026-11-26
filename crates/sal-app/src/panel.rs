@@ -2,6 +2,7 @@
 //! (replaces `CFilesWindow`, `fileswn*.cpp`).
 
 use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
@@ -70,6 +71,9 @@ pub struct Panel {
     pub plugins: Vec<Arc<dyn FolderPlugin>>,
     /// Set while the panel shows a folder inside an archive.
     pub archive: Option<ArchiveView>,
+    /// The program's window: a server that wants a login asks for it over
+    /// this (none: not asked, as in the tests).
+    pub owner: Option<isize>,
 }
 
 /// The listing of a folder inside an archive. Paths are virtual: the archive
@@ -149,6 +153,7 @@ impl Panel {
             size_order_for: None,
             plugins,
             archive: None,
+            owner: None,
         };
         let start = if path.is_empty() { fallback_dir() } else { PathBuf::from(path) };
         // a connection no plugin has open (now): its folders are nowhere
@@ -232,8 +237,17 @@ impl Panel {
             }
             Source::Unconnected => Err(unconnected(path)),
             Source::Disk => {
-                let listing = listing::read_dir(path, vis, self.sort).map_err(|e| format!("{}: {e}", display_path(path)))?;
-                Ok((listing, None))
+                let listing = match listing::read_dir(path, vis, self.sort) {
+                    // a server without a login Windows knows: asked for, as
+                    // Explorer does, and read again once given
+                    Err(e) if self.owner.is_some() && location::needs_logon(path, &e) => match location::connect_interactive(path, self.owner.unwrap_or_default()) {
+                        Ok(true) => listing::read_dir(path, vis, self.sort),
+                        Ok(false) => Err(e),
+                        Err(why) => Err(io::Error::new(why.kind(), format!("{e} ({why})"))),
+                    },
+                    r => r,
+                };
+                Ok((listing.map_err(|e| format!("{}: {e}", display_path(path)))?, None))
             }
         }
     }
