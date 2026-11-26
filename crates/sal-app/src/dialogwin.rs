@@ -243,7 +243,15 @@ impl DialogWin {
                         raise(own);
                         activate(own);
                     }
-                    place.disabled_others.get_or_insert_with(Vec::new).extend(newly);
+                    let others = place.disabled_others.get_or_insert_with(Vec::new);
+                    others.extend(newly);
+                    // a disabled window brought forward (a viewer's taskbar
+                    // button: not owned by the main window, it has no way to
+                    // the question): the question comes forward instead
+                    if foreground_window().is_some_and(|f| others.contains(&f)) {
+                        diag(key, "a disabled window came forward: the question instead");
+                        set_foreground(own);
+                    }
                 }
             }
         });
@@ -455,6 +463,20 @@ fn our_app_is_foreground() -> bool {
     }
 }
 
+/// The window in the foreground, if any.
+#[cfg(windows)]
+fn foreground_window() -> Option<isize> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let h = unsafe { GetForegroundWindow() }.0 as isize;
+    (h != 0).then_some(h)
+}
+
+/// Elsewhere none is known.
+#[cfg(not(windows))]
+fn foreground_window() -> Option<isize> {
+    None
+}
+
 /// Bring the window `h` to the front.
 #[cfg(windows)]
 fn set_foreground(h: isize) {
@@ -535,3 +557,21 @@ fn set_owner(owner: isize, title: &str) -> Option<isize> {
 fn set_owner(_: isize, _: &str) -> Option<isize> {
     Some(0)
 }
+
+/// Make the window `h` owned by `owner` (a plugin's modal window): it stays
+/// above the main window, and activating the disabled main window (its
+/// taskbar button) activates it instead.
+#[cfg(windows)]
+pub fn own(h: isize, owner: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWLP_HWNDPARENT};
+    if h != owner {
+        unsafe {
+            SetWindowLongPtrW(HWND(h as *mut _), GWLP_HWNDPARENT, owner);
+        }
+    }
+}
+
+/// Elsewhere windows have no owners.
+#[cfg(not(windows))]
+pub fn own(_: isize, _: isize) {}

@@ -2353,7 +2353,9 @@ impl App {
             Browse::Viewer | Browse::RuleViewer => tr("Choose the viewer (F3)"),
             Browse::Terminal => tr("Choose the terminal"),
         };
-        let Some(program) = shellmenu::pick_program(self.hwnd, title) else { return };
+        // over Settings, where its Browse… buttons are (not the main window it keeps disabled)
+        let owner = dialogwin::hwnd(&self.dialog_places, "settings").or(self.hwnd);
+        let Some(program) = shellmenu::pick_program(owner, title) else { return };
         match target {
             Browse::Editor => {
                 self.cfg.editor = program.clone();
@@ -5136,10 +5138,14 @@ impl App {
             // a device)
             let current = values.get(&id).and_then(|v| form_place(v).ok().flatten()).filter(|p| fileops::validate_location(p).is_ok_and(|k| k == fileops::PlaceKind::Local));
             let folder = form.fields.iter().any(|f| f.id == id && f.kind == plugins::FieldKind::Folder);
+            // over the form, not the main window it keeps disabled: owned by
+            // that, the picker could go behind the form, and closing it
+            // would let the main window take input with the form still open
+            let owner = dialogwin::hwnd(&self.dialog_places, "plugin-form").or(self.hwnd);
             let picked = if folder {
-                shellmenu::pick_folder(self.hwnd, tr("Choose a folder"), current.as_deref())
+                shellmenu::pick_folder(owner, tr("Choose a folder"), current.as_deref())
             } else {
-                shellmenu::pick_file(self.hwnd, tr("Choose a file"), current.as_deref())
+                shellmenu::pick_file(owner, tr("Choose a file"), current.as_deref())
             };
             if let Some(path) = picked {
                 values.insert(id, path.to_string_lossy().into_owned());
@@ -8089,7 +8095,8 @@ mod tests {
         fs::write(l.join("only left.txt"), "x").unwrap();
         fs::write(l.join("docs 🦎").join("inner.txt"), "nový obsah").unwrap();
         fs::write(r.join("docs 🦎").join("inner.txt"), "starý").unwrap();
-        let dir = t.path().join("plugins");
+        // the loaded DLL couldn't be deleted with the temporary folder
+        let dir = plugins::tests::test_plugins("compare");
         fs::create_dir_all(dir.join("compare").join("lang")).unwrap();
         fs::copy(built.join("compare").join("compare.spl"), dir.join("compare").join("compare.spl")).unwrap();
         let mut found = plugins::Plugins::scan(Some(&dir));
@@ -8288,7 +8295,8 @@ mod tests {
         fs::write(data.join("poznámky.txt"), "hello world").unwrap();
         fs::write(data.join("docs").join("prázdný.txt"), "nic").unwrap();
         fs::write(data.join("docs").join("staré").join("dopis 🦎.txt"), "Hello again").unwrap();
-        let dir = t.path().join("plugins");
+        // the loaded DLL couldn't be deleted with the temporary folder
+        let dir = plugins::tests::test_plugins("search");
         fs::create_dir_all(dir.join("search").join("lang")).unwrap();
         fs::copy(built.join("search").join("search.spl"), dir.join("search").join("search.spl")).unwrap();
         let mut found = plugins::Plugins::scan(Some(&dir));
@@ -8358,7 +8366,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(rows, 3, "found again, with the new file");
+        // deleted outside the program: gone after searching again (else at
+        // the plugin's next look at the disk, a few seconds later)
         fs::remove_file(data.join("nová.txt")).unwrap();
+        ui.app.results_act(&ctx, Act::Refresh);
+        wait_plugin(&mut ui);
+        for _ in 0..400 {
+            ui.frames(1);
+            rows = ui.app.results.as_ref().unwrap().rows().len();
+            if rows == 2 && !search.activity(&root).running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(rows, 2, "searched again, without it");
 
         // the drive selector's name for them
         if let Some(dir) = std::env::var_os("SNAPSHOT_DIR").map(PathBuf::from) {

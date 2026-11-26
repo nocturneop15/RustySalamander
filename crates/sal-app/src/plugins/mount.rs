@@ -826,9 +826,6 @@ mod win {
         if let Some(m) = mounts.iter().find(|m| m.file == file && m.stamp == stamp && m.plugin.id() == plugin.id()) {
             return Ok(m.clone());
         }
-        if mounts.is_empty() {
-            remove_stale();
-        }
         let failed = |e: io::Error| MountError::Failed(format!("{}: {e}", sal_core::encoding::display_path(file)));
         let base = super::super::temp_dir("mount").map_err(failed)?;
         // named after the archive or server, as copy dialogs show it
@@ -895,25 +892,6 @@ mod win {
     pub fn unmount_all() {
         let all = std::mem::take(&mut *MOUNTS.lock().unwrap());
         drop(all);
-    }
-
-    /// Mount folders of sessions that ended without removing them.
-    fn remove_stale() {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-        let base = std::env::temp_dir().join("RustySalamander");
-        let Ok(rd) = fs::read_dir(&base) else { return };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(pid) = name.strip_suffix("-mount").and_then(|n| n.split('-').next()).and_then(|p| p.parse::<u32>().ok()) else { continue };
-            if pid == std::process::id() {
-                continue;
-            }
-            let alive = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map(|h| unsafe { CloseHandle(h) }).is_ok();
-            if !alive {
-                let _ = fs::remove_dir_all(e.path());
-            }
-        }
     }
 
     /// What the callbacks work with.

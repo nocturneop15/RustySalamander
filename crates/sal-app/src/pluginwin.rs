@@ -180,6 +180,12 @@ impl Win {
                 // over the program's window, on its monitor
                 if let Some(owner) = owner {
                     sal_ui::native::place_over(h, owner, self.step);
+                    // a modal one owned by the (disabled) main window: a click on
+                    // the program's taskbar button brings it forward, else nothing
+                    // in the program takes the focus
+                    if self.modal {
+                        crate::dialogwin::own(h, owner);
+                    }
                 }
             }
             self.settled += 1;

@@ -482,13 +482,61 @@ pub fn stats(index: &Index, inner: &str) -> sal_core::fileops::DirSize {
 }
 
 /// A unique new folder for temporary files of this session, under
-/// `%TEMP%\RustySalamander`. [`cleanup_temp`] removes them all.
+/// `%TEMP%\RustySalamander`. [`cleanup_temp`] removes them all; the first
+/// one made also removes what sessions no longer running left there (one
+/// that crashed or was ended, a test run).
 pub fn temp_dir(tag: &str) -> io::Result<PathBuf> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
+    static STALE: std::sync::Once = std::sync::Once::new();
+    STALE.call_once(remove_stale_temp);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join("RustySalamander").join(format!("{}-{n}-{tag}", std::process::id()));
     fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Remove the temporary folders (`<pid>-<n>-<tag>`) of sessions no longer
+/// running.
+fn remove_stale_temp() {
+    let Ok(rd) = fs::read_dir(std::env::temp_dir().join("RustySalamander")) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name.split('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if pid != std::process::id() && !running(pid) {
+            let _ = remove_tree(&e.path());
+        }
+    }
+}
+
+/// Remove `path` with what is in it. A folder is first removed as it is:
+/// a mount's folder whose session ended (its contents shown by a program
+/// no longer there) can't be looked into, which `fs::remove_dir_all` does
+/// first, and fails. A link is removed, not what it leads to.
+fn remove_tree(path: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(path)?.is_dir() {
+        return fs::remove_file(path);
+    }
+    if fs::remove_dir(path).is_ok() {
+        return Ok(());
+    }
+    for e in fs::read_dir(path)? {
+        let _ = remove_tree(&e?.path());
+    }
+    fs::remove_dir(path)
+}
+
+/// Whether the process `pid` is running.
+#[cfg(windows)]
+fn running(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map(|h| unsafe { CloseHandle(h) }).is_ok()
+}
+
+/// Elsewhere every process counts as running: nothing is removed.
+#[cfg(not(windows))]
+fn running(_: u32) -> bool {
+    true
 }
 
 /// Remove this session's temporary folders.
@@ -498,7 +546,7 @@ pub fn cleanup_temp() {
     if let Ok(rd) = fs::read_dir(&base) {
         for e in rd.flatten() {
             if e.file_name().to_string_lossy().starts_with(&mine) {
-                let _ = fs::remove_dir_all(e.path());
+                let _ = remove_tree(&e.path());
             }
         }
     }
@@ -586,7 +634,7 @@ mod load_tests {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use sal_plugin_api::Progress;
 
@@ -652,26 +700,37 @@ mod tests {
         dir.join("7zip").join("7zip.spl").is_file().then_some(dir)
     }
 
+    /// An empty folder for a test that loads plugins' DLLs,
+    /// `target\<profile>\test-plugins\<name>`: not a temporary folder, as a
+    /// loaded DLL can't be deleted (its temporary folder would stay behind
+    /// in %TEMP%, 100 MB and more each run); the next run replaces it.
+    pub fn test_plugins(name: &str) -> PathBuf {
+        let dir = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().join("test-plugins").join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn finds_plugins_in_their_folders() {
-        let t = tempfile::tempdir().unwrap();
-        assert!(Plugins::scan(Some(t.path())).found.is_empty() && Plugins::scan(None).found.is_empty());
+        let t = test_plugins("finds_plugins_in_their_folders");
+        assert!(Plugins::scan(Some(t.as_path())).found.is_empty() && Plugins::scan(None).found.is_empty());
         // files that are not plugins
-        fs::create_dir(t.path().join("bad")).unwrap();
-        fs::write(t.path().join("bad").join("bad.spl"), "MZ, but not a DLL").unwrap();
-        fs::write(t.path().join("ignored.txt"), "x").unwrap();
+        fs::create_dir(t.as_path().join("bad")).unwrap();
+        fs::write(t.as_path().join("bad").join("bad.spl"), "MZ, but not a DLL").unwrap();
+        fs::write(t.as_path().join("ignored.txt"), "x").unwrap();
         let Some(built) = built_plugins() else {
             eprintln!("plugins not built; skipping");
             return;
         };
         // one copy in a folder of its own, one loose: the same plugin twice
-        let mine = t.path().join("7zip");
+        let mine = t.as_path().join("7zip");
         fs::create_dir(&mine).unwrap();
         for f in ["7zip.spl", "7z.dll"] {
             fs::copy(built.join("7zip").join(f), mine.join(f)).unwrap();
         }
-        fs::copy(built.join("7zip").join("7zip.spl"), t.path().join("dup.spl")).unwrap();
-        let mut p = Plugins::scan(Some(t.path()));
+        fs::copy(built.join("7zip").join("7zip.spl"), t.as_path().join("dup.spl")).unwrap();
+        let mut p = Plugins::scan(Some(t.as_path()));
         assert_eq!(p.found.iter().map(|f| f.info.id.as_str()).collect::<Vec<_>>(), ["7zip"]);
         assert_eq!(p.found[0].info.name, "7-Zip archives");
         let why: Vec<String> = p.broken.iter().map(|(f, e)| format!("{}: {e}", f.file_name().unwrap().to_string_lossy())).collect();
@@ -691,7 +750,7 @@ mod tests {
         p.start(&[]);
         assert!(Arc::ptr_eq(p.get("7zip").unwrap(), &again));
         // without 7z.dll it says why
-        let alone = t.path().join("alone");
+        let alone = t.as_path().join("alone");
         fs::create_dir_all(alone.join("7zip")).unwrap();
         fs::copy(built.join("7zip").join("7zip.spl"), alone.join("7zip").join("7zip.spl")).unwrap();
         let mut p = Plugins::scan(Some(&alone));

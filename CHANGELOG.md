@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.19-beta (2026-11-26)
+
+- **Search results reach a panel quickly:** with thousands of results, showing them in a panel, copying, deleting, opening or viewing them, dragging them out, putting them on the clipboard and their context menu all waited for every result to be looked at on disk again, once for each item chosen: with 5 000 results, many seconds, with all of them chosen far longer. **Search 0.5.6-alpha** keeps the results as they are shown and looks at the disk for files deleted meanwhile only now and then (every few seconds, more rarely on a slow drive); a panel reloading them reads them once, not twice.
+- **Fixed:** the program could not be brought back from the taskbar while a standard **Browse…** window was open from **Find** or **Settings**: it belonged to the main window, held up by the dialog, instead of to the dialog itself. A viewer's or a comparison's taskbar button, pressed while an operation asks what to do with a file, now brings that question forward instead of nothing; a plugin's window that holds up the main window belongs to it too.
+- **Temporary files of crashed sessions are removed:** files taken out of archives, downloaded changelogs and the like, left in `%TEMP%\RustySalamander` by a copy of the program that crashed or was ended, are removed when the next one first needs that folder; before, only its archives' and connections' folders were, and even those could stay.
+
 ## 0.9.18-beta (2026-11-25)
 
 - **Fixed:** two folders compared in the panels no longer go out of step: when the other panel can't go into the same folder (its side has no such folder), the panel that moved goes back and the status bar says why. **Compare 0.1.10-alpha** compares each folder again as the panels go into it, and folders only one side has can't be opened.

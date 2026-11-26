@@ -212,9 +212,19 @@ impl Panel {
     /// Read a folder: a directory, or a folder inside an archive when the
     /// path goes through a file a folder plugin handles.
     fn read(&mut self, path: &Path, vis: Visibility) -> Result<(Listing, Option<ArchiveView>), String> {
+        self.read_with(path, vis, None)
+    }
+
+    /// [`Self::read`], with the plugin's index for `path` when it was just
+    /// read (a reload looking whether the folder is still there): not asked
+    /// for again, which with thousands of items (search results) takes a while.
+    fn read_with(&mut self, path: &Path, vis: Visibility, known: Option<ArchiveView>) -> Result<(Listing, Option<ArchiveView>), String> {
         match source(&self.plugins, path) {
             Source::Plugin(plugin, file, inner) => {
-                let view = self.archive_view(&plugin, &file, inner)?;
+                let view = match known.filter(|v| v.file == file && v.inner == inner && v.plugin.id() == plugin.id()) {
+                    Some(v) => v,
+                    None => self.archive_view(&plugin, &file, inner)?,
+                };
                 if view.index.complete && !view.index.is_dir(&view.inner) {
                     return Err(format!("{}: {}", display_path(path), crate::i18n::tr("not found in the archive")));
                 }
@@ -271,7 +281,12 @@ impl Panel {
 
     /// Load a directory; on error the old listing is kept.
     pub fn load(&mut self, path: &Path, vis: Visibility, focus: Option<&str>) -> Result<(), String> {
-        let (listing, view) = self.read(path, vis)?;
+        self.load_with(path, vis, focus, None)
+    }
+
+    /// [`Self::load`] with the plugin's index for `path` already read.
+    fn load_with(&mut self, path: &Path, vis: Visibility, focus: Option<&str>, known: Option<ArchiveView>) -> Result<(), String> {
+        let (listing, view) = self.read_with(path, vis, known)?;
         // a background read still running is no longer wanted
         self.loading = None;
         self.install(listing, view, focus);
@@ -320,8 +335,16 @@ impl Panel {
         let mut target = path.clone();
         // directory vanished: climb to the nearest existing ancestor (inside
         // an archive: the nearest folder the archive still has)
-        let exists = |p: &Path, me: &mut Self| match source(&me.plugins, p) {
-            Source::Plugin(plugin, file, inner) => me.archive_view(&plugin, &file, inner.clone()).is_ok_and(|v| !v.index.complete || v.index.is_dir(&inner)),
+        // a plugin's index read to see it is there is the one shown
+        let mut known: Option<ArchiveView> = None;
+        let mut exists = |p: &Path, me: &mut Self| match source(&me.plugins, p) {
+            Source::Plugin(plugin, file, inner) => match me.archive_view(&plugin, &file, inner.clone()) {
+                Ok(v) if !v.index.complete || v.index.is_dir(&inner) => {
+                    known = Some(v);
+                    true
+                }
+                _ => false,
+            },
             Source::Disk => p.is_dir(),
             // nothing of it is anywhere now
             Source::Unconnected => false,
@@ -335,7 +358,7 @@ impl Panel {
                 None => break,
             }
         }
-        if self.load(&target, vis, focus.as_deref()).is_ok() {
+        if self.load_with(&target, vis, focus.as_deref(), known).is_ok() {
             for e in &mut self.listing.entries {
                 e.selected = selected.contains(&e.name);
             }
