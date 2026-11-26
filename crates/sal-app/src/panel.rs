@@ -128,7 +128,13 @@ fn unconnected(path: &Path) -> String {
 
 /// The folder a panel shows when its own can't be read.
 fn fallback_dir() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }))
+    home_dir().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" })))
+}
+
+/// The user's own folder (`%USERPROFILE%`), when it is there: where the
+/// program opens when the folder it was in can't be (or isn't kept).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).filter(|p| p.is_dir())
 }
 
 impl Panel {
@@ -264,6 +270,15 @@ impl Panel {
         Ok(ArchiveView { plugin: plugin.clone(), file: file.to_path_buf(), inner, index: Arc::new(index), marks, stamp, child_sizes: Default::default() })
     }
 
+    /// The folder and name of `path` when it is a file on disk (a quick
+    /// look at its attributes, not a listing).
+    fn file_in_folder(&self, path: &Path) -> Option<(PathBuf, String)> {
+        if !matches!(source(&self.plugins, path), Source::Disk) || !path.is_file() {
+            return None;
+        }
+        Some((path.parent()?.to_path_buf(), path.file_name()?.to_string_lossy().into_owned()))
+    }
+
     /// What tells a change of the shown folder: the directory itself, or the archive file.
     fn stamp_path(&self) -> &Path {
         self.archive.as_ref().map_or(self.listing.path.as_path(), |a| a.file.as_path())
@@ -300,7 +315,16 @@ impl Panel {
 
     /// [`Self::load`] with the plugin's index for `path` already read.
     fn load_with(&mut self, path: &Path, vis: Visibility, focus: Option<&str>, known: Option<ArchiveView>) -> Result<(), String> {
-        let (listing, view) = self.read_with(path, vis, known)?;
+        let (listing, view) = match self.read_with(path, vis, known) {
+            Ok(read) => read,
+            // a file (a path typed or pasted, one not readable before a
+            // login): its folder, on it. Looked at only once the path
+            // couldn't be read as a folder, so folders cost nothing more
+            Err(e) => match self.file_in_folder(path) {
+                Some((dir, name)) => return self.load_with(&dir, vis, Some(&name), None),
+                None => return Err(e),
+            },
+        };
         // a background read still running is no longer wanted
         self.loading = None;
         self.install(listing, view, focus);

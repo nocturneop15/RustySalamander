@@ -924,6 +924,13 @@ impl App {
     /// The application with `cfg` (the tests' entry point): panels on the
     /// folders given or saved, plugins started, the update check begun.
     pub fn with_config(ctx: &egui::Context, mut cfg: Config, args: Vec<String>) -> App {
+        // a server's folder saved by an older version: the user's own folder
+        // instead (one given on the command line is opened)
+        for saved in [&mut cfg.left, &mut cfg.right] {
+            if location::is_unc(Path::new(&saved.path)) {
+                saved.path = crate::panel::home_dir().map(|h| display_path(&h)).unwrap_or_default();
+            }
+        }
         if let Some(l) = args.first() {
             cfg.left.path = l.clone();
         }
@@ -1701,10 +1708,18 @@ impl App {
     /// Put the panels' folders, sort orders and the active panel into the
     /// settings.
     fn sync_config(&mut self) {
-        // a connection is gone at the next start: keep the folder saved before it
+        // a connection is gone at the next start: keep the folder saved before
+        // it. A server's folder isn't kept either: it could keep the next
+        // start waiting, or ask for a login before the window is there
         for (i, saved) in [(0, &mut self.cfg.left), (1, &mut self.cfg.right)] {
             let p = &self.panels[i];
-            let path = if location::virtual_parts(p.path()).is_some() { saved.path.clone() } else { display_path(p.path()) };
+            let path = if location::virtual_parts(p.path()).is_some() {
+                saved.path.clone()
+            } else if location::is_unc(p.path()) {
+                if location::is_unc(Path::new(&saved.path)) { crate::panel::home_dir().map(|h| display_path(&h)).unwrap_or_default() } else { saved.path.clone() }
+            } else {
+                display_path(p.path())
+            };
             *saved = PanelConfig { path, sort: p.sort };
         }
         self.cfg.right_active = self.active == 1;
@@ -2330,6 +2345,9 @@ impl App {
                 let root = self.cached_drives().iter().find(|d| d.letter.starts_with(letter)).map(|d| d.root.clone());
                 match root {
                     Some(root) => self.change_drive(idx, &root),
+                    // a network drive remembered but not connected: connected
+                    // again as it is opened, as in Explorer
+                    None if drives::mapped(letter).is_some() => self.panels[idx].load(Path::new(&format!("{letter}:\\")), hidden, None),
                     None => Err(trf("Drive {letter}: is not available", &[("letter", &letter)])),
                 }
             }
@@ -7766,7 +7784,10 @@ mod tests {
         ui.app.cfg.disabled_plugins = vec!["7zip".into()];
         ui.app.apply_plugins();
         assert_eq!(ui.app.panels[0].path(), t.path(), "left the archive");
-        assert!(ui.app.panels[0].load(&arc, ui.app.vis(), None).is_err());
+        // and like any file, opened as a folder it opens its folder, on it
+        ui.app.panels[0].load(&arc, ui.app.vis(), None).unwrap();
+        assert_eq!(ui.app.panels[0].path(), t.path());
+        assert_eq!(ui.cursor_name(), "archiv ž.zip");
     }
 
     #[test]

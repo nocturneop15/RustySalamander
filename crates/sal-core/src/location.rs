@@ -325,18 +325,38 @@ pub fn logon_target(path: &Path) -> Option<String> {
 /// Whether reading `path` failed with `e` because the server wants a login
 /// Windows has none for (or one it wasn't allowed with): then a login
 /// asked for ([`connect_interactive`]) may let it be read, as in Explorer.
+/// A mapped drive letter that isn't connected needs connecting whatever
+/// the error.
 pub fn needs_logon(path: &Path, e: &io::Error) -> bool {
-    logon_target(path).is_some() && (e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error().is_some_and(|c| LOGON_ERRORS.contains(&c)))
+    let login = e.kind() == io::ErrorKind::PermissionDenied || e.raw_os_error().is_some_and(|c| LOGON_ERRORS.contains(&c));
+    match crate::drives::letter_of(path).and_then(crate::drives::mapped) {
+        Some((_, connected)) => !connected || login,
+        None => logon_target(path).is_some() && login,
+    }
+}
+
+/// Whether `p` is a path on a server given by its name (`\\server`,
+/// `\\server\share\…`, `\\?\UNC\…`), not by a drive letter.
+pub fn is_unc(p: &Path) -> bool {
+    let s = display_path(p);
+    s.starts_with(r"\\?\UNC\") || ((s.starts_with(r"\\") || s.starts_with("//")) && !s.starts_with(r"\\?\") && !s.starts_with(r"\\.\"))
 }
 
 /// Connect to the server of `path` as Explorer does when it has no login
 /// for it: Windows asks for a user name and password (over the window
 /// `owner`), offering to remember them. `Ok(true)` connected, `Ok(false)`
 /// the user cancelled.
+/// A mapped drive letter not connected is connected again
+/// ([`crate::drives::reconnect`]); one connected logs on to its share.
 #[cfg(windows)]
 pub fn connect_interactive(path: &Path, owner: isize) -> io::Result<bool> {
     use windows_sys::Win32::NetworkManagement::WNet::{WNetAddConnection3W, CONNECT_INTERACTIVE, CONNECT_PROMPT, NETRESOURCEW, RESOURCETYPE_DISK};
-    let target = logon_target(path).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a path on a server"))?;
+    let target = match crate::drives::letter_of(path).and_then(|l| crate::drives::mapped(l).map(|m| (l, m))) {
+        Some((letter, (_, false))) => return crate::drives::reconnect(letter, owner),
+        Some((_, (remote, true))) => logon_target(Path::new(&remote)),
+        None => logon_target(path),
+    };
+    let target = target.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a path on a server"))?;
     let mut remote: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
     // IPC$ (a server's list of shares) is no disk; Windows takes any type there
     let kind = if target.ends_with("IPC$") { 0 } else { RESOURCETYPE_DISK };
@@ -446,6 +466,12 @@ mod tests {
         assert!(needs_logon(Path::new(r"\\nas\share"), &denied) && !needs_logon(Path::new(r"C:\x"), &denied));
         assert!(needs_logon(Path::new(r"\\nas\share"), &io::Error::from_raw_os_error(1326)));
         assert!(!needs_logon(Path::new(r"\\nas\share"), &io::Error::from_raw_os_error(53)), "not found: no login helps");
+        for unc in [r"\\nas", r"\\nas\share\x", r"\\?\UNC\nas\share", "//nas/share"] {
+            assert!(is_unc(Path::new(unc)), "{unc}");
+        }
+        for not in [r"C:\x", r"\\?\C:\x", r"\\.\PhysicalDrive0", r"x\y"] {
+            assert!(!is_unc(Path::new(not)), "{not}");
+        }
         assert_eq!(unc_share_root(Path::new(r"\\nas\data\")), Some(("nas".into(), "data".into())));
         assert_eq!(unc_share_root(Path::new(r"\\nas\data\x")), None);
     }

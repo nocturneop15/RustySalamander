@@ -122,16 +122,66 @@ pub fn list() -> Vec<Drive> {
 /// does not touch the network).
 #[cfg(windows)]
 fn remote_name(letter: char) -> Option<String> {
+    mapped(letter).map(|(remote, _)| remote)
+}
+
+/// The share the drive `letter` is mapped to, and whether it is connected
+/// now (`false`: remembered, but not connected: Explorer's red cross);
+/// `None` for a letter that isn't a mapped network drive. Reads the local
+/// mapping table, doesn't touch the network.
+#[cfg(windows)]
+pub fn mapped(letter: char) -> Option<(String, bool)> {
     use windows_sys::Win32::NetworkManagement::WNet::WNetGetConnectionW;
     let local = wide(format!("{letter}:").as_ref());
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
     let r = unsafe { WNetGetConnectionW(local.as_ptr(), buf.as_mut_ptr(), &mut len) };
-    if r != 0 {
-        return None;
-    }
+    // ERROR_CONNECTION_UNAVAIL: remembered, not connected (the name is given)
+    let connected = match r {
+        0 => true,
+        1201 => false,
+        _ => return None,
+    };
     let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
-    Some(String::from_utf16_lossy(&buf[..n])).filter(|s| !s.is_empty())
+    Some((String::from_utf16_lossy(&buf[..n]), connected)).filter(|(s, _)| !s.is_empty())
+}
+
+/// Elsewhere no drive letters.
+#[cfg(not(windows))]
+pub fn mapped(_letter: char) -> Option<(String, bool)> {
+    None
+}
+
+/// The drive letter of `p` (`C:\x`, `\\?\C:\x`), upper case.
+pub fn letter_of(p: &Path) -> Option<char> {
+    let s = p.to_string_lossy();
+    let b = s.trim_start_matches(r"\\?\").as_bytes();
+    (b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic()).then(|| (b[0] as char).to_ascii_uppercase())
+}
+
+/// Connect the mapped drive `letter` again, as Explorer does when one that
+/// isn't connected is opened: Windows asks for a login if the server wants
+/// one (over the window `owner`). `Ok(true)` connected, `Ok(false)` the user
+/// cancelled.
+#[cfg(windows)]
+pub fn reconnect(letter: char, owner: isize) -> std::io::Result<bool> {
+    #[link(name = "mpr")]
+    extern "system" {
+        fn WNetRestoreSingleConnectionW(hwnd: *mut std::ffi::c_void, device: *const u16, use_ui: i32) -> u32;
+    }
+    let device = wide(format!("{letter}:").as_ref());
+    match unsafe { WNetRestoreSingleConnectionW(owner as _, device.as_ptr(), 1) } {
+        0 => Ok(true),
+        // ERROR_CANCELLED
+        1223 => Ok(false),
+        code => Err(std::io::Error::from_raw_os_error(code as i32)),
+    }
+}
+
+/// Elsewhere no drive letters.
+#[cfg(not(windows))]
+pub fn reconnect(_letter: char, _owner: isize) -> std::io::Result<bool> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "only on Windows"))
 }
 
 /// Elsewhere the one root.
