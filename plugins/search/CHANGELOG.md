@@ -2,6 +2,10 @@
 
 The plugin's own versions, apart from the program's. Releases are tagged `search-v<version>` in the RustySalamander repository.
 
+## 0.5.6-alpha (2026-11-26)
+
+- **Thousands of results quickly:** the results are kept as each view shows them and found by name at once, no longer worked out again, and every one of them looked at on disk, for each listing and for each item chosen. Copying, deleting or opening many of them, and showing them in a panel, no longer takes seconds or minutes. Files deleted outside the program leave the results within a few seconds (more rarely on a slow drive); deleted from the results, at once. Many results with the same name are numbered in the flat list without starting from 2 for each of them.
+
 ## 0.5.5-alpha (2026-11-24)
 
 - **"Look in" is checked before anything is looked at there:** a device (`\\.\PhysicalDrive0`, `NUL`, `C:\x\CON\…`), a stream (`file:stream`), a drive without its folder (`C:x`) or a server's connection is refused with what is wrong, instead of being opened to see whether it is a folder. Folders on a disk and on a server are searched as before.

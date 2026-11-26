@@ -56,7 +56,35 @@ struct Job {
     took: Mutex<Option<Duration>>,
     /// Its connections not closed yet (the folders and the list).
     views: AtomicU32,
+    /// The results as its connections show them, worked out once for each
+    /// change of the results, and when they were last checked on disk.
+    shown: Mutex<Shown>,
 }
+
+/// The results as the connections show them (made again when they change).
+#[derive(Default)]
+struct Shown {
+    /// The folders view and the flat list, with the results' count and
+    /// [`Shown::edits`] they were made at.
+    views: [Option<(usize, u64, Arc<View>)>; 2],
+    /// Changes of the results other than new ones (removed, renamed).
+    edits: u64,
+    /// When the results were last checked on disk (`None`: due), and how
+    /// long that took.
+    checked: Option<Instant>,
+    took: Duration,
+}
+
+/// Results by their path in a connection.
+struct View {
+    rows: Vec<(String, Found)>,
+    /// The row of each path.
+    at: HashMap<String, usize>,
+}
+
+/// How often the results are checked on disk for files gone meanwhile, at
+/// least: more rarely the longer a check takes (a slow network drive).
+const CHECK_EVERY: Duration = Duration::from_secs(5);
 
 pub struct Search {
     next: AtomicU32,
@@ -209,7 +237,7 @@ impl Search {
     /// Run a search as the job `id` (a new one, or again in place of the
     /// one there: its connections stay, `views` of them open).
     fn run_job(&self, id: &str, dir: PathBuf, query: Query, views: u32) {
-        let job = Arc::new(Job { dir, query, state: State::default(), started: Instant::now(), took: Mutex::new(None), views: AtomicU32::new(views) });
+        let job = Arc::new(Job { dir, query, state: State::default(), started: Instant::now(), took: Mutex::new(None), views: AtomicU32::new(views), shown: Mutex::default() });
         if let Some(old) = self.jobs.lock().unwrap().insert(id.to_owned(), job.clone()) {
             old.state.stop.store(true, Ordering::Relaxed);
         }
@@ -217,6 +245,8 @@ impl Search {
             .name("search".into())
             .spawn(move || {
                 search(&job.dir, &job.query, &job.state);
+                // just found: nothing to check on disk for a while
+                job.shown.lock().unwrap().checked = Some(Instant::now());
                 *job.took.lock().unwrap() = Some(job.started.elapsed());
             })
             .expect("start the search thread");
@@ -235,28 +265,84 @@ impl Search {
     /// path there: below the folders leading to them, or (the flat list)
     /// each under its own name, numbered when names repeat.
     /// Results whose files are gone are dropped (deleted or moved meanwhile).
-    fn view(&self, job: &Job, flat: bool) -> Vec<(String, Found)> {
-        let mut found = job.state.found.lock().unwrap();
-        if job.took.lock().unwrap().is_some() {
-            found.retain(|f| f.real.symlink_metadata().is_ok());
+    /// Made once for each change of the results; the files gone are dropped
+    /// only by [`Self::check`].
+    fn view(&self, job: &Job, flat: bool) -> Arc<View> {
+        let found = job.state.found.lock().unwrap();
+        let mut shown = job.shown.lock().unwrap();
+        let edits = shown.edits;
+        let slot = &mut shown.views[usize::from(flat)];
+        if let Some((_, _, v)) = slot.as_ref().filter(|(n, e, _)| *n == found.len() && *e == edits) {
+            return v.clone();
         }
+        let rows = Self::rows(&found, flat);
+        let at = rows.iter().enumerate().map(|(i, (p, _))| (p.clone(), i)).collect();
+        let v = Arc::new(View { rows, at });
+        *slot = Some((found.len(), edits, v.clone()));
+        v
+    }
+
+    /// The results changed other than by new ones: the views are made again.
+    fn edited(job: &Job) {
+        job.shown.lock().unwrap().edits += 1;
+    }
+
+    /// Drop the results whose files are gone (deleted or moved meanwhile):
+    /// once the search is over, now and then (`now`: at once).
+    fn check(&self, job: &Job, now: bool) {
+        if job.took.lock().unwrap().is_none() {
+            return;
+        }
+        {
+            let shown = job.shown.lock().unwrap();
+            let due = shown.checked.is_none_or(|t| t.elapsed() >= CHECK_EVERY.max(shown.took * 20));
+            if !now && !due {
+                return;
+            }
+        }
+        // looked at on disk without holding the results (a slow drive)
+        let started = Instant::now();
+        let reals: Vec<PathBuf> = job.state.found.lock().unwrap().iter().map(|f| f.real.clone()).collect();
+        let gone: HashSet<PathBuf> = reals.into_iter().filter(|r| r.symlink_metadata().is_err()).collect();
+        let mut found = job.state.found.lock().unwrap();
+        let mut shown = job.shown.lock().unwrap();
+        if !gone.is_empty() {
+            found.retain(|f| !gone.contains(&f.real));
+            shown.edits += 1;
+        }
+        shown.checked = Some(Instant::now());
+        shown.took = started.elapsed();
+    }
+
+    /// The results as a connection shows them (see [`Self::view`]).
+    fn rows(found: &[Found], flat: bool) -> Vec<(String, Found)> {
         if !flat {
             return found.iter().map(|f| (f.inner.clone(), f.clone())).collect();
         }
         let mut taken = HashSet::new();
+        // the next number to try for each name: a name found many times
+        // isn't numbered from 2 again for each of them
+        let mut next: HashMap<String, usize> = HashMap::new();
         found
             .iter()
             .map(|f| {
                 let name = f.real.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let lower = name.to_lowercase();
+                if taken.insert(lower.clone()) {
+                    return (name, f.clone());
+                }
                 let (stem, ext) = match name.rsplit_once('.') {
                     Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
                     _ => (name.clone(), String::new()),
                 };
-                let (mut shown, mut n) = (name.clone(), 2);
-                while !taken.insert(shown.to_lowercase()) {
-                    shown = format!("{stem} ({n}){ext}");
-                    n += 1;
-                }
+                let n = next.entry(lower).or_insert(2);
+                let shown = loop {
+                    let shown = format!("{stem} ({n}){ext}");
+                    *n += 1;
+                    if taken.insert(shown.to_lowercase()) {
+                        break shown;
+                    }
+                };
                 (shown, f.clone())
             })
             .collect()
@@ -267,13 +353,15 @@ impl Search {
     /// shows what it really contains).
     fn resolve(&self, job: &Job, flat: bool, inner: &str) -> Option<Found> {
         let view = self.view(job, flat);
-        if let Some((_, f)) = view.iter().find(|(p, _)| p == inner) {
-            return Some(f.clone());
+        if let Some(&i) = view.at.get(inner) {
+            return Some(view.rows[i].1.clone());
         }
         if !flat {
             return None;
         }
-        let (p, f) = view.iter().find(|(p, f)| f.dir && inner.len() > p.len() && under(inner, p))?;
+        // inside a found folder: the flat list has it by its first part
+        let first = inner.split('\\').next().unwrap_or(inner);
+        let (p, f) = view.at.get(first).map(|&i| &view.rows[i]).filter(|(p, f)| f.dir && inner.len() > p.len() && under(inner, p))?;
         let real = inner[p.len() + 1..].split('\\').fold(f.real.clone(), |r, part| r.join(part));
         let md = real.symlink_metadata().ok()?;
         let attrs = attributes(&md);
@@ -288,12 +376,21 @@ impl Search {
         let mut chosen: Vec<(String, Found)> = if flat {
             items.iter().filter_map(|i| self.resolve(job, true, i).map(|f| (i.clone(), f))).collect()
         } else {
-            self.view(job, flat).into_iter().filter(|(p, _)| items.iter().any(|i| under(p, i))).collect()
+            // a result is chosen when it or a folder it is in is
+            let items: HashSet<&str> = items.iter().map(String::as_str).collect();
+            let picked = |p: &str| items.contains("") || ancestors(p).any(|a| items.contains(a));
+            self.view(job, flat).rows.iter().filter(|(p, _)| picked(p)).cloned().collect()
         };
-        let dirs: Vec<String> = chosen.iter().filter(|(_, f)| f.dir).map(|(p, _)| p.clone()).collect();
-        chosen.retain(|(p, _)| !dirs.iter().any(|d| d != p && under(p, d)));
+        // what is inside a chosen folder comes with it
+        let dirs: HashSet<String> = chosen.iter().filter(|(_, f)| f.dir).map(|(p, _)| p.clone()).collect();
+        chosen.retain(|(p, _)| !ancestors(p).skip(1).any(|a| dirs.contains(a)));
         chosen
     }
+}
+
+/// `path` and the folders it is in, nearest first: `a\b\c`, `a\b`, `a`.
+fn ancestors(path: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(Some(path), |p| p.rsplit_once('\\').map(|(parent, _)| parent))
 }
 
 /// The path of `real` below the searched folder `dir`, as the folders view
@@ -397,11 +494,15 @@ impl FolderPlugin for Search {
             }
             return Ok(Index { items, complete: false });
         }
+        // files deleted meanwhile leave the results (not at every listing:
+        // with thousands of results that's thousands of looks at the disk)
+        self.check(&job, false);
         let items = self
             .view(&job, flat)
-            .into_iter()
+            .rows
+            .iter()
             .enumerate()
-            .map(|(i, (path, f))| Item { path, dir: f.dir, size: f.size, modified: f.modified, attrs: f.attrs, index: Some(i as u32) })
+            .map(|(i, (path, f))| Item { path: path.clone(), dir: f.dir, size: f.size, modified: f.modified, attrs: f.attrs, index: Some(i as u32) })
             .collect();
         // the folders view is everything: the program browses its folders
         // itself; the flat list's found folders are asked for one by one
@@ -448,8 +549,13 @@ impl FolderPlugin for Search {
         }
         let paths: Vec<PathBuf> = chosen.iter().map(|(_, f)| f.real.clone()).collect();
         let r = recycle(&paths);
-        // whatever is gone now leaves the results, even after an error
-        job.state.found.lock().unwrap().retain(|f| f.real.symlink_metadata().is_ok());
+        // whatever of it is gone now leaves the results (with what was in
+        // it), even after an error
+        let gone: HashSet<&Path> = paths.iter().map(PathBuf::as_path).filter(|p| p.symlink_metadata().is_err()).collect();
+        if !gone.is_empty() {
+            job.state.found.lock().unwrap().retain(|f| !f.real.ancestors().any(|a| gone.contains(a)));
+            Self::edited(&job);
+        }
         progress(chosen.len() as u64, chosen.len() as u64);
         r
     }
@@ -476,6 +582,7 @@ impl FolderPlugin for Search {
                 g.inner = tree_inner(&job.dir, &g.real);
             }
         }
+        Self::edited(&job);
         Ok(())
     }
 
@@ -707,7 +814,10 @@ mod tests {
 
         // a file deleted elsewhere leaves the results
         fs::remove_file(root.join("a2.txt")).unwrap();
-        assert_eq!(p.list(&mount, "").unwrap().items.len(), 1);
+        assert_eq!(p.list(&mount, "").unwrap().items.len(), 2, "not looked for at every listing");
+        let (job, _) = p.job(&mount).unwrap();
+        job.shown.lock().unwrap().checked = None;
+        assert_eq!(p.list(&mount, "").unwrap().items.len(), 1, "once the check is due");
 
         // the flat list: files only, under their own names
         let list = Mount { authority: r.flat.clone(), ..r.mount.clone() }.root();
@@ -806,3 +916,4 @@ mod tests {
         assert!(p.list(&mount, "").unwrap().items.is_empty());
     }
 }
+
